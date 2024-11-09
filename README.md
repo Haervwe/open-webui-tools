@@ -57,6 +57,8 @@ Required configuration in Open WebUI:
 
 ## Usage
 
+(Make sure to turno on the tool in chat before requesting it)
+
 ### arXiv Search
 ```python
 # Example usage in your prompt
