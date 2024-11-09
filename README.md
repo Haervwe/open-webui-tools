@@ -58,14 +58,19 @@ Required configuration in Open WebUI:
 ## Usage
 
 (Make sure to turno on the tool in chat before requesting it)
+
+
 ![Screenshot from 2024-11-09 15-55-58](https://github.com/user-attachments/assets/2956997f-b14f-4087-99d8-48d11a79234b)
+
 
 ### arXiv Search
 ```python
 # Example usage in your prompt
 Search for recent papers about "quantum computing"
 ```
+
 ![Screenshot from 2024-11-09 15-56-51](https://github.com/user-attachments/assets/f3997b8f-e0e8-4db6-bb13-d4a41d1dda13)
+
 
 ### Image Generation
 ```python
@@ -75,7 +80,9 @@ Create an image of "a serene mountain landscape at sunset"
 # Specify format
 Create a landscape image of "a futuristic cityscape"
 ```
-![Screenshot from 2024-11-09 15-57-41](https://github.com/user-attachments/assets/6b12cec2-765b-4aed-b48b-ec2b1310ee39)
+
+![Screenshot from 2024-11-09 15-58-24](https://github.com/user-attachments/assets/11a2447e-06f3-4456-ab81-d2bcc6d981f3)
+
 
 ## Error Handling
 
