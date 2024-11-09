@@ -37,6 +37,8 @@ Features:
 2. Copy the contents of `arxiv_search_tool.py` and `create_image_hf.py` into your Tools
 3. For the Hugging Face Image Generator, configure the required API settings in the UI
 
+for those without an HF api key its free, (up to a certain point but very loose) create an account here [https://huggingface.co] and generate an API key in your profile settings, make sure to add permissions to call the serverless endpoints.
+
 ## Configuration
 
 ### arXiv Search Tool
@@ -93,7 +95,11 @@ MIT License
 ## Credits
 
 Developed by Haervwe
-- GitHub: https://github.com/Haervwe/open-webui-tools
+
+Credit to the amazing teams behind 
+[https://github.com/ollama/ollama]
+[https://github.com/open-webui/open-webui]
+And all model trainers out there providing these amazing tools.
 
 ## Support
 
