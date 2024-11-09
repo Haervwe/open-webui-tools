@@ -66,7 +66,7 @@ Required configuration in Open WebUI:
 ### arXiv Search
 ```python
 # Example usage in your prompt
-Search for recent papers about "quantum computing"
+Search for recent papers about "tree of thought"
 ```
 
 ![Screenshot from 2024-11-09 15-56-51](https://github.com/user-attachments/assets/f3997b8f-e0e8-4db6-bb13-d4a41d1dda13)
@@ -75,7 +75,7 @@ Search for recent papers about "quantum computing"
 ### Image Generation
 ```python
 # Example usage in your prompt
-Create an image of "a serene mountain landscape at sunset"
+Create an image of "beutiful horse running free"
 
 # Specify format
 Create a landscape image of "a futuristic cityscape"
