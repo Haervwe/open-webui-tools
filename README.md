@@ -57,15 +57,18 @@ for those without an HF api key its free, (up to a certain point but very loose)
 No configuration required! The tool works out of the box.
 
 ### arXiv Reseach MCTS Pipe
-    Admin:
-    -Tavily API KEY: required, create it in tavily.com
-    -Max Search Results: Amount of results fo fech form web search
-    -Arxiv Max Results: Amount of results to fetch for arxiv API
 
-    User:
-    -Tree Breadth: how many nodes per round are searched-
-    -Tree Depth: how many rounds are made.
-    -Exploration Weight: constant to control exploration vs exploitation, (a higher value means more exploration of new paths, while a low values makes the system stick with one option, range from 0 to 2 recommended)
+  - Admin:
+
+    - Tavily API KEY: required, create it in tavily.com
+    - Max Search Results: Amount of results fo fech form web search
+    - Arxiv Max Results: Amount of results to fetch for arxiv API
+
+  - User:
+
+    - Tree Breadth: how many nodes per round are searched-
+    - Tree Depth: how many rounds are made.
+    - Exploration Weight: constant to control exploration vs exploitation, (a higher value means more exploration of new paths, while a low values makes the system stick with one option, range from 0 to 2 recommended)
 
 ### Hugging Face Image Generator
 Required configuration in Open WebUI:
