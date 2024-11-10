@@ -1,7 +1,9 @@
 """
-title: arXiv Reseach MCTS Pipe
+title: arXiv Research MCTS Pipe
 description: Funtion Pipe made to create summary of searches uning arXiv.org for relevant papers on a topic and web scrape for more contextual information in a MCTS fashion.
 author: Haervwe
+author_url: https://github.com/Haervwe/open-webui-tools/
+original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools  
 version: 0.1.3
 """
