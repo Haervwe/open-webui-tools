@@ -383,19 +383,6 @@ class Pipe:
         except json.JSONDecodeError:
             logger.error(f'ChunkDecodeError: unable to parse "{chunk_str[:100]}"')
 
-    async def get_streaming_completion(
-        self,
-        model: str,
-        messages,
-    ) -> AsyncGenerator[str, None]:
-        response = await ollama.generate_openai_chat_completion(
-            {"model": model, "messages": messages, "stream": True}
-        )
-
-        async for chunk in response.body_iterator:
-            for part in self.get_chunk_content(chunk):
-                yield part
-
     async def get_message_completion(self, model: str, content):
         async for chunk in self.get_streaming_completion(
             model, [{"role": "user", "content": content}]
