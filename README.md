@@ -78,9 +78,9 @@ Required configuration in Open WebUI:
    - Default: Uses Stability AI's SD 3.5 Turbo model
    - Can be customized to use other HF text-to-image model endpoints such as flux
 
-## Usage
+## Usage for tools
 
-(Make sure to turno on the tool in chat before requesting it)
+(Make sure to turn on the tool in chat before requesting it)
 
 
 ![Screenshot from 2024-11-09 15-55-58](https://github.com/user-attachments/assets/2956997f-b14f-4087-99d8-48d11a79234b)
@@ -105,6 +105,19 @@ Create a landscape image of "a futuristic cityscape"
 ```
 
 ![Screenshot from 2024-11-09 15-58-24](https://github.com/user-attachments/assets/11a2447e-06f3-4456-ab81-d2bcc6d981f3)
+
+
+## Usage for Pipes
+### arXiv Reseach MCTS Pipe
+  Select the pipe with the corresponding model, it show as this:
+
+![Screenshot from 2024-11-10 17-36-16](https://github.com/user-attachments/assets/e55f96b6-a893-463e-aa6b-4d2ef24012f2)
+
+```python
+# Example usage in your prompt
+Do a reseach summary on "DPO laser LLM training"
+```
+
 
 
 ## Error Handling
