@@ -46,7 +46,7 @@ Features:
 ## Installation
 
 1. Navigate to your Open WebUI Workspace's Tools directory
-2. Copy the contents of `arxiv_search_tool.py` and `create_image_hf.py` into your Tools or the `arXiv Reseach MCTS Pipe` into your Tools` 
+2. Copy the contents of `arxiv_search_tool.py` and `create_image_hf.py` into your Tools or the `arXiv Reseach MCTS Pipe` into your Functions` 
 3. For the Hugging Face Image Generator, configure the required API settings in the UI, for the `arXiv Reseach MCTS Pipe` configure your Tavily API- KEy (its free to here https://tavily.com)
 
 for those without an HF api key its free, (up to a certain point but very loose) create an account here https://huggingface.co and generate an API key in your profile settings, make sure to add permissions to call the serverless endpoints.
