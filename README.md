@@ -149,12 +149,14 @@ MIT License
 
 ## Credits
 
-Developed by Haervwe
+- Developed by Haervwe
 
-Credit to the amazing teams behind 
-https://github.com/ollama/ollama
-https://github.com/open-webui/open-webui
+- Credit to the amazing teams behind:
+  - https://github.com/ollama/ollama
+  - https://github.com/open-webui/open-webui
+
 And all model trainers out there providing these amazing tools.
+
 
 ## Support
 
