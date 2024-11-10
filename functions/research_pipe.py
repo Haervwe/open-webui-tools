@@ -1,3 +1,12 @@
+"""
+title: arXiv Reseach MCTS Pipe
+description: Funtion Pipe made to create summary of searches uning arXiv.org for relevant papers on a topic and web scrape for more contextual information in a MCTS fashion.
+author: Haervwe
+git: https://github.com/Haervwe/open-webui-tools  
+version: 0.1.3
+"""
+
+
 import logging
 import random
 import math
