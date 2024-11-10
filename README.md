@@ -108,8 +108,10 @@ Create a landscape image of "a futuristic cityscape"
 
 
 ## Usage for Pipes
+
 ### arXiv Reseach MCTS Pipe
-  Select the pipe with the corresponding model, it show as this:
+
+Select the pipe with the corresponding model, it show as this:
 
 ![Screenshot from 2024-11-10 17-36-16](https://github.com/user-attachments/assets/e55f96b6-a893-463e-aa6b-4d2ef24012f2)
 
@@ -117,6 +119,8 @@ Create a landscape image of "a futuristic cityscape"
 # Example usage in your prompt
 Do a reseach summary on "DPO laser LLM training"
 ```
+
+![Screenshot from 2024-11-10 17-53-51](https://github.com/user-attachments/assets/28116b58-79ef-4d4a-bd51-bfa2f2102cc3)
 
 
 
