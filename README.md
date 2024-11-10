@@ -49,6 +49,8 @@ Features:
 2. Copy the contents of `arxiv_search_tool.py` and `create_image_hf.py` into your Tools or the `arXiv Reseach MCTS Pipe` into your Tools` 
 3. For the Hugging Face Image Generator, configure the required API settings in the UI, for the `arXiv Reseach MCTS Pipe` configure your Tavily API- KEy (its free to here https://tavily.com)
 
+for those without an HF api key its free, (up to a certain point but very loose) create an account here https://huggingface.co and generate an API key in your profile settings, make sure to add permissions to call the serverless endpoints.
+
 ## Configuration
 
 ### arXiv Search Tool
@@ -74,24 +76,36 @@ Required configuration in Open WebUI:
 
 2. **API URL** (Optional):
    - Default: Uses Stability AI's SD 3.5 Turbo model
-   - Can be customized to use other HF text-to-image model endpoints
+   - Can be customized to use other HF text-to-image model endpoints such as flux
 
 ## Usage
+
+(Make sure to turno on the tool in chat before requesting it)
+
+
+![Screenshot from 2024-11-09 15-55-58](https://github.com/user-attachments/assets/2956997f-b14f-4087-99d8-48d11a79234b)
+
 
 ### arXiv Search
 ```python
 # Example usage in your prompt
-Search for recent papers about "quantum computing"
+Search for recent papers about "tree of thought"
 ```
+
+![Screenshot from 2024-11-09 15-56-51](https://github.com/user-attachments/assets/f3997b8f-e0e8-4db6-bb13-d4a41d1dda13)
+
 
 ### Image Generation
 ```python
 # Example usage in your prompt
-Create an image of "a serene mountain landscape at sunset"
+Create an image of "beutiful horse running free"
 
 # Specify format
 Create a landscape image of "a futuristic cityscape"
 ```
+
+![Screenshot from 2024-11-09 15-58-24](https://github.com/user-attachments/assets/11a2447e-06f3-4456-ab81-d2bcc6d981f3)
+
 
 ## Error Handling
 
@@ -116,7 +130,11 @@ MIT License
 ## Credits
 
 Developed by Haervwe
-- GitHub: https://github.com/Haervwe/open-webui-tools
+
+Credit to the amazing teams behind 
+https://github.com/ollama/ollama
+https://github.com/open-webui/open-webui
+And all model trainers out there providing these amazing tools.
 
 ## Support
 
