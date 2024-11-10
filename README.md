@@ -31,16 +31,39 @@ Features:
 - Customizable model endpoint
 - High-resolution output
 
+## Function Pipes Included
+
+### 1. arXiv Reseach MCTS Pipe
+Search arXiv.org for relevant academic papers on any topic. No API key required!
+
+Features:
+- Search across paper titles, abstracts, and full text from Arxiv and Web with tavily
+- uses a MCTS aproach to make progressive refinements on a Reseach Summary on a given topic
+- uses a visual representantion of the tree nodes to provide some visual feedback
+- shows intermediate steps
+- Configurable Width and Breadth of the search on valves.
+
 ## Installation
 
 1. Navigate to your Open WebUI Workspace's Tools directory
-2. Copy the contents of `arxiv_search_tool.py` and `create_image_hf.py` into your Tools
-3. For the Hugging Face Image Generator, configure the required API settings in the UI
+2. Copy the contents of `arxiv_search_tool.py` and `create_image_hf.py` into your Tools or the `arXiv Reseach MCTS Pipe` into your Tools` 
+3. For the Hugging Face Image Generator, configure the required API settings in the UI, for the `arXiv Reseach MCTS Pipe` configure your Tavily API- KEy (its free to here https://tavily.com)
 
 ## Configuration
 
 ### arXiv Search Tool
 No configuration required! The tool works out of the box.
+
+### arXiv Reseach MCTS Pipe
+    Admin:
+    -Tavily API KEY: required, create it in tavily.com
+    -Max Search Results: Amount of results fo fech form web search
+    -Arxiv Max Results: Amount of results to fetch for arxiv API
+
+    User:
+    -Tree Breadth: how many nodes per round are searched-
+    -Tree Depth: how many rounds are made.
+    -Exploration Weight: constant to control exploration vs exploitation, (a higher value means more exploration of new paths, while a low values makes the system stick with one option, range from 0 to 2 recommended)
 
 ### Hugging Face Image Generator
 Required configuration in Open WebUI:
