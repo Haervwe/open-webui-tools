@@ -5,9 +5,8 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.1.3
+version: 0.2.0
 """
-
 
 import logging
 import random
@@ -117,7 +116,11 @@ class MCTS:
                 f"\nResearch direction {i+1}: {improvement}\n\n"
             )
 
-            research = await self.pipe.gather_research(self.topic)
+            research = await self.pipe.gather_research(
+                f"""Generate a new arXiv search query based on the improvement suggestion:
+            Topic: {self.topic}
+            Improvement: {improvement}"""
+            )
             synthesis = await self.pipe.synthesize_research(research, self.topic)
 
             child = Node(
@@ -209,11 +212,11 @@ class Pipe:
 
     async def search_arxiv(self, query: str) -> List[Dict]:
         """Gather research from arXiv"""
-        await self.emit_status("tool", "Fetching arXiv papers...", False)
+        await self.emit_status("tool", f"Fetching arXiv papers for: {query}...", False)
         try:
             arxiv_url = "http://export.arxiv.org/api/query"
             params = {
-                "search_query": f"all:{query}",
+                "search_query": f"{query}",
                 "max_results": self.valves.ARXIV_MAX_RESULTS,
                 "sortBy": "relevance",
             }
@@ -273,20 +276,77 @@ class Pipe:
                 return []
 
     async def gather_research(self, topic: str) -> List[Dict]:
-        """Gather research from multiple sources"""
-        await self.emit_status("tool", "Starting research gathering...", False)
+        """Gather initial research for the given topic"""
+        await self.emit_status("tool", f"Researching...", False)
 
-        # Gather from arXiv
-        arxiv_results = await self.search_arxiv(topic)
+        # Preprocess the initial user query
+        web_query, arxiv_query = await self.preprocess_query(topic)
+
+        # Perform web search and arXiv search using the preprocessed queries
+        web_research = await self.search_web(web_query)
         await self.emit_status(
-            "tool", f"ArXiv papers found: {len(arxiv_results)}", False
+            "tool", f"Web sources found:: {len(web_research)}", False
         )
+        arxiv_research = await self.search_arxiv(arxiv_query)
 
-        # Gather from web
-        web_results = await self.search_web(topic)
-        await self.emit_status("tool", f"Web sources found: {len(web_results)}", False)
+        await self.emit_status(
+            "tool", f"ArXiv papers found:: {len(arxiv_research)}", False
+        )
+        research = web_research + arxiv_research
+        logger.debug(
+            f"Research Result and promtps:: {arxiv_query}, ::: {arxiv_research} . {web_query}::: {web_research} , "
+        )
+        await self.emit_status(
+            "user",
+            f"Research gathered: ArXiv papers found: {len(arxiv_research)}, Web sources found: {len(web_research)}",
+            True,
+        )
+        return research
 
-        return arxiv_results + web_results
+    async def preprocess_query(self, query: str) -> tuple[str, str]:
+        """Preprocess and enhance the initial user query for optimized web and arXiv searches."""
+
+        # Prompt for web search query enhancement
+        prompt_web = f"""
+        Enhance the following query to improve the relevance of web search results:
+        - Focus on adding relevant keywords, synonyms, or contextual phrases
+        - The input query may be an initial vague request or an essay with proposed improvements
+        - Only output the enhanced query, ready for an API call, without explanations or titles
+
+        Initial query: "{query}"
+
+        Enhanced web search query:
+        """
+        web_query = await self.get_completion(prompt_web)
+
+        # Prompt for arXiv API query enhancement
+        prompt_arxiv = f"""
+        Format an optimized query for the arXiv API based on the following input:
+        - Use arXiv's query syntax (AND, OR, NOT) and search fields (ti, au, abs, cat)
+        - Select appropriate categories from the provided list
+        - The input may be an initial vague request or an essay with proposed improvements
+        - Only output the formatted arXiv API query, without explanations or titles
+
+        Initial query: "{query}"
+
+        arXiv categories:
+        - cs.AI: Artificial Intelligence
+        - cs.LG: Machine Learning 
+        - cs.CV: Computer Vision
+        - cs.CL: Computation and Language (NLP)
+        - cs.RO: Robotics
+        - stat.ML: Machine Learning (Statistics)
+        - math.OC: Optimization and Control
+        - physics: Physics
+        - q-bio: Quantitative Biology
+        - q-fin: Quantitative Finance
+        - econ: Economics
+
+        Enhanced arXiv search query (API format):
+        """
+        arxiv_query = await self.get_completion(prompt_arxiv)
+
+        return web_query, arxiv_query
 
     async def get_streaming_completion(
         self,
