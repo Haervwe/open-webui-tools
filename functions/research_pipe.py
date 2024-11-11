@@ -174,7 +174,6 @@ class Pipe:
             default=3, description="Maximum number of arXiv papers to fetch"
         )
 
-    class UserValves(BaseModel):
         TREE_DEPTH: int = Field(
             default=4, description="Maximum depth of the research tree"
         )
@@ -188,7 +187,7 @@ class Pipe:
     def __init__(self):
         self.type = "manifold"
         self.valves = self.Valves()
-        self.user_valves = self.UserValves()
+        self.valves = self.Valves()
 
     def pipes(self) -> list[dict[str, str]]:
         ollama.get_all_models()
@@ -506,23 +505,21 @@ class Pipe:
         root = Node(
             content=initial_content,
             research=initial_research,
-            max_children=self.user_valves.TREE_BREADTH,
+            max_children=self.valves.TREE_BREADTH,
         )
 
         mcts = MCTS(
             root=root,
             pipe=self,
             topic=topic,
-            max_depth=self.user_valves.TREE_DEPTH,
+            max_depth=self.valves.TREE_DEPTH,
         )
 
         best_content = initial_content
         best_score = -float("inf")
 
-        for i in range(self.user_valves.TREE_DEPTH):
-            await self.progress(
-                f"Research iteration {i+1}/{self.user_valves.TREE_DEPTH}..."
-            )
+        for i in range(self.valves.TREE_DEPTH):
+            await self.progress(f"Research iteration {i+1}/{self.valves.TREE_DEPTH}...")
 
             leaf = await mcts.select()
             child = await mcts.expand(leaf)
