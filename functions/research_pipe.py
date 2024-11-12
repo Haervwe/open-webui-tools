@@ -164,6 +164,9 @@ class Pipe:
     __model__: str
 
     class Valves(BaseModel):
+        MODEL: str = Field(
+            default=None, description="Model to use (model id from ollama)"
+        )
         TAVILY_API_KEY: str = Field(
             default="", description="API key for Tavily search service"
         )
@@ -190,12 +193,9 @@ class Pipe:
         self.valves = self.Valves()
 
     def pipes(self) -> list[dict[str, str]]:
-        ollama.get_all_models()
-        models = ollama.app.state.MODELS
 
         out = [
-            {"id": f"{name}-{key}", "name": f"{name} {models[key]['name']}"}
-            for key in models
+            {"id": f"{name}-{self.valves.MODEL}", "name": f"{name} {self.valves.MODEL}"}
         ]
         logger.debug(f"Available models: {out}")
 
