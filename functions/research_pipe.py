@@ -183,9 +183,6 @@ class Pipe:
         EXPLORATION_WEIGHT: float = Field(
             default=1.414, description="Controls exploration vs exploitation"
         )
-        CTX_SIZE: int = Field(
-            default=2048, description="Controls context size passed to ollama"
-        )
 
     def __init__(self):
         self.type = "manifold"
@@ -356,11 +353,7 @@ class Pipe:
         messages,
     ) -> AsyncGenerator[str, None]:
         response = await ollama.generate_openai_chat_completion(
-            {"model": model, 
-             "messages": messages, 
-             "stream": True,
-             "num_ctx": self.valves.CTX_SIZE,
-             }
+            {"model": model, "messages": messages, "stream": True}
         )
 
         async for chunk in response.body_iterator:
@@ -377,7 +370,6 @@ class Pipe:
                     if isinstance(messages, list)
                     else [{"role": "user", "content": messages}]
                 ),
-                "num_ctx": self.valves.CTX_SIZE,
             }
         )
         return response["choices"][0]["message"]["content"]
@@ -492,11 +484,7 @@ class Pipe:
         if __task__ == TASKS.TITLE_GENERATION:
             logger.debug(f"Model {TASKS}")
             response = await ollama.generate_openai_chat_completion(
-                {"model": model,
-                "messages": body.get("messages"),
-                "stream": False,
-                "num_ctx": self.valves.CTX_SIZE,
-                },
+                {"model": model, "messages": body.get("messages"), "stream": False},
                 user=__user__,
             )
             content = response["choices"][0]["message"]["content"]
@@ -581,7 +569,6 @@ class Pipe:
             {
                 "model": self.__model__,
                 "messages": [{"role": "user", "content": prompt}],
-                "num_ctx": self.valves.CTX_SIZE,
             },
             user=self.__user__,
         )
