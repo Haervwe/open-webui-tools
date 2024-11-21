@@ -5,7 +5,7 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.2.1
+version: 0.2.0
 """
 
 import logging
@@ -18,11 +18,12 @@ from typing import List, Dict, Union, Optional, AsyncGenerator, Callable, Awaita
 from dataclasses import dataclass
 from pydantic import BaseModel, Field
 from open_webui.constants import TASKS
-from open_webui.apps.ollama import main as ollama
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
 
-# Constants and Setup
+from open_webui.main import generate_chat_completions
+
+
 name = "Research"
 
 
@@ -197,8 +198,6 @@ class Pipe:
         )
 
     def __init__(self):
-        self.type = "manifold"
-        self.valves = self.Valves()
         self.valves = self.Valves()
 
     def pipes(self) -> list[dict[str, str]]:
@@ -360,17 +359,32 @@ class Pipe:
         self,
         messages,
     ) -> AsyncGenerator[str, None]:
-        response = await ollama.generate_openai_chat_completion(
-            {"model": self.__model__, "messages": messages, "stream": True},
-            user=self.__user__,
-        )
+        try:
+            form_data = {
+                "model": self.__model__,
+                "messages": messages,
+                "stream": True,
+            }
+            response = await generate_chat_completions(
+                form_data,
+                user=self.__user__,
+                bypass_filter=False,
+            )
 
-        async for chunk in response.body_iterator:
-            for part in self.get_chunk_content(chunk):
-                yield part
+            # Ensure the response has body_iterator
+            if not hasattr(response, "body_iterator"):
+                raise ValueError("Response does not support streaming")
+
+            async for chunk in response.body_iterator:
+                # Use the updated chunk content method
+                for part in self.get_chunk_content(chunk):
+                    yield part
+
+        except Exception as e:
+            raise RuntimeError(f"Streaming completion failed: {e}")
 
     async def get_completion(self, messages) -> str:
-        response = await ollama.generate_openai_chat_completion(
+        response = await generate_chat_completions(
             {
                 "model": self.__model__,
                 "messages": [{"role": "user", "content": messages}],
@@ -440,7 +454,8 @@ class Pipe:
             return 0.0
 
     def get_chunk_content(self, chunk):
-        chunk_str = chunk.decode("utf-8")
+        # Directly process the chunk since it's already a string
+        chunk_str = chunk
         if chunk_str.startswith("data: "):
             chunk_str = chunk_str[6:]
 
@@ -490,7 +505,7 @@ class Pipe:
         self.__user__ = User(**__user__)
         if __task__ == TASKS.TITLE_GENERATION:
             logger.debug(f"Model {TASKS}")
-            response = await ollama.generate_openai_chat_completion(
+            response = await generate_chat_completions(
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,
             )
