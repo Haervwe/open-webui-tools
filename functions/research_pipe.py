@@ -5,7 +5,7 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.2.0
+version: 0.2.1
 """
 
 import logging
@@ -20,9 +20,18 @@ from pydantic import BaseModel, Field
 from open_webui.constants import TASKS
 from open_webui.apps.ollama import main as ollama
 from bs4 import BeautifulSoup
+from dataclasses import dataclass
 
 # Constants and Setup
 name = "Research"
+
+
+@dataclass
+class User:
+    id: str
+    email: str
+    name: str
+    role: str
 
 
 def setup_logger():
@@ -349,28 +358,24 @@ class Pipe:
 
     async def get_streaming_completion(
         self,
-        model: str,
         messages,
     ) -> AsyncGenerator[str, None]:
         response = await ollama.generate_openai_chat_completion(
-            {"model": model, "messages": messages, "stream": True}
+            {"model": self.__model__, "messages": messages, "stream": True},
+            user=self.__user__,
         )
 
         async for chunk in response.body_iterator:
             for part in self.get_chunk_content(chunk):
                 yield part
 
-    async def get_completion(self, model: str, messages) -> str:
-        """Updated to match MCTS signature"""
+    async def get_completion(self, messages) -> str:
         response = await ollama.generate_openai_chat_completion(
             {
-                "model": model,
-                "messages": (
-                    messages
-                    if isinstance(messages, list)
-                    else [{"role": "user", "content": messages}]
-                ),
-            }
+                "model": self.__model__,
+                "messages": [{"role": "user", "content": messages}],
+            },
+            user=self.__user__,
         )
         return response["choices"][0]["message"]["content"]
 
@@ -407,7 +412,7 @@ class Pipe:
     """
         complete = ""
         async for chunk in self.get_streaming_completion(
-            self.__model__, [{"role": "user", "content": prompt}]
+            [{"role": "user", "content": prompt}]
         ):
             complete += chunk
             await self.emit_message(chunk)
@@ -455,7 +460,7 @@ class Pipe:
 
     async def get_message_completion(self, model: str, content):
         async for chunk in self.get_streaming_completion(
-            model, [{"role": "user", "content": content}]
+            [{"role": "user", "content": content}]
         ):
             yield chunk
 
@@ -479,18 +484,19 @@ class Pipe:
         __task__=None,
         __model__=None,
     ) -> str:
-        model = self.resolve_model(body)  # Get model first like MCTS
+        model = self.valves.MODEL
         logger.debug(f"Model {model}")
+        logger.debug(f"User: {__user__}")
+        self.__user__ = User(**__user__)
         if __task__ == TASKS.TITLE_GENERATION:
             logger.debug(f"Model {TASKS}")
             response = await ollama.generate_openai_chat_completion(
                 {"model": model, "messages": body.get("messages"), "stream": False},
-                user=__user__,
+                user=self.__user__,
             )
             content = response["choices"][0]["message"]["content"]
             return f"{name}: {content}"
         logger.debug(f"Pipe {name} received: {body}")
-        self.__user__ = __user__
         self.__current_event_emitter__ = __event_emitter__
         self.__model__ = model  # Assign after title check
 
@@ -563,13 +569,3 @@ class Pipe:
                 },
             }
         )
-
-    async def get_completion(self, prompt: str) -> str:
-        response = await ollama.generate_openai_chat_completion(
-            {
-                "model": self.__model__,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            user=self.__user__,
-        )
-        return response["choices"][0]["message"]["content"]
