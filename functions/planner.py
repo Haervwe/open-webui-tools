@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/open-webui
-version: 0.1
+version: 0.2
 """
 
 import logging
@@ -95,14 +95,7 @@ class Pipe:
         self.current_output = ""
 
     def pipes(self) -> list[dict[str, str]]:
-        return [
-            {"id": f"{name}-{self.valves.MODEL}", "name": f"{name} {self.valves.MODEL}"}
-        ]
-
-    def resolve_model(self, body: dict) -> str:
-        model_id = body.get("model")
-        without_pipe = ".".join(model_id.split(".")[1:])
-        return without_pipe.replace(f"{name}-", "")
+        return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
 
     async def get_streaming_completion(
         self,
@@ -201,29 +194,39 @@ class Pipe:
     async def create_plan(self, goal: str) -> Plan:
         """Create an execution plan for the given goal"""
         prompt = f"""
-        You are a helpful and harmless AI assistant. Create a step-by-step plan for: {goal}
+Given the goal: {goal}
 
-        Return ONLY a JSON object with this structure:
+Generate a detailed execution plan by breaking it down into atomic, sequential steps. Each step should be clear, actionable, and have explicit dependencies.
+
+Return a JSON object with exactly this structure:
+{{
+    "goal": "<original goal>",
+    "actions": [
         {{
-            "goal": "goal description",
-            "actions": [
-                {{
-                    "id": "unique_id",
-                    "type": "step_type",
-                    "description": "detailed step description",
-                    "params": {{"key": "value"}},
-                    "dependencies": ["dependent_step_id"]
-                }}
-            ],
-            "metadata": {{
-                "estimated_time": "minutes",
-                "complexity": "low|medium|high"
-            }}
+            "id": "<unique_id>",
+            "type": "<category_of_action>",
+            "description": "<specific_actionable_task>",
+            "params": {{"param_name": "param_value"}},
+            "dependencies": ["<id_of_prerequisite_step>"]
         }}
+    ],
+    "metadata": {{
+        "estimated_time": "<minutes>",
+        "complexity": "<low|medium|high>"
+    }}
+}}
 
-        Break down the goal into logical, sequential steps with clear dependencies.
-        Do not include any additional text or explanations outside the JSON object.
-        """
+Requirements:
+1. Each step must be independently executable
+2. Dependencies must form a valid sequence
+3. Steps must be concrete and specific
+4. For code-related tasks:
+   - Focus on implementation only
+   - Exclude testing and deployment
+   - Each step should produce complete, functional code
+
+Return ONLY the JSON object. Do not include explanations or additional text.
+"""
 
         for attempt in range(self.valves.MAX_RETRIES):
             try:
@@ -246,34 +249,47 @@ class Pipe:
     async def execute_action(
         self, plan: Plan, action: Action, results: Dict, step_number: int
     ) -> Dict:
-        """Execute a single action with streaming output"""
+        """Execute a single action with streaming output. Returns last output after max retries for LLM failures."""
         action.start_time = datetime.now().strftime("%H:%M:%S")
         action.status = "in_progress"
 
         context = {dep: results.get(dep, {}) for dep in action.dependencies}
 
         prompt = f"""
-        Execute step {step_number}: {action.description}
-        Goal: {plan.goal}
-        Parameters: {json.dumps(action.params)}
-        Previous context: {json.dumps(context)}
-        
-        Provide ONLY the output of the execution.
-        Do not include any additional text or explanations.
-        If the output is code, enclose it in a code block.
-        Ensure that the code does not reference variables not defined within the scope of this step.
-        """
+Execute the following step:
 
-        reflection_max_retries = (
-            self.valves.MAX_RETRIES
-        )  # Maximum retries for reflection steps
+Step {step_number}: {action.description}
+Overall Goal: {plan.goal}
+
+Context:
+- Parameters: {json.dumps(action.params)}
+- Available Information from Previous Steps: {json.dumps(context)}
+
+Requirements:
+1. Provide ONLY the direct output/result
+2. For code output:
+   - Use code blocks
+   - Include ALL necessary code
+   - Ensure code is self-contained
+   - Variables must be defined within this step
+   - No placeholder or stub functions
+3. For text output:
+   - Be specific and concrete
+   - Include all relevant details
+   - No meta-commentary or explanations
+
+DO NOT include any explanatory text, disclaimers, or additional commentary.
+"""
+
+        reflection_max_retries = self.valves.MAX_RETRIES
         reflection_attempts = 0
+        last_output = None
 
         while reflection_attempts <= reflection_max_retries:
             try:
                 await self.emit_status(
                     "info",
-                    f"Starting action {action.id}: {action.description} (Attempt {reflection_attempts + 1}/{reflection_max_retries})",
+                    f"Starting (Attempt {reflection_attempts + 1}/{reflection_max_retries + 1}) for action {action.id}: {action.description}",
                     False,
                 )
                 action.status = "in_progress"
@@ -281,47 +297,63 @@ class Pipe:
                 await self.emit_replace_mermaid(plan)
 
                 complete_response = ""
-                async for chunk in self.get_streaming_completion(
-                    [
-                        {"role": "system", "content": f"Goal: {plan.goal}"},
-                        {"role": "user", "content": prompt},
-                    ]
-                ):
-                    complete_response += chunk
-                    await self.emit_message(chunk)  # Emit each chunk as a message
+                try:
+                    async for chunk in self.get_streaming_completion(
+                        [
+                            {"role": "system", "content": f"Goal: {plan.goal}"},
+                            {"role": "user", "content": prompt},
+                        ]
+                    ):
+                        complete_response += chunk
+                        await self.emit_message(chunk)
+                except Exception as api_error:
+                    # For API-related errors, raise immediately
+                    action.status = "failed"
+                    action.end_time = datetime.now().strftime("%H:%M:%S")
+                    logger.error(f"API error executing action {action.id}: {api_error}")
+                    await self.emit_status(
+                        "error",
+                        f"API error in action {action.id}",
+                        True,
+                    )
+                    raise
 
-                action.status = "completed"
-                action.end_time = datetime.now().strftime("%H:%M:%S")
-                action.output = {
-                    "result": complete_response
-                }  # Store only the relevant output
+                action.output = {"result": complete_response}
+                last_output = action.output  # Store the latest output
 
-                # Reflection step after completing the action
                 await self.emit_status(
                     "info", "Analyzing intermediate result...", False
                 )
-                await asyncio.sleep(1)  # Simulate some thinking time
+                await asyncio.sleep(1)
 
-                reflection_prompt = f"""
-                Was the following action completed **successfully**? 
-                
-                **Goal:** {plan.goal}
-                **Action:** {action.description}
-                **Expected Output (based on instructions):** [Describe the expected output clearly based on the action's purpose] 
-                **Actual Output:** {complete_response}
-                
-                Answer with a simple 'yes' or 'no'.
-                """
-                reflection_result = await self.get_completion(reflection_prompt)
+                try:
+                    reflection_prompt = f"""
+Evaluate if this action was completed successfully:
+
+Action Goal: {action.description}
+Overall Context: {plan.goal}
+Generated Output: {complete_response}
+
+Evaluation Criteria:
+1. Output is complete and self-contained
+2. All requirements from the action description are met
+3. Output is directly usable without modifications
+4. No missing components or placeholder elements
+
+Respond with exactly 'yes' or 'no'.
+"""
+                    reflection_result = await self.get_completion(reflection_prompt)
+                except Exception as api_error:
+                    # Also raise immediately for reflection API errors
+                    raise
 
                 if reflection_result.strip().lower() == "no":
                     if reflection_attempts < reflection_max_retries:
                         await self.emit_status(
                             "warning",
-                            f"Action {action.id} was not completed correctly. Retrying reflection... (Attempt {reflection_attempts + 1}/{reflection_max_retries})",
+                            f"Action {action.id} was not completed correctly. Retrying... (Attempt {reflection_attempts + 1}/{reflection_max_retries + 1})",
                             False,
                         )
-                        # Generate a re-prompt with corrections
                         correction_prompt = f"""
                         The previous action was not completed correctly. Please provide a corrected output for:
                         Goal: {plan.goal}
@@ -336,42 +368,40 @@ class Pipe:
                         """
                         prompt = correction_prompt
                         reflection_attempts += 1
-                        continue  # Retry with the corrected prompt
+                        continue
                     else:
+                        # Max retries reached - mark as completed but with warning
+                        action.status = "completed"
+                        action.end_time = datetime.now().strftime("%H:%M:%S")
                         await self.emit_status(
                             "warning",
-                            f"Action {action.id} failed after {reflection_max_retries} reflection attempts.",
+                            f"Action {action.id} completed with warnings after {reflection_max_retries} attempts. Using last output.",
                             True,
                         )
-                        action.status = "failed"
-                        action.end_time = datetime.now().strftime("%H:%M:%S")
-                        raise Exception("Action failed after reflection retries")
+                        return last_output
                 else:
+                    action.status = "completed"
+                    action.end_time = datetime.now().strftime("%H:%M:%S")
                     await self.emit_status(
                         "success", f"Action {action.id} completed successfully.", True
                     )
                     return action.output
 
             except Exception as e:
+                # Only re-raise exceptions that made it to this level (API errors)
                 action.status = "failed"
                 action.end_time = datetime.now().strftime("%H:%M:%S")
                 logger.error(f"Error executing action {action.id}: {e}")
                 await self.emit_status(
                     "error",
-                    f"Action {action.id} failed.",
+                    f"Action {action.id} failed due to API error.",
                     True,
                 )
                 raise
 
-        # If maximum reflection retries are reached, return the last message
-        action.status = "failed"
-        action.end_time = datetime.now().strftime("%H:%M:%S")
-        await self.emit_status(
-            "error",
-            f"Action {action.id} failed after {reflection_max_retries} reflection attempts.",
-            True,
-        )
-        return action.output
+        # This should never be reached due to the handling in the loop,
+        # but including as a safeguard
+        return last_output
 
     async def execute_plan(self, plan: Plan) -> Dict:
         """Execute the complete plan with visualization"""
@@ -434,27 +464,47 @@ class Pipe:
 
     async def synthesize_results(self, plan: Plan, results: Dict) -> str:
         # ...
-        prompt = f"""
-        Create a final result for goal: {plan.goal}
-    
-        Plan execution summary:
-        - Total steps: {plan.execution_summary['total_steps']}
-        - Completed: {plan.execution_summary['completed_steps']}
-        - Failed: {plan.execution_summary['failed_steps']}
-        - Time: {plan.execution_summary['execution_time']['start']} to {plan.execution_summary['execution_time']['end']}
-    
-        Results by step:
-        {json.dumps({action.id: action.output for action in plan.actions}, indent=2)}
-    
-        Provide a comprehensive result by AGGREGATING the outputs of all steps.
-        If code was generated, provide the COMPLETE and CORRECT code.
-        Do not summarize.
-        Format in clear markdown with sections and bullet points.
-        """
+        prompt = (
+            RESULTS_SYNTHESIS_PROMPT
+        ) = f"""
+Create comprehensive final output for: {plan.goal}
+
+Execution Results:
+- Steps Completed: {plan.execution_summary['completed_steps']}/{plan.execution_summary['total_steps']}
+- Timeline: {plan.execution_summary['execution_time']['start']} to {plan.execution_summary['execution_time']['end']}
+- Step Outputs: {json.dumps({action.id: action.output for action in plan.actions}, indent=2)}
+
+Requirements:
+1. Combine all step outputs into a cohesive whole
+2. Maintain completeness of all generated code
+3. Preserve all implementation details
+4. Use clear markdown formatting with sections
+5. Include ALL generated content - no summarization
+
+For code:
+- Ensure all components are properly integrated
+- Maintain all implementation details
+- Include complete error handling
+- Preserve all function definitions
+
+For documentation:
+- Use clear section headers
+- Include all relevant details
+- Maintain hierarchical structure
+- Preserve technical specifications
+
+DO NOT summarize or omit any implementation details.
+"""
 
         for attempt in range(self.valves.MAX_RETRIES):
             try:
-                await self.emit_status("info", "Creating final result...", False)
+                await self.emit_status(
+                    "info",
+                    f"Creating final result... (Attempt {reflection_attempts + 1}/{self.valves.MAX_RETRIES +1})",
+                    False,
+                )
+                await self.emit_replace("")
+                await self.emit_replace_mermaid(plan)
                 result = ""
                 async for chunk in self.get_streaming_completion(
                     [
@@ -475,11 +525,19 @@ class Pipe:
 
                 # Check if the final result was correct
                 reflection_prompt = f"""
-                Was the final result for the goal '{plan.goal}' correct?
-                Final result: {result}
-    
-                Answer with a simple 'yes' or 'no'.
-                """
+Verify the final output meets all requirements for: {plan.goal}
+
+Output to verify: {result}
+
+Verification Criteria:
+1. All components from individual steps are included
+2. Implementation is complete and functional
+3. No missing dependencies or references
+4. All requirements from original goal are met
+5. Output is properly formatted and structured
+
+Respond with exactly 'yes' or 'no'.
+"""
 
                 reflection_result = await self.get_completion(reflection_prompt)
 
@@ -518,11 +576,11 @@ class Pipe:
 
             except Exception as e:
                 logger.error(
-                    f"Error synthesizing results (attempt {attempt + 1}/{self.valves.MAX_RETRIES}): {e}"
+                    f"Error synthesizing results (attempt {attempt + 1}/{self.valves.MAX_RETRIES +1}): {e}"
                 )
                 await self.emit_status(
                     "error",
-                    "Error creating final result. Retrying... (Attempt {attempt + 1}/{self.valves.MAX_RETRIES})",
+                    f"Error creating final result. Retrying... (Attempt {attempt + 1}/{self.valves.MAX_RETRIES+1})",
                     False,
                 )
                 if attempt < self.valves.MAX_RETRIES - 1:
@@ -531,14 +589,10 @@ class Pipe:
                 else:
                     await self.emit_status(
                         "error",
-                        f"Failed to create final result after {self.valves.MAX_RETRIES} attempts.",
+                        f"Failed to create final result after {self.valves.MAX_RETRIES+1} attempts.",
                         True,
                     )
-                    raise
-
-        raise RuntimeError(
-            f"Failed to synthesize results after {self.valves.MAX_RETRIES} attempts"
-        )
+                    return plan.final_output
 
     async def emit_replace_mermaid(self, plan: Plan):
         """Emit current state as Mermaid diagram, replacing the old one"""
@@ -576,7 +630,7 @@ class Pipe:
         __task__=None,
         __model__=None,
     ) -> str:
-        model = self.resolve_model(body)
+        model = self.valves.MODEL
         self.__user__ = User(**__user__)
         if __task__ == TASKS.TITLE_GENERATION:
             response = await generate_chat_completions(
@@ -602,3 +656,4 @@ class Pipe:
         await self.synthesize_results(plan, results)  # No need to return here
 
         await self.emit_status("success", "Execution complete", True)
+
