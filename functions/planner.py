@@ -113,12 +113,18 @@ class Pipe:
     async def get_streaming_completion(
         self,
         messages,
-    ) -> AsyncGenerator[str, None]:
+        temperature: float = 0.7,  # Default fallback temperature
+        top_k: int = 50,  # Default fallback top_k
+        top_p: float = 0.9,  # Default fallback top_p
+    ):
         try:
             form_data = {
                 "model": self.__model__,
                 "messages": messages,
                 "stream": True,
+                "temperature": temperature,
+                "top_k": top_k,
+                "top_p": top_p,
             }
             response = await generate_chat_completions(
                 form_data,
@@ -126,12 +132,10 @@ class Pipe:
                 bypass_filter=False,
             )
 
-            # Ensure the response has body_iterator
             if not hasattr(response, "body_iterator"):
                 raise ValueError("Response does not support streaming")
 
             async for chunk in response.body_iterator:
-                # Use the updated chunk content method
                 for part in self.get_chunk_content(chunk):
                     yield part
 
@@ -158,11 +162,20 @@ class Pipe:
         except json.JSONDecodeError:
             logger.error(f'ChunkDecodeError: unable to parse "{chunk_str[:100]}"')
 
-    async def get_completion(self, prompt: str) -> str:
+    async def get_completion(
+        self,
+        prompt: str,
+        temperature: float = 0.7,  # Default fallback temperature
+        top_k: int = 50,  # Default fallback top_k
+        top_p: float = 0.9,  # Default fallback top_p
+    ) -> str:
         response = await generate_chat_completions(
             {
                 "model": self.__model__,
                 "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "top_k": top_k,
+                "top_p": top_p,
             },
             user=self.__user__,
         )
@@ -243,7 +256,9 @@ Return ONLY the JSON object. Do not include explanations or additional text.
 
         for attempt in range(self.valves.MAX_RETRIES):
             try:
-                result = await self.get_completion(prompt)
+                result = await self.get_completion(
+                    prompt, temperature=0.8, top_k=60, top_p=0.95
+                )
                 plan_dict = json.loads(result)
                 return Plan(**plan_dict)
             except Exception as e:
@@ -326,7 +341,10 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                         [
                             {"role": "system", "content": f"Goal: {plan.goal}"},
                             {"role": "user", "content": base_prompt},
-                        ]
+                        ],
+                        temperature=0.9,
+                        top_k=70,
+                        top_p=0.95,
                     ):
                         complete_response += chunk
                         await self.emit_message(chunk)
@@ -529,7 +547,12 @@ Return ONLY the JSON object. Do not include explanations or additional text.
 """
 
         try:
-            analysis_response = await self.get_completion(analysis_prompt)
+            analysis_response = await self.get_completion(
+                analysis_prompt,
+                temperature=0.5,  # Balanced between creativity and precision
+                top_k=40,
+                top_p=0.9,
+            )
             logger.debug(f"RAW analysis response: {analysis_response}")
 
             # Extract JSON using regex, considering the tags
@@ -642,7 +665,10 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 [
                     {"role": "system", "content": f"Goal: {plan.goal}"},
                     {"role": "user", "content": consolidation_prompt},
-                ]
+                ],
+                temperature=0.3,
+                top_k=30,
+                top_p=0.8,
             ):
                 consolidated_output += chunk
                 await self.emit_message(chunk)
@@ -854,7 +880,10 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 [
                     {"role": "system", "content": f"Goal: {plan.goal}"},
                     {"role": "user", "content": merge_prompt},
-                ]
+                ],
+                temperature=0.2,
+                top_k=20,
+                top_p=0.7,
             ):
                 complete_response += chunk
                 await self.emit_message(chunk)
@@ -920,7 +949,12 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         """
 
         try:
-            response = await self.get_completion(check_prompt)
+            response = await self.get_completion(
+                check_prompt,
+                temperature=0.4,  # Slightly lower for more focused analysis
+                top_k=35,
+                top_p=0.85,
+            )
             result = json.loads(response)
             logger.debug(f"Completeness check result: {result}")
             return result
