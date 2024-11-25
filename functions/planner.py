@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/open-webui
-version: 0.2
+version: 0.4
 """
 
 import logging
@@ -588,49 +588,72 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         Consolidate a branch using the LLM, ensuring code is merged and narrative is preserved.
         """
 
-        # Gather branch outputs
+        await self.emit_status("info", f"Consolidating branch {action_id}...", False)
+
+        # Gather branch outputs with step information
         branch_outputs = []
         action = next(a for a in plan.actions if a.id == action_id)
-        for dep_id in action.dependencies:
-            branch_outputs.append(
-                {
-                    "id": dep_id,
-                    "result": completed_results.get(dep_id, {}).get("result", ""),
-                }
-            )
+
+        # Include the current action in the consolidation
         branch_outputs.append(
-            {"id": action_id, "result": completed_results[action_id]["result"]}
+            {
+                "id": action.id,
+                "description": action.description,
+                "result": completed_results[action_id]["result"],
+            }
         )
 
-        # Construct consolidation prompt
+        for dep_id in action.dependencies:
+            dep_action = next((a for a in plan.actions if a.id == dep_id), None)
+            if dep_action:
+                branch_outputs.append(
+                    {
+                        "id": dep_id,
+                        "description": dep_action.description,  # Include description
+                        "result": completed_results.get(dep_id, {}).get("result", ""),
+                    }
+                )
+
+        # Construct consolidation prompt with focus on merging and clarity
         consolidation_prompt = f"""
         Consolidate these outputs into a single coherent unit for the goal: {plan.goal}
-
+    
         Branch Outputs:
         {json.dumps(branch_outputs, indent=2)}
-
+    
         Requirements:
-        1. Merge code blocks by language, preserving functionality.
-        2. Preserve narrative text (non-code content) in sequence.
-        3. Ensure proper integration between code and narrative.
-        4. Use clear organization and structure.
-        5. Include ALL content - no summarization.
-        6. code modifications must be outpute in a SINGLE CODE BLOCK never output variations or previus versions, the latest complete modified version of each code file or idea is the correct.
-        7. Do not mention steps or make comentaries. your task is consolidation on an iterative process. so focus on making a sole version with the latest or more relevant/good  code/information.
+        1.  Merge code blocks intelligently, preserving functionality and resolving any conflicts.
+        2.  Combine narrative text (non-code content) smoothly, ensuring a clear and logical flow.
+        3.  Ensure proper integration between code and narrative, with code examples supporting the explanations.
+        4.  Use clear organization and structure, with headings, lists, and other formatting elements as needed.
+        5.  Include ALL relevant content - no summarization or omission of important details.
+        6.  Focus on producing a single, unified version of the output, without mentioning individual steps or their origins.
+        7.  Avoid unnecessary repetition or redundancy, while maintaining completeness and accuracy.
+        8.  If there are conflicting or contradictory elements in the outputs, resolve them in a way that makes the most sense in the context of the overall goal but specifically to the step at hand.
+        9.  Never add anaything beyond the scope of the latest step or messages shown, your job is to consolidate not to generate. 
         """
 
         # Stream the consolidation process
         consolidated_output = ""
         await self.emit_replace("")
         await self.emit_replace_mermaid(plan)
-        async for chunk in self.get_streaming_completion(
-            [
-                {"role": "system", "content": f"Goal: {plan.goal}"},
-                {"role": "user", "content": consolidation_prompt},
-            ]
-        ):
-            consolidated_output += chunk
-            await self.emit_message(chunk)
+        try:
+            async for chunk in self.get_streaming_completion(
+                [
+                    {"role": "system", "content": f"Goal: {plan.goal}"},
+                    {"role": "user", "content": consolidation_prompt},
+                ]
+            ):
+                consolidated_output += chunk
+                await self.emit_message(chunk)
+
+            await self.emit_status("success", f"Consolidated branch {action_id}", True)
+
+        except Exception as e:
+            await self.emit_status(
+                "error", f"Error consolidating branch {action_id}: {e}", True
+            )
+            raise  # Re-raise the exception to be handled elsewhere
 
         return {"result": consolidated_output}
 
