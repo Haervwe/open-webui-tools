@@ -16,6 +16,7 @@ from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
 from dataclasses import dataclass
 import re
+import difflib
 
 # Constants and Setup
 name = "Planner"
@@ -289,24 +290,25 @@ Return ONLY the JSON object. Do not include explanations or additional text.
             Focus ONLY on this specific step's output.
             """
 
-        reflection_max_retries = self.valves.MAX_RETRIES
-        reflection_attempts = 0
+        attempts_remaining = self.valves.MAX_RETRIES
         best_output = None
         best_reflection = None
         best_quality_score = -1
 
-        while reflection_attempts <= reflection_max_retries:
+        while attempts_remaining >= 0:  # Changed to include the initial attempt
             try:
-                await self.emit_status(
-                    "info",
-                    f"Starting Attempt {reflection_attempts + 1}/{reflection_max_retries + 1} for action {action.id}",
-                    False,
-                )
+                current_attempt = self.valves.MAX_RETRIES - attempts_remaining
+                if current_attempt == 0:
+                    await self.emit_status(
+                        "info",
+                        f"Attempt {current_attempt + 1}/{self.valves.MAX_RETRIES + 1} for action {action.id}",
+                        False,
+                    )
                 action.status = "in_progress"
                 await self.emit_replace("")
                 await self.emit_replace_mermaid(plan)
 
-                if reflection_attempts > 0 and best_reflection:
+                if current_attempt > 0 and best_reflection:
                     base_prompt += f"""
                         
                         Previous attempt had these issues:
@@ -328,17 +330,27 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                     ):
                         complete_response += chunk
                         await self.emit_message(chunk)
-                except Exception as api_error:
-                    action.status = "failed"
-                    action.end_time = datetime.now().strftime("%H:%M:%S")
-                    await self.emit_status(
-                        "error",
-                        f"API error in action {action.id}",
-                        True,
-                    )
-                    raise
 
-                current_output = {"result": complete_response}
+                    current_output = {"result": complete_response}
+
+                except Exception as api_error:
+                    if attempts_remaining > 0:
+                        attempts_remaining -= 1
+                        await self.emit_status(
+                            "warning",
+                            f"API error, retrying... ({attempts_remaining + 1} attempts remaining)",
+                            False,
+                        )
+                        continue
+                    else:
+                        action.status = "failed"
+                        action.end_time = datetime.now().strftime("%H:%M:%S")
+                        await self.emit_status(
+                            "error",
+                            f"API error in action {action.id} after all attempts",
+                            True,
+                        )
+                        raise
 
                 await self.emit_status(
                     "info",
@@ -350,12 +362,12 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                     plan=plan,
                     action=action,
                     output=complete_response,
-                    attempt=reflection_attempts,
+                    attempt=current_attempt,
                 )
 
                 await self.emit_status(
                     "info",
-                    f"Analyzing output (Quality Score: {current_reflection.output_quality_score:.2f})",
+                    f"Analyzed output (Quality Score: {current_reflection.output_quality_score:.2f})",
                     False,
                 )
 
@@ -365,33 +377,60 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                     best_reflection = current_reflection
                     best_quality_score = current_reflection.output_quality_score
 
-                # Only continue if execution actually failed
-                if not current_reflection.is_successful:
-                    if reflection_attempts < reflection_max_retries:
-                        await self.emit_status(
-                            "warning",
-                            f"Output needs improvement. Retrying...",
-                            False,
-                        )
-                        reflection_attempts += 1
-                        continue
+                # If execution was successful, we can stop retrying
+                if current_reflection.is_successful:
+                    break
 
-                # If we reach here, either execution was successful or we're out of retries
-                action.status = "completed"
-                action.end_time = datetime.now().strftime("%H:%M:%S")
-                action.output = best_output
-                await self.emit_status(
-                    "success",
-                    f"Action completed with best output (Quality: {best_quality_score:.2f})",
-                    True,
-                )
-                return best_output
+                # If we have attempts remaining and execution failed, continue
+                if attempts_remaining > 0:
+                    attempts_remaining -= 1
+                    await self.emit_status(
+                        "warning",
+                        f"Output needs improvement. Retrying... ({attempts_remaining + 1} attempts remaining) (Quality Score: {current_reflection.output_quality_score:.2f})",
+                        False,
+                    )
+                    continue
+
+                # If we're here, we're out of attempts but have a best output
+                break
 
             except Exception as e:
-                action.status = "failed"
-                action.end_time = datetime.now().strftime("%H:%M:%S")
-                await self.emit_status("error", f"Action failed: {str(e)}", True)
-                raise
+                if attempts_remaining > 0:
+                    attempts_remaining -= 1
+                    await self.emit_status(
+                        "warning",
+                        f"Execution error, retrying... ({attempts_remaining + 1} attempts remaining)",
+                        False,
+                    )
+                    continue
+                else:
+                    action.status = "failed"
+                    action.end_time = datetime.now().strftime("%H:%M:%S")
+                    await self.emit_status(
+                        "error", f"Action failed after all attempts: {str(e)}", True
+                    )
+                    raise
+
+        # After all attempts, use the best output we got
+        if best_output is None:
+            action.status = "failed"
+            action.end_time = datetime.now().strftime("%H:%M:%S")
+            await self.emit_status(
+                "error",
+                f"Action failed to produce any valid output after all attempts",
+                True,
+            )
+            raise RuntimeError("No valid output produced after all attempts")
+
+        action.status = "completed"
+        action.end_time = datetime.now().strftime("%H:%M:%S")
+        action.output = best_output
+        await self.emit_status(
+            "success",
+            f"Action completed with best output (Quality: {best_quality_score:.2f} Consolidating Outputs...)",
+            True,
+        )
+        return best_output
 
     async def analyze_output(
         self, plan: Plan, action: Action, output: str, attempt: int
@@ -542,22 +581,75 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 output_quality_score=0.0,
             )
 
+    async def consolidate_branch_with_llm(
+        self, plan: Plan, action_id: str, completed_results: Dict
+    ) -> Dict:
+        """
+        Consolidate a branch using the LLM, ensuring code is merged and narrative is preserved.
+        """
+
+        # Gather branch outputs
+        branch_outputs = []
+        action = next(a for a in plan.actions if a.id == action_id)
+        for dep_id in action.dependencies:
+            branch_outputs.append(
+                {
+                    "id": dep_id,
+                    "result": completed_results.get(dep_id, {}).get("result", ""),
+                }
+            )
+        branch_outputs.append(
+            {"id": action_id, "result": completed_results[action_id]["result"]}
+        )
+
+        # Construct consolidation prompt
+        consolidation_prompt = f"""
+        Consolidate these outputs into a single coherent unit for the goal: {plan.goal}
+
+        Branch Outputs:
+        {json.dumps(branch_outputs, indent=2)}
+
+        Requirements:
+        1. Merge code blocks by language, preserving functionality.
+        2. Preserve narrative text (non-code content) in sequence.
+        3. Ensure proper integration between code and narrative.
+        4. Use clear organization and structure.
+        5. Include ALL content - no summarization.
+        6. code modifications must be outpute in a SINGLE CODE BLOCK never output variations or previus versions, the latest complete modified version of each code file or idea is the correct.
+        7. Do not mention steps or make comentaries. your task is consolidation on an iterative process. so focus on making a sole version with the latest or more relevant/good  code/information.
+        """
+
+        # Stream the consolidation process
+        consolidated_output = ""
+        await self.emit_replace("")
+        await self.emit_replace_mermaid(plan)
+        async for chunk in self.get_streaming_completion(
+            [
+                {"role": "system", "content": f"Goal: {plan.goal}"},
+                {"role": "user", "content": consolidation_prompt},
+            ]
+        ):
+            consolidated_output += chunk
+            await self.emit_message(chunk)
+
+        return {"result": consolidated_output}
+
     async def execute_plan(self, plan: Plan) -> Dict:
-        """Execute the complete plan with visualization"""
-        results = {}
+        """
+        Execute the complete plan with dependency-based context and LLM-driven consolidation.
+        """
+
+        completed_results = {}
         in_progress = set()
         completed = set()
         step_counter = 1
-
-        all_outputs = []
+        all_outputs = []  # Initialize all_outputs here
 
         async def can_execute(action: Action) -> bool:
             return all(dep in completed for dep in action.dependencies)
 
         while len(completed) < len(plan.actions):
-            await self.emit_replace_mermaid(
-                plan
-            )  # Always replace the old mermaid graph
+            await self.emit_replace_mermaid(plan)
 
             available = [
                 action
@@ -578,81 +670,151 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 in_progress.add(action.id)
 
                 try:
+                    # Gather ONLY direct dependency outputs
+                    context = {
+                        dep: completed_results.get(dep, {})
+                        .get("consolidated", {})
+                        .get("result", "")
+                        for dep in action.dependencies
+                    }
+
+                    # Execute action with dependency context and best result logic
                     result = await self.execute_action(
-                        plan, action, results, step_counter
+                        plan, action, context, step_counter
                     )
-                    results[action.id] = result
+
+                    completed_results[action.id] = {
+                        "result": result["result"]
+                    }  # Store original result
                     completed.add(action.id)
+
+                    # Consolidate the branch with LLM AFTER execution and marking as completed
+                    consolidated_output = await self.consolidate_branch_with_llm(
+                        plan, action.id, completed_results
+                    )
+                    completed_results[action.id]["consolidated"] = consolidated_output
+
+                    # Append BOTH original and consolidated results to all_outputs
+                    all_outputs.append(
+                        {
+                            "step": step_counter,
+                            "id": action.id,
+                            "original_output": result["result"],
+                            "consolidated_output": consolidated_output["result"],
+                            "status": action.status,
+                        }
+                    )
                     step_counter += 1
+
                 except Exception as e:
                     logger.error(f"Action {action.id} failed: {e}")
+                    action.status = "failed"
+                finally:
+                    in_progress.remove(action.id)
 
-                in_progress.remove(action.id)
-
-        await self.emit_replace_mermaid(plan)  # Update the final state of the graph
+            await self.emit_replace_mermaid(plan)
 
         plan.execution_summary = {
             "total_steps": len(plan.actions),
             "completed_steps": len(completed),
             "failed_steps": len(plan.actions) - len(completed),
             "execution_time": {
-                "start": plan.actions[0].start_time,
-                "end": plan.actions[-1].end_time,
+                "start": plan.actions[0].start_time if plan.actions else None,
+                "end": plan.actions[-1].end_time if plan.actions else None,
             },
         }
-        if action.output:
-            all_outputs.append(
-                {
-                    "step": step_counter,
-                    "id": action.id,
-                    "output": action.output,
-                    "status": action.status,
-                }
-            )
 
-        plan.metadata["execution_outputs"] = all_outputs
+        plan.metadata["execution_outputs"] = (
+            all_outputs  # Assign all_outputs to metadata
+        )
 
-        return results
+        return completed_results  # Return completed_results
 
     async def synthesize_results(self, plan: Plan, results: Dict) -> str:
         """Synthesize final results focusing on final outputs or merging dangling parts"""
+        logger.debug("Starting result synthesis")
 
         # Find final outputs or dangling parts
         final_outputs = []
+        dependencies_info = {}
+
         for action in reversed(plan.actions):
             # If this action has no dependents, it's a final output
             is_final = not any(
                 action.id in dep_action.dependencies for dep_action in plan.actions
             )
+
+            # Log dependencies for debugging
+            if action.dependencies:
+                dependencies_info[action.id] = {
+                    "deps": action.dependencies,
+                    "content": {
+                        dep: (
+                            results.get(dep, {}).get("result", "")[:100] + "..."
+                            if results.get(dep, {}).get("result")
+                            else "No content"
+                        )
+                        for dep in action.dependencies
+                    },
+                }
+                logger.debug(
+                    f"Dependencies for {action.id}: {dependencies_info[action.id]}"
+                )
+
             if is_final and action.output:
-                final_outputs.append(action.output)
+                final_outputs.append(
+                    {
+                        "id": action.id,
+                        "output": action.output,
+                        "dependencies": dependencies_info.get(action.id, {}),
+                    }
+                )
+
+        logger.debug(f"Found {len(final_outputs)} final outputs")
 
         if not final_outputs:
+            error_msg = "No final outputs found in execution"
             await self.emit_status(
                 "error",
-                "No final outputs found in execution",
+                error_msg,
                 True,
             )
-            return "No final outputs were generated during execution"
+            await self.emit_replace(error_msg)
+            return error_msg
 
-        # If there's only one final output, use it directly
+        # If there's only one final output, verify its completeness
         if len(final_outputs) == 1:
-            plan.final_output = final_outputs[0].get("result", "")
-            await self.emit_status(
-                "success",
-                "Using single final output",
-                True,
+            final_output = final_outputs[0]
+            completeness_check = await self.check_output_completeness(
+                final_output, plan.goal, dependencies_info
             )
-            await self.emit_replace(plan.final_output)
-            await self.emit_replace_mermaid(plan)
-            return plan.final_output
 
-        # If multiple final outputs, create merge prompt
+            if completeness_check["is_complete"]:
+                plan.final_output = final_output["output"].get("result", "")
+                await self.emit_status(
+                    "success",
+                    "Final output verified complete",
+                    True,
+                )
+                # Ensure the output is visible by using both emit methods
+                await self.emit_message(plan.final_output)
+                await self.emit_replace(plan.final_output)
+                await self.emit_replace_mermaid(plan)
+                return plan.final_output
+            else:
+                logger.warning(
+                    f"Output completeness check failed: {completeness_check['issues']}"
+                )
+
+        # If multiple outputs or completeness check failed, create merge prompt
         merge_prompt = f"""
         Merge these final outputs into a single coherent result for the goal: {plan.goal}
         
         Final Outputs to merge:
-        {json.dumps([output.get("result", "") for output in final_outputs], indent=2)}
+        {json.dumps([{
+            'output': output['output'].get('result', ''),
+            'dependencies': output['dependencies']
+        } for output in final_outputs], indent=2)}
         
         Requirements:
         1. Combine all outputs maintaining their complete functionality
@@ -660,6 +822,7 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         3. Ensure proper integration between parts
         4. Use clear organization and structure
         5. Include ALL content - no summarization
+        6. Verify all dependencies are properly incorporated
         """
 
         try:
@@ -674,11 +837,13 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 await self.emit_message(chunk)
 
             plan.final_output = complete_response
+            # Ensure visibility of final output
             await self.emit_status(
                 "success",
                 "Successfully merged final outputs",
                 True,
             )
+            await self.emit_message(plan.final_output)
             await self.emit_replace(plan.final_output)
             await self.emit_replace_mermaid(plan)
             return plan.final_output
@@ -688,7 +853,9 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 f"Failed to merge outputs: {str(e)}\n\nIndividual outputs:\n"
             )
             for i, output in enumerate(final_outputs, 1):
-                error_message += f"\n--- Output {i} ---\n{output.get('result', '')}\n"
+                error_message += (
+                    f"\n--- Output {i} ---\n{output['output'].get('result', '')}\n"
+                )
 
             plan.final_output = error_message
             await self.emit_status(
@@ -696,9 +863,52 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 "Failed to merge outputs - showing individual results",
                 True,
             )
-            await self.emit_replace(plan.final_output)
+            # Ensure error message is visible
+            await self.emit_message(error_message)
+            await self.emit_replace(error_message)
             await self.emit_replace_mermaid(plan)
-            return plan.final_output
+            return error_message
+
+    async def check_output_completeness(
+        self, final_output: Dict, goal: str, dependencies_info: Dict
+    ) -> Dict:
+        """Check if the final output is complete and incorporates all necessary dependencies"""
+
+        check_prompt = f"""
+        Analyze this final output for completeness:
+    
+        Goal: {goal}
+        Output: {final_output['output'].get('result', '')}
+        Dependencies: {json.dumps(dependencies_info, indent=2)}
+    
+        Verify:
+        1. Output fully achieves the stated goal
+        2. All dependencies are properly incorporated
+        3. No missing components or references
+        4. Implementation is complete and functional
+    
+        Return a JSON object with:
+        {{
+            "is_complete": boolean,
+            "confidence": float,
+            "issues": [list of specific issues],
+            "missing_dependencies": [list of missing dependency references]
+        }}
+        """
+
+        try:
+            response = await self.get_completion(check_prompt)
+            result = json.loads(response)
+            logger.debug(f"Completeness check result: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Error in completeness check: {e}")
+            return {
+                "is_complete": False,
+                "confidence": 0.0,
+                "issues": [f"Failed to verify completeness: {str(e)}"],
+                "missing_dependencies": [],
+            }
 
     async def emit_replace_mermaid(self, plan: Plan):
         """Emit current state as Mermaid diagram, replacing the old one"""
@@ -759,7 +969,11 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         results = await self.execute_plan(plan)
 
         await self.emit_status("info", "Creating final result...", False)
-        await self.synthesize_results(plan, results)  # No need to return here
-
+        final_result = await self.synthesize_results(
+            plan, results
+        )  # No need to return here
+        await self.emit_replace("")
+        await self.emit_replace_mermaid(plan)
+        await self.emit_message(final_result)
         # await self.emit_status("success", "Execution complete", True)
-        # return ""
+        return ""
