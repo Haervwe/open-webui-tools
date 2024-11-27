@@ -96,7 +96,7 @@ class Pipe:
             default=3, description="Maximum number of retry attempts"
         )
         CONCURRENT_ACTIONS: int = Field(
-            default=2, description="Maximum concurrent actions"
+            default=1, description="Maximum concurrent actions (experimental try on your own risk)"
         )
         ACTION_TIMEOUT: int = Field(
             default=300, description="Action timeout in seconds"
@@ -451,7 +451,11 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         return best_output
 
     async def analyze_output(
-        self, plan: Plan, action: Action, output: str, attempt: int
+        self,
+        plan: Plan,
+        action: Action,
+        output: str,
+        attempt: int,
     ) -> ReflectionResult:
         """Sophisticated output analysis"""
 
@@ -545,46 +549,95 @@ Return ONLY the JSON object. Do not include explanations or additional text.
     <JSON_END>
     ```
 """
-
         try:
             analysis_response = await self.get_completion(
                 analysis_prompt,
-                temperature=0.5,  # Balanced between creativity and precision
+                temperature=0.5,
                 top_k=40,
                 top_p=0.9,
             )
             logger.debug(f"RAW analysis response: {analysis_response}")
 
-            # Extract JSON using regex, considering the tags
+            # Improved regex for JSON extraction
             json_match = re.search(
-                r"<JSON_START>\s*(.*?)\s*<JSON_END>", analysis_response, re.DOTALL
+                r"<JSON_START>\s*({.*?})\s*<JSON_END>", analysis_response, re.DOTALL
             )
+
             if json_match:
-                analysis_data = json.loads(
-                    json_match.group(1)
-                )  # Parse the captured group
+                try:
+                    # Extract and parse the JSON string
+                    analysis_json = json_match.group(1)
+                    analysis_data = json.loads(analysis_json)
 
-                # Ensure list fields are indeed lists
-                for field in ["issues", "suggestions"]:
-                    if isinstance(analysis_data[field], str):
-                        analysis_data[field] = [analysis_data[field]]
+                    # Ensure list fields are indeed lists
+                    for field in ["issues", "suggestions"]:
+                        if isinstance(analysis_data[field], str):
+                            analysis_data[field] = [analysis_data[field]]
 
-                # Ensure 'changes' within 'required_corrections' is a list
-                if "changes" in analysis_data["required_corrections"]:
-                    if isinstance(
-                        analysis_data["required_corrections"]["changes"], str
-                    ):
-                        analysis_data["required_corrections"]["changes"] = [
-                            analysis_data["required_corrections"]["changes"]
-                        ]
+                    # Ensure 'changes' within 'required_corrections' is a list
+                    if "changes" in analysis_data["required_corrections"]:
+                        if isinstance(
+                            analysis_data["required_corrections"]["changes"], str
+                        ):
+                            analysis_data["required_corrections"]["changes"] = [
+                                analysis_data["required_corrections"]["changes"]
+                            ]
 
-                return ReflectionResult(**analysis_data)
+                    return ReflectionResult(**analysis_data)
+
+                except json.JSONDecodeError as e:
+                    logger.error(
+                        f"JSON decode error: {e}. Raw response: {analysis_response}"
+                    )
+                    try:
+                        # Sanitization logic: Remove non-JSON characters
+                        analysis_json = json_match.group(1)
+                        analysis_json = re.sub(
+                            r"[^{}\s\[\],:\"'\d\.-]", "", analysis_json
+                        )
+                        analysis_data = json.loads(analysis_json)
+
+                        for field in ["issues", "suggestions"]:
+                            if isinstance(analysis_data[field], str):
+                                analysis_data[field] = [analysis_data[field]]
+
+                        # Ensure 'changes' within 'required_corrections' is a list
+                        if "changes" in analysis_data["required_corrections"]:
+                            if isinstance(
+                                analysis_data["required_corrections"]["changes"], str
+                            ):
+                                analysis_data["required_corrections"]["changes"] = [
+                                    analysis_data["required_corrections"]["changes"]
+                                ]
+                        return ReflectionResult(**analysis_data)
+
+                    except json.JSONDecodeError as e2:
+                        logger.error(
+                            f"JSON decode error after sanitization: {e2}. Sanitized response: {analysis_json}"
+                        )
+                        return ReflectionResult(  # Fallback result
+                            is_successful=False,
+                            confidence_score=0.0,
+                            issues=["Analysis failed"],
+                            suggestions=["Retry with simplified output"],
+                            required_corrections={},
+                            output_quality_score=0.0,
+                        )
+
+                    return ReflectionResult(  # Fallback result
+                        is_successful=False,
+                        confidence_score=0.0,
+                        issues=["Analysis failed"],
+                        suggestions=["Retry with simplified output"],
+                        required_corrections={},
+                        output_quality_score=0.0,
+                    )
+
             else:
-                # Fallback to basic analysis if JSON extraction fails
                 logger.error(
                     f"Error extracting JSON from analysis response: {analysis_response}"
                 )
-                return ReflectionResult(
+                return ReflectionResult(  # Fallback result
                     is_successful=False,
                     confidence_score=0.0,
                     issues=["Analysis failed"],
@@ -595,7 +648,7 @@ Return ONLY the JSON object. Do not include explanations or additional text.
 
         except Exception as e:
             logger.error(f"Error in output analysis: {e}")
-            return ReflectionResult(
+            return ReflectionResult(  # Fallback result
                 is_successful=False,
                 confidence_score=0.0,
                 issues=["Analysis failed"],
@@ -609,6 +662,7 @@ Return ONLY the JSON object. Do not include explanations or additional text.
     ) -> Dict:
         """
         Consolidate a branch using the LLM, ensuring code is merged and narrative is preserved.
+        Uses consolidated outputs from previous steps when available.
         """
 
         await self.emit_status("info", f"Consolidating branch {action_id}...", False)
@@ -617,14 +671,35 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         branch_outputs = []
         action = next(a for a in plan.actions if a.id == action_id)
 
-        # Include the current action in the consolidation
+        # Include the current action's raw output in the consolidation
         branch_outputs.append(
             {
                 "id": action.id,
                 "description": action.description,
-                "result": completed_results[action_id]["result"],
+                "result": completed_results[action_id][
+                    "result"
+                ],  # Raw output for current action
             }
         )
+
+        for dep_id in action.dependencies:
+            dep_action = next((a for a in plan.actions if a.id == dep_id), None)
+            if dep_action:
+                # Use consolidated output if available, otherwise fallback to raw output
+                result = (
+                    completed_results.get(dep_id, {})
+                    .get("consolidated", {})
+                    .get("result", "")
+                )
+                if not result:
+                    result = completed_results.get(dep_id, {}).get("result", "")
+                branch_outputs.append(
+                    {
+                        "id": dep_id,
+                        "description": dep_action.description,
+                        "result": result,
+                    }
+                )
 
         for dep_id in action.dependencies:
             dep_action = next((a for a in plan.actions if a.id == dep_id), None)
@@ -639,21 +714,50 @@ Return ONLY the JSON object. Do not include explanations or additional text.
 
         # Construct consolidation prompt with focus on merging and clarity
         consolidation_prompt = f"""
-        Consolidate these outputs into a single coherent unit for the goal: {plan.goal}
-    
-        Branch Outputs:
-        {json.dumps(branch_outputs, indent=2)}
-    
-        Requirements:
-        1.  Merge code blocks intelligently, preserving functionality and resolving any conflicts.
-        2.  Combine narrative text (non-code content) smoothly, ensuring a clear and logical flow.
-        3.  Ensure proper integration between code and narrative, with code examples supporting the explanations.
-        4.  Use clear organization and structure, with headings, lists, and other formatting elements as needed.
-        5.  Include ALL relevant content - no summarization or omission of important details.
-        6.  Focus on producing a single, unified version of the output, without mentioning individual steps or their origins.
-        7.  Avoid unnecessary repetition or redundancy, while maintaining completeness and accuracy.
-        8.  If there are conflicting or contradictory elements in the outputs, resolve them in a way that makes the most sense in the context of the overall goal but specifically to the step at hand.
-        9.  Never add anaything beyond the scope of the latest step or messages shown, your job is to consolidate not to generate. 
+Consolidate these outputs into a single coherent unit for the goal: {plan.goal}
+
+Branch Outputs:
+{json.dumps(branch_outputs, indent=2)}
+
+Consolidate these outputs into a single coherent unit for the goal: {plan.goal}
+
+Branch Outputs:
+{json.dumps(branch_outputs, indent=2)}
+
+!!!EXTREMELY IMPORTANT!!!
+
+*   **DO NOT** add any explanations, comments, or any content not present in the branch outputs.
+*   **DO NOT** generate any new code, text, or any other type of content.
+*   **DO NOT** mention steps, their origins, or any other meta-information not relevant to the task output.
+*   Focus exclusively on creating a single, cohesive version of the given outputs, **WITHOUT ANY ADDITIONS OR MODIFICATIONS bEYOND THE PROVIDED IN CONTEXT.**
+
+Requirements:
+
+1.  **Strict Consolidation:**
+    *   **ONLY** merge and integrate the provided outputs.
+    *   Adhere to the **EXTREMELY IMPORTANT** instructions above.
+
+2.  **Content Integration:**
+    *   Intelligently merge all types of content, including code, text, diagrams, lists, etc., while adhering to Strict Consolidation rules.
+    *   Preserve the functionality of code blocks while ensuring clear integration with other content types.
+    *   For text, combine narrative elements seamlessly, maintaining the original intent and flow.
+    *   For diagrams, ensure they are correctly placed and referenced within the consolidated output.
+
+3.  **Conflict Resolution:**
+    *   If outputs contradict each other, prioritize information from later steps.
+    *   If there is ambiguity, resolve it in a way that aligns with the overall goal and the specific step, without adding new information.
+
+4.  **Structure and Clarity:**
+    *   Use appropriate formatting (headings, lists, code fences, etc.) to organize the consolidated output, based on the structure of the provided outputs.
+    *   Ensure a clear and logical flow of information, derived from the organization of the original outputs.
+
+5.  **Completeness and Accuracy:**
+    *   Include ALL relevant content from the branch outputs without modification. Do not summarize or omit any details.
+    *   Ensure the consolidated output accurately reflects the combined information from all steps, without any additions or alterations.
+
+Example of a well-consolidated output with mixed content:
+
+(This example would show a consolidated version of different content types - code, text, diagrams, etc. - **without any added comments or explanations**, demonstrating the strict consolidation requirement.)
         """
 
         # Stream the consolidation process
@@ -666,9 +770,9 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                     {"role": "system", "content": f"Goal: {plan.goal}"},
                     {"role": "user", "content": consolidation_prompt},
                 ],
-                temperature=0.3,
-                top_k=30,
-                top_p=0.8,
+                temperature=0.6,
+                top_k=40,
+                top_p=0.9,
             ):
                 consolidated_output += chunk
                 await self.emit_message(chunk)
@@ -693,6 +797,47 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         completed = set()
         step_counter = 1
         all_outputs = []  # Initialize all_outputs here
+        all_dependencies = {}  # Store all dependencies for pruning
+
+        # Build the all_dependencies dictionary
+        for action in plan.actions:
+            all_dependencies[action.id] = action.dependencies
+
+        def prune_redundant_dependencies(dependencies, action_id, all_dependencies):
+            """
+            Recursively prunes redundant dependencies from a list of dependencies.
+
+            Args:
+              dependencies: A list of dependencies for the current action.
+              action_id: The ID of the current action.
+              all_dependencies: A dictionary mapping action IDs to their dependencies.
+
+            Returns:
+              A list of pruned dependencies.
+            """
+            pruned_dependencies = []
+            for dependency in dependencies:
+                if dependency not in all_dependencies:
+                    pruned_dependencies.append(dependency)
+                else:
+                    # Recursively check if the dependency has any dependencies that are also
+                    # dependencies of the current action.
+                    redundant_dependencies = set(all_dependencies[dependency]) & set(
+                        dependencies
+                    )
+                    if not redundant_dependencies:
+                        pruned_dependencies.append(dependency)
+                    else:
+                        # If a redundant dependency is found, prune it and add its pruned
+                        # dependencies to the list.
+                        pruned_dependencies.extend(
+                            prune_redundant_dependencies(
+                                all_dependencies[dependency],
+                                dependency,
+                                all_dependencies,
+                            )
+                        )
+            return pruned_dependencies
 
         async def can_execute(action: Action) -> bool:
             return all(dep in completed for dep in action.dependencies)
@@ -719,12 +864,17 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 in_progress.add(action.id)
 
                 try:
-                    # Gather ONLY direct dependency outputs
+                    # Prune redundant dependencies
+                    pruned_dependencies = prune_redundant_dependencies(
+                        action.dependencies, action.id, all_dependencies
+                    )
+
+                    # Gather ONLY direct dependency outputs, using pruned dependencies
                     context = {
                         dep: completed_results.get(dep, {})
                         .get("consolidated", {})
                         .get("result", "")
-                        for dep in action.dependencies
+                        for dep in pruned_dependencies  # Use pruned dependencies here
                     }
 
                     # Execute action with dependency context and best result logic
@@ -738,9 +888,12 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                     completed.add(action.id)
 
                     # Consolidate the branch with LLM AFTER execution and marking as completed
-                    consolidated_output = await self.consolidate_branch_with_llm(
-                        plan, action.id, completed_results
-                    )
+                    if len(pruned_dependencies) > 0:
+                        consolidated_output = await self.consolidate_branch_with_llm(
+                            plan, action.id, completed_results
+                        )
+                    else:
+                        consolidated_output = result
                     completed_results[action.id]["consolidated"] = consolidated_output
 
                     # Append BOTH original and consolidated results to all_outputs
@@ -780,98 +933,105 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         return completed_results  # Return completed_results
 
     async def synthesize_results(self, plan: Plan, results: Dict) -> str:
-        """Synthesize final results focusing on final outputs or merging dangling parts"""
-        logger.debug("Starting result synthesis")
+        """
+        Synthesize final results with comprehensive context gathering and merging.
+        Uses consolidated outputs and handles dependencies effectively.
+        """
+        logger.debug("Starting enhanced result synthesis")
 
-        # Find final outputs or dangling parts
-        final_outputs = []
-        dependencies_info = {}
-
-        for action in reversed(plan.actions):
-            # If this action has no dependents, it's a final output
-            is_final = not any(
-                action.id in dep_action.dependencies for dep_action in plan.actions
+        # Collect all nodes without dependents (final nodes)
+        final_nodes = []
+        for action in plan.actions:
+            # Check if this action has NO dependents
+            is_final_node = not any(
+                action.id in a.dependencies for a in plan.actions if a.id != action.id
             )
 
-            # Log dependencies for debugging
-            if action.dependencies:
-                dependencies_info[action.id] = {
-                    "deps": action.dependencies,
-                    "content": {
-                        dep: (
-                            results.get(dep, {}).get("result", "")[:100] + "..."
-                            if results.get(dep, {}).get("result")
-                            else "No content"
-                        )
-                        for dep in action.dependencies
-                    },
+            if is_final_node:
+                # Gather comprehensive context with consolidated outputs
+                node_context = {
+                    "id": action.id,
+                    "description": action.description,
+                    "consolidated_output": results.get(action.id, {})
+                    .get("consolidated", {})
+                    .get("result", ""),
+                    "dependencies": [],
                 }
-                logger.debug(
-                    f"Dependencies for {action.id}: {dependencies_info[action.id]}"
-                )
 
-            if is_final and action.output:
-                final_outputs.append(
-                    {
-                        "id": action.id,
-                        "output": action.output,
-                        "dependencies": dependencies_info.get(action.id, {}),
-                    }
-                )
+                # Collect dependency details with consolidated outputs
+                for dep_id in action.dependencies:
+                    dep_action = next((a for a in plan.actions if a.id == dep_id), None)
+                    if dep_action:
+                        dep_context = {
+                            "id": dep_id,
+                            "description": dep_action.description,
+                            "consolidated_output": results.get(dep_id, {})
+                            .get("consolidated", {})
+                            .get("result", ""),
+                        }
+                        node_context["dependencies"].append(dep_context)
 
-        logger.debug(f"Found {len(final_outputs)} final outputs")
+                final_nodes.append(node_context)
 
-        if not final_outputs:
+        logger.debug(f"Found {len(final_nodes)} final nodes")
+
+        # Handle cases with no final nodes
+        if not final_nodes:
             error_msg = "No final outputs found in execution"
-            await self.emit_status(
-                "error",
-                error_msg,
-                True,
-            )
+            await self.emit_status("error", error_msg, True)
             await self.emit_replace(error_msg)
             return error_msg
 
-        # If there's only one final output, verify its completeness
-        if len(final_outputs) == 1:
-            final_output = final_outputs[0]
+        # Handle single final node with completeness check
+        if len(final_nodes) == 1:
+            final_node = final_nodes[0]
             completeness_check = await self.check_output_completeness(
-                final_output, plan.goal, dependencies_info
+                {"output": {"result": final_node["consolidated_output"]}},
+                plan.goal,
+                final_node["dependencies"],
             )
 
-            if completeness_check["is_complete"]:
-                plan.final_output = final_output["output"].get("result", "")
+            if completeness_check.get("is_complete", True):
+                plan.final_output = final_node["consolidated_output"]
                 await self.emit_status(
-                    "success",
-                    "Final output verified complete",
-                    True,
+                    "success", "Final output verified complete", True
                 )
-                # Ensure the output is visible by using both emit methods
+                await self.emit_replace("")
                 await self.emit_message(plan.final_output)
-                await self.emit_replace(plan.final_output)
                 await self.emit_replace_mermaid(plan)
                 return plan.final_output
-            else:
-                logger.warning(
-                    f"Output completeness check failed: {completeness_check['issues']}"
-                )
 
-        # If multiple outputs or completeness check failed, create merge prompt
+        # If multiple final nodes or completeness check failed, merge them
         merge_prompt = f"""
         Merge these final outputs into a single coherent result for the goal: {plan.goal}
         
         Final Outputs to merge:
-        {json.dumps([{
-            'output': output['output'].get('result', ''),
-            'dependencies': output['dependencies']
-        } for output in final_outputs], indent=2)}
+        {json.dumps([
+            {
+                'id': node['id'],
+                'description': node['description'],
+                'output': node['consolidated_output'],
+                'dependencies': [
+                    {
+                        'id': dep['id'], 
+                        'description': dep['description'], 
+                        'output': dep['consolidated_output']
+                    } for dep in node['dependencies']
+                ]
+            } for node in final_nodes
+        ], indent=2)}
         
         Requirements:
-        1. Combine all outputs maintaining their complete functionality
-        2. Preserve all implementation details
+        1. Combine ALL outputs maintaining their complete functionality
+        2. Preserve ALL implementation details from consolidated outputs
         3. Ensure proper integration between parts
         4. Use clear organization and structure
-        5. Include ALL content - no summarization
-        6. Verify all dependencies are properly incorporated
+        5. Include ALL content - NO summarization
+        6. Verify ALL dependencies are properly incorporated
+        7. CHECK FOR MISSING COMPONENTS:
+           - Ensure all CSS is included
+           - Verify all required imports and dependencies
+           - Check for any missing features or placeholders
         """
 
         try:
@@ -889,24 +1049,21 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 await self.emit_message(chunk)
 
             plan.final_output = complete_response
-            # Ensure visibility of final output
-            await self.emit_status(
-                "success",
-                "Successfully merged final outputs",
-                True,
-            )
-            await self.emit_message(plan.final_output)
-            await self.emit_replace(plan.final_output)
+            await self.emit_status("success", "Successfully merged final outputs", True)
+            await self.emit_replace("")
             await self.emit_replace_mermaid(plan)
+            await self.emit_message(plan.final_output)
             return plan.final_output
 
         except Exception as e:
             error_message = (
                 f"Failed to merge outputs: {str(e)}\n\nIndividual outputs:\n"
             )
-            for i, output in enumerate(final_outputs, 1):
+            for node in final_nodes:
                 error_message += (
-                    f"\n--- Output {i} ---\n{output['output'].get('result', '')}\n"
+                    f"\n--- Output for {node['id']} ---\n"
+                    f"Description: {node['description']}\n"
+                    f"Consolidated Output:\n{node['consolidated_output']}\n"
                 )
 
             plan.final_output = error_message
@@ -915,7 +1072,6 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 "Failed to merge outputs - showing individual results",
                 True,
             )
-            # Ensure error message is visible
             await self.emit_message(error_message)
             await self.emit_replace(error_message)
             await self.emit_replace_mermaid(plan)
@@ -938,6 +1094,9 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         2. All dependencies are properly incorporated
         3. No missing components or references
         4. Implementation is complete and functional
+        5. NO Missing features of any kind
+        6. NO SUMARIZATION
+        7. ALL CODE OR TEXT COMPLETE AND CORRECT
     
         Return a JSON object with:
         {{
