@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/open-webui
-version: 0.5
+version: 0.6
 """
 
 import logging
@@ -96,7 +96,8 @@ class Pipe:
             default=3, description="Maximum number of retry attempts"
         )
         CONCURRENT_ACTIONS: int = Field(
-            default=1, description="Maximum concurrent actions (experimental try on your own risk)"
+            default=1,
+            description="Maximum concurrent actions (experimental try on your own risk)",
         )
         ACTION_TIMEOUT: int = Field(
             default=300, description="Action timeout in seconds"
@@ -634,17 +635,29 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                     )
 
             else:
-                logger.error(
-                    f"Error extracting JSON from analysis response: {analysis_response}"
-                )
-                return ReflectionResult(  # Fallback result
-                    is_successful=False,
-                    confidence_score=0.0,
-                    issues=["Analysis failed"],
-                    suggestions=["Retry with simplified output"],
-                    required_corrections={},
-                    output_quality_score=0.0,
-                )
+                try:
+                    analysis_data = json.loads(analysis_response)
+
+                    # Ensure list fields are indeed lists (same as above)
+                    for field in ["issues", "suggestions"]:
+                        if isinstance(analysis_data[field], str):
+                            analysis_data[field] = [analysis_data[field]]
+
+                    # Ensure 'changes' within 'required_corrections' is a list (same as above)
+                    if "changes" in analysis_data["required_corrections"]:
+                        if isinstance(
+                            analysis_data["required_corrections"]["changes"], str
+                        ):
+                            analysis_data["required_corrections"]["changes"] = [
+                                analysis_data["required_corrections"]["changes"]
+                            ]
+
+                    return ReflectionResult(**analysis_data)
+
+                except json.JSONDecodeError as e:
+                    logger.error(
+                        f"JSON decode error (direct parsing): {e}. Raw response: {analysis_response}"
+                    )
 
         except Exception as e:
             logger.error(f"Error in output analysis: {e}")
