@@ -1,6 +1,6 @@
 # Open WebUI Tools Collection
 
-A collection of tools for Open WebUI that provides arXiv paper search capabilities and Hugging Face text-to-image generation functionality. Perfect for enhancing your LLM interactions with academic research and image generation capabilities!
+A collection of tools for Open WebUI that provides, structured planning and execution capability, arXiv paper search capabilities and Hugging Face text-to-image generation functionality. Perfect for enhancing your LLM interactions with academic research and image generation capabilities!
 
 ## Tools Included
 
