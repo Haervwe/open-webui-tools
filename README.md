@@ -74,7 +74,7 @@ for those without an HF api key its free, (up to a certain point but very loose)
 
 ## Configuration
 
-## Planner Agent
+### Planner Agent
   - **Admin**:
     - **Model:** the model id from your llm provider conected to Open-WebUI
     - **Concurrency:** (do not use this if you dont whant to debug it, its higly experimental and nor correctly implemented leave it as 1)
