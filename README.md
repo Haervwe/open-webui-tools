@@ -33,7 +33,7 @@ Features:
 
 ## Function Pipes Included
 
-## 1. Planner Agent
+### 1. Planner Agent
 
 This powerful agent allows you to define a goal, and it will autonomously generate and execute a plan to achieve it. The Planner is a generalist agent, capable of handling any text-based task, making it ideal for complex, multi-step requests that would typically require multiple prompts and manual intervention. 
 
