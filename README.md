@@ -33,7 +33,7 @@ Features:
 
 ## Function Pipes Included
 
-## 1. Planner Agent
+### 1. Planner Agent
 
 This powerful agent allows you to define a goal, and it will autonomously generate and execute a plan to achieve it. The Planner is a generalist agent, capable of handling any text-based task, making it ideal for complex, multi-step requests that would typically require multiple prompts and manual intervention. 
 
@@ -74,7 +74,7 @@ for those without an HF api key its free, (up to a certain point but very loose)
 
 ## Configuration
 
-## Planner Agent
+### Planner Agent
   - **Admin**:
     - **Model:** the model id from your llm provider conected to Open-WebUI
     - **Concurrency:** (do not use this if you dont whant to debug it, its higly experimental and nor correctly implemented leave it as 1)
