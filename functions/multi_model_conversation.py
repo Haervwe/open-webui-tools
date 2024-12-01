@@ -63,7 +63,7 @@ class Pipe:
             default="", description="Model tag for Participant 2"
         )
         Participant2Alias: str = Field(
-            default="", description="Alias tag for Participant 1"
+            default="", description="Alias tag for Participant 2"
         )
         Participant2SystemMessage: str = Field(
             default="", description="Character sheet for Participant 2"
@@ -72,7 +72,7 @@ class Pipe:
             default="", description="Model tag for Participant 3"
         )
         Participant3Alias: str = Field(
-            default="", description="Alias tag for Participant 1"
+            default="", description="Alias tag for Participant 3"
         )
         Participant3SystemMessage: str = Field(
             default="", description="Character sheet for Participant 3"
@@ -81,7 +81,7 @@ class Pipe:
             default="", description="Model tag for Participant 4"
         )
         Participant4Alias: str = Field(
-            default="", description="Alias tag for Participant 1"
+            default="", description="Alias tag for Participant 4"
         )
         Participant4SystemMessage: str = Field(
             default="", description="Character sheet for Participant 4"
@@ -90,7 +90,7 @@ class Pipe:
             default="", description="Model tag for Participant 5"
         )
         Participant5Alias: str = Field(
-            default="", description="Alias tag for Participant 1"
+            default="", description="Alias tag for Participant 5"
         )
         Participant5SystemMessage: str = Field(
             default="", description="Character sheet for Participant 5"
