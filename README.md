@@ -103,13 +103,15 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
 * **For Tools (arXiv Search Tool, Hugging Face Image Generator):**
     * Locate the desired tool on the hub page.
     * Click the "Get" button next to the tool. This will redirect you to your Open WebUI instance and automatically populate the installation code.
-    * Review the code, provide a name and description (if needed), and save the tool.
+    * (Optional) Review the code, provide a name and description (if needed),
+    * Save the tool.
 
 
 * **For Function Pipes (Planner Agent, arXiv Research MCTS Pipe, Multi Model Conversations) and Filters (Prompt Enhancer):**
     * Locate the desired function pipe or filter on the hub page.
     * Click the "Get" button. This will, again, redirect you to your Open WebUI instance with the installation code.
-    * Review the code, provide a name and description, and save.
+    * (Optional) Review the code, provide a different name and description,
+    * Save the function.
 
 
 **2. Manual Installation from the Open WebUI Interface:**
@@ -119,7 +121,7 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
     * Click the "+" button.
     * Copy the entire code of the respective `.py` file from this repository.
     * Paste the code into the text area in the Open WebUI interface.
-    * Provide a name and description (if needed), and save the tool.
+    * Provide a name and description , and save the tool.
 
 
 * **For Function Pipes (Planner Agent, arXiv Research MCTS Pipe, Multi Model Conversations) and Filters (Prompt Enhancer):**
@@ -128,7 +130,7 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
     * Copy and paste the code from the corresponding `.py` file.
     * Provide a name and description, and save.
 
-* **Important Note for the Prompt Enhancer Filter:**
+**Important Note for the Prompt Enhancer Filter:**
     * To use the Prompt Enhancer, you **must** create a new model configuration in Open WebUI.
     * Go to "Workspace" -> "Models" -> "+".
     * Select a base model.
@@ -188,6 +190,9 @@ Required configuration in Open WebUI:
 * **Participant [1-5] System Message:** Define the persona and instructions for each participant.
 * **All Participants Appended Message:** A global instruction appended to each participant's prompt.
 * **Temperature, Top_k, Top_p:** Standard model parameters.
+
+* **(note, the valves for the characters that wont be used must be setted to default or have correct paramenters) 
+
 
 ## Usage for Pipes
 
