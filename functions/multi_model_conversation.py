@@ -2,8 +2,7 @@
 title: Multi Model Conversations
 author: Haervwe
 author_url: https://github.com/Haervwe
-funding_url: https://github.com/Haervwe/open-webui-tools/
-version: 0.2
+version: 0.3
 """
 
 import logging
@@ -16,7 +15,6 @@ from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
 
 name = "Conversation"
-
 logger = logging.getLogger(name)
 logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler()
@@ -47,7 +45,7 @@ class Pipe:
         )
         ROUNDS_PER_USER_MESSAGE: int = Field(
             default=1,
-            description="Number of rounds of replies before user can send a new message",
+            description="Number of rounds of replies before user can send a new message / if GCM is active, this is the total amount of messages.",
             ge=1,
         )
         Participant1Model: str = Field(
@@ -97,7 +95,19 @@ class Pipe:
         )
         AllParticipantsApendedMessage: str = Field(
             default="Respond only as your specified character and never use your name as title, just output the response as if you really were talking(no one says his name before a phrase), do not go off character in any situation, Your acted response as",
-            description="Appended message to all participants internally to prime them propperly to not go off character",
+            description="Appended message to all participants internally to prime them properly to not go off character",
+        )
+        UseGroupChatManager: bool = Field(
+            default=False, description="Use Group Chat Manager"
+        )
+        ManagerModel: str = Field(default="", description="Model for the Manager")
+        ManagerSystemMessage: str = Field(
+            default="You are a group chat manager. Your role is to decide who should speak next in a multi-participant conversation. You will be given the conversation history and a list of participant aliases. Choose the alias of the participant who is most likely to provide a relevant and engaging response to the latest message. Consider the context of the conversation, the personalities of the participants, and avoid repeatedly selecting the same participant.",
+            description="System message for the Manager",
+        )
+        ManagerSelectionPrompt: str = Field(
+            default="Conversation History:\n{history}\n\nParticipants:\n{participants}\n\nCurrent User Message:\n{current_message}\n\nChoose the most appropriate participant to respond next. Provide only the alias of the chosen participant.",
+            description="Template for the Manager's selection prompt",
         )
         Temperature: float = Field(default=1, description="Models temperature")
         Top_k: int = Field(default=50, description="Models top_k")
@@ -132,14 +142,11 @@ class Pipe:
                 user=self.__user__,
                 bypass_filter=False,
             )
-
             if not hasattr(response, "body_iterator"):
                 raise ValueError("Response does not support streaming")
-
             async for chunk in response.body_iterator:
                 for part in self.get_chunk_content(chunk):
                     yield part
-
         except Exception as e:
             raise RuntimeError(f"Streaming completion failed: {e}")
 
@@ -147,20 +154,17 @@ class Pipe:
         chunk_str = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
         if chunk_str.startswith("data: "):
             chunk_str = chunk_str[6:]
-
-        chunk_str = chunk_str.strip()
-
-        if chunk_str == "[DONE]" or not chunk_str:
-            return
-
-        try:
-            chunk_data = json.loads(chunk_str)
-            if "choices" in chunk_data and len(chunk_data["choices"]) > 0:
-                delta = chunk_data["choices"][0].get("delta", {})
-                if "content" in delta:
-                    yield delta["content"]
-        except json.JSONDecodeError:
-            logger.error(f'ChunkDecodeError: unable to parse "{chunk_str[:100]}"')
+            chunk_str = chunk_str.strip()
+            if chunk_str == "[DONE]" or not chunk_str:
+                return
+            try:
+                chunk_data = json.loads(chunk_str)
+                if "choices" in chunk_data and len(chunk_data["choices"]) > 0:
+                    delta = chunk_data["choices"][0].get("delta", {})
+                    if "content" in delta:
+                        yield delta["content"]
+            except json.JSONDecodeError:
+                logger.error(f'ChunkDecodeError: unable to parse "{chunk_str[:100]}"')
 
     async def emit_message(self, message: str):
         await self.__current_event_emitter__(
@@ -195,7 +199,6 @@ class Pipe:
         self.__current_event_emitter__ = __event_emitter__
         self.__user__ = User(**__user__)
         self.__model__ = __model__  # Store the default model
-
         if __task__ == TASKS.TITLE_GENERATION:
             model = (
                 self.valves.Participant1Model or self.__model__
@@ -207,12 +210,10 @@ class Pipe:
             return f"{name}: {response['choices'][0]['message']['content']}"
 
         user_message = body.get("messages", [])[-1].get("content", "").strip()
-
         # Fetch valve configurations
         num_participants = self.valves.NUM_PARTICIPANTS
         rounds_per_user_message = self.valves.ROUNDS_PER_USER_MESSAGE
         participants = []
-
         for i in range(1, num_participants + 1):
             model_field = f"Participant{i}Model"
             system_field = f"Participant{i}SystemMessage"
@@ -230,7 +231,6 @@ class Pipe:
                     "system_message": system_message,
                 }
             )
-
         if not participants:
             await self.emit_status("error", "No participants configured", True)
             return "No participants configured."
@@ -238,49 +238,127 @@ class Pipe:
         self.conversation_history.append({"role": "user", "content": user_message})
 
         for _ in range(rounds_per_user_message):
-            for participant in participants:
-                model = participant["model"]
-                alias = participant["alias"]
-                system_message = participant["system_message"]
-
-                messages = [
-                    {"role": "system", "content": system_message},
+            if self.valves.UseGroupChatManager:
+                # Group Chat Manager Logic
+                manager_messages = [
+                    {"role": "system", "content": self.valves.ManagerSystemMessage},
                     *self.conversation_history,
                     {
                         "role": "user",
-                        "content": f"{self.valves.AllParticipantsApendedMessage} {alias}",
+                        "content": self.valves.ManagerSelectionPrompt.format(
+                            history="\n".join(
+                                f"{msg['role']}: {msg['content']}"
+                                for msg in self.conversation_history
+                            ),
+                            participants="\n".join(p["alias"] for p in participants),
+                            current_message=user_message,
+                        ),
                     },
                 ]
-
-                await self.emit_status(
-                    "info",
-                    f"Getting response from: {f'{alias}/{model}' if alias else model}...",
-                    False,
+                manager_response = await generate_chat_completions(
+                    {
+                        "model": self.valves.ManagerModel,
+                        "messages": manager_messages,
+                        "stream": False,
+                    },
+                    user=self.__user__,
                 )
-
-                try:
-                    await self.emit_model_title(alias)  # Emit title *before* streaming
-                    full_response = ""
-                    async for chunk in self.get_streaming_completion(
-                        messages, model=model
-                    ):
-                        full_response += chunk
-                        await self.emit_message(
-                            chunk
-                        )  # Stream the response without modification
-
-                    cleaned_response = full_response.strip()  # Clean after streaming
-                    self.conversation_history.append(
-                        {"role": "assistant", "content": cleaned_response}
-                    )
-                    logger.debug(f"History:{self.conversation_history}")
-                except Exception as e:
+                selected_alias = manager_response["choices"][0]["message"][
+                    "content"
+                ].strip()
+                # Find the selected participant
+                selected_participant = next(
+                    (p for p in participants if p["alias"] == selected_alias), None
+                )
+                logger.debug(f"GroupChatManager selection: {selected_participant}")
+                if selected_participant:
+                    # Proceed with the selected participant's response
+                    model = selected_participant["model"]
+                    alias = selected_participant["alias"]
+                    system_message = selected_participant["system_message"]
+                    messages = [
+                        {"role": "system", "content": system_message},
+                        *self.conversation_history,
+                        {
+                            "role": "user",
+                            "content": f"{self.valves.AllParticipantsApendedMessage} {alias}",
+                        },
+                    ]
                     await self.emit_status(
-                        "error",
-                        f"Error getting response from {model}: {e}",
-                        True,
+                        "info",
+                        f"Getting response from: {f'{alias}/{model}' if alias else model}...",
+                        False,
                     )
-                    logger.error(f"Error with {model}: {e}")
-
+                    try:
+                        await self.emit_model_title(
+                            alias
+                        )  # Emit title before streaming
+                        full_response = ""
+                        async for chunk in self.get_streaming_completion(
+                            messages, model=model
+                        ):
+                            full_response += chunk
+                            await self.emit_message(
+                                chunk
+                            )  # Stream the response without modification
+                        cleaned_response = full_response.strip()
+                        self.conversation_history.append(
+                            {"role": "assistant", "content": cleaned_response}
+                        )
+                        logger.debug(f"History:{self.conversation_history}")
+                    except Exception as e:
+                        await self.emit_status(
+                            "error",
+                            f"Error getting response from {model}: {e}",
+                            True,
+                        )
+                        logger.error(f"Error with {model}: {e}")
+                else:
+                    await self.emit_status(
+                        "error", f"Invalid participant selected: {selected_alias}", True
+                    )
+                    return f"Invalid participant selected: {selected_alias}"
+            else:
+                for participant in participants:
+                    model = participant["model"]
+                    alias = participant["alias"]
+                    system_message = participant["system_message"]
+                    messages = [
+                        {"role": "system", "content": system_message},
+                        *self.conversation_history,
+                        {
+                            "role": "user",
+                            "content": f"{self.valves.AllParticipantsApendedMessage} {alias}",
+                        },
+                    ]
+                    await self.emit_status(
+                        "info",
+                        f"Getting response from: {f'{alias}/{model}' if alias else model}...",
+                        False,
+                    )
+                    try:
+                        await self.emit_model_title(
+                            alias
+                        )  # Emit title before streaming
+                        full_response = ""
+                        async for chunk in self.get_streaming_completion(
+                            messages, model=model
+                        ):
+                            full_response += chunk
+                            await self.emit_message(
+                                chunk
+                            )  # Stream the response without modification
+                        cleaned_response = full_response.strip()
+                        self.conversation_history.append(
+                            {"role": "assistant", "content": cleaned_response}
+                        )
+                        logger.debug(f"History:{self.conversation_history}")
+                    except Exception as e:
+                        await self.emit_status(
+                            "error",
+                            f"Error getting response from {model}: {e}",
+                            True,
+                        )
+                        logger.error(f"Error with {model}: {e}")
         await self.emit_status("success", "Conversation completed", True)
         return ""

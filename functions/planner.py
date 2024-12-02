@@ -92,6 +92,9 @@ class Pipe:
         MODEL: str = Field(
             default=None, description="Model to use (model id from ollama)"
         )
+        ACTION_MODEL: str = Field(
+            default=None, description="Model to use (model id from ollama)"
+        )
         MAX_RETRIES: int = Field(
             default=3, description="Maximum number of retry attempts"
         )
