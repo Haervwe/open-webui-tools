@@ -54,13 +54,13 @@ It features advanced capabilities like:
 * **Output Optimization:**  Employs a reflection mechanism to analyze and improve the output of each step through multiple iterations.
 
 
-### 2. arXiv Reseach MCTS Pipe
+### 2. arXiv Research MCTS Pipe
 
 Search arXiv.org for relevant academic papers on any topic. No API key required!
 
 **Features:**
 - Search across paper titles, abstracts, and full text from Arxiv and Web with tavily
-- uses a MCTS aproach to make progressive refinements on a Reseach Summary on a given topic
+- uses a MCTS aproach to make progressive refinements on a Research Summary on a given topic
 - uses a visual representantion of the tree nodes to provide some visual feedback
 - shows intermediate steps
 - Configurable Width and Breadth of the search on valves.
@@ -148,7 +148,7 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
 ### arXiv Search Tool
 No configuration required! The tool works out of the box.
 
-### arXiv Reseach MCTS Pipe
+### arXiv Research MCTS Pipe
 
   - **Admin:**
 
@@ -211,7 +211,7 @@ Select the pipe with the corresponding model, it show as this:
 
 
 
-### arXiv Reseach MCTS Pipe
+### arXiv Research MCTS Pipe
 
 Select the pipe with the corresponding model, it show as this:
 
@@ -219,7 +219,7 @@ Select the pipe with the corresponding model, it show as this:
 
 ```python
 # Example usage in your prompt
-"Do a reseach summary on "DPO laser LLM training"
+"Do a research summary on "DPO laser LLM training"
 ```
 
 ![Screenshot from 2024-11-10 17-53-51](https://github.com/user-attachments/assets/28116b58-79ef-4d4a-bd51-bfa2f2102cc3)
