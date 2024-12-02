@@ -15,12 +15,21 @@ from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
 
 name = "Conversation"
-logger = logging.getLogger(name)
-logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+
+
+def setup_logger():
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        handler.set_name(name)
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.propagate = False
+    return logger
 
 
 @dataclass
@@ -43,9 +52,9 @@ class Pipe:
             ge=1,
             le=5,
         )
-        ROUNDS_PER_USER_MESSAGE: int = Field(
-            default=1,
-            description="Number of rounds of replies before user can send a new message / if GCM is active, this is the total amount of messages.",
+        ROUNDS_PER_CONVERSATION: int = Field(
+            default=3,
+            description="Number of rounds in the entire conversation",
             ge=1,
         )
         Participant1Model: str = Field(
@@ -104,6 +113,10 @@ class Pipe:
         ManagerSystemMessage: str = Field(
             default="You are a group chat manager. Your role is to decide who should speak next in a multi-participant conversation. You will be given the conversation history and a list of participant aliases. Choose the alias of the participant who is most likely to provide a relevant and engaging response to the latest message. Consider the context of the conversation, the personalities of the participants, and avoid repeatedly selecting the same participant.",
             description="System message for the Manager",
+        )
+        ManagerAvoidRepeatPrompt: str = Field(
+            default="Do not select the same participant as the last response.",
+            description="Instruction to avoid repeating the same participant",
         )
         ManagerSelectionPrompt: str = Field(
             default="Conversation History:\n{history}\n\nParticipants:\n{participants}\n\nCurrent User Message:\n{current_message}\n\nChoose the most appropriate participant to respond next. Provide only the alias of the chosen participant.",
@@ -212,7 +225,7 @@ class Pipe:
         user_message = body.get("messages", [])[-1].get("content", "").strip()
         # Fetch valve configurations
         num_participants = self.valves.NUM_PARTICIPANTS
-        rounds_per_user_message = self.valves.ROUNDS_PER_USER_MESSAGE
+        rounds_per_user_message = self.valves.ROUNDS_PER_CONVERSATION
         participants = []
         for i in range(1, num_participants + 1):
             model_field = f"Participant{i}Model"
@@ -237,24 +250,38 @@ class Pipe:
 
         self.conversation_history.append({"role": "user", "content": user_message})
 
-        for _ in range(rounds_per_user_message):
+        selected_participants = (
+            set()
+        )  # Keep track of selected participants in this round
+
+        last_speaker = None
+        selected_participants = set()  # Reset selected participants each round
+
+        for round_num in range(self.valves.ROUNDS_PER_CONVERSATION):
+            selected_participants = set()  # to ensure we dont repeat in the same round
             if self.valves.UseGroupChatManager:
                 # Group Chat Manager Logic
+                manager_prompt = self.valves.ManagerSelectionPrompt.format(
+                    history="\n".join(
+                        f"{msg['role']}: {msg['content']}"
+                        for msg in self.conversation_history
+                    ),
+                    participants="\n".join(p["alias"] for p in participants),
+                    current_message=(
+                        user_message if round_num == 0 else ""
+                    ),  # Only include user message on first round.  Ensures last message is from an agent.
+                )
+
+                if last_speaker:
+                    manager_prompt += f"\n{self.valves.ManagerAvoidRepeatPrompt} Last speaker was: {last_speaker}"
+
                 manager_messages = [
                     {"role": "system", "content": self.valves.ManagerSystemMessage},
                     *self.conversation_history,
-                    {
-                        "role": "user",
-                        "content": self.valves.ManagerSelectionPrompt.format(
-                            history="\n".join(
-                                f"{msg['role']}: {msg['content']}"
-                                for msg in self.conversation_history
-                            ),
-                            participants="\n".join(p["alias"] for p in participants),
-                            current_message=user_message,
-                        ),
-                    },
+                    {"role": "user", "content": manager_prompt},
                 ]
+
+                # get the manager response
                 manager_response = await generate_chat_completions(
                     {
                         "model": self.valves.ManagerModel,
@@ -263,15 +290,20 @@ class Pipe:
                     },
                     user=self.__user__,
                 )
+                # process it
                 selected_alias = manager_response["choices"][0]["message"][
                     "content"
                 ].strip()
-                # Find the selected participant
+
                 selected_participant = next(
                     (p for p in participants if p["alias"] == selected_alias), None
                 )
-                logger.debug(f"GroupChatManager selection: {selected_participant}")
-                if selected_participant:
+                # if valid  and not repeated proceed
+                if selected_participant and selected_alias not in selected_participants:
+                    selected_participants.add(selected_alias)
+                    last_speaker = selected_participant["alias"]
+                    selected_participants.add(selected_alias)  # Mark as used
+                    logger.debug(f"GroupChatManager selection: {selected_participant}")
                     # Proceed with the selected participant's response
                     model = selected_participant["model"]
                     alias = selected_participant["alias"]
@@ -313,6 +345,7 @@ class Pipe:
                             True,
                         )
                         logger.error(f"Error with {model}: {e}")
+
                 else:
                     await self.emit_status(
                         "error", f"Invalid participant selected: {selected_alias}", True
