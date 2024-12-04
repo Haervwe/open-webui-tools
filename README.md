@@ -75,6 +75,7 @@ This pipe allows you to simulate conversations between multiple language models,
 * **Multiple Participants:** Simulate conversations with up to 5 different language models.
 * **Character Definition:**  Craft unique personas for each participant using system messages.
 * **Round-Robin Turns:** Control the flow of conversation with configurable rounds per user message.
+* **Group-Chat-Manager:** Use an LLM model to select the next participant in the conversation. (toggleable in valves)
 * **Streaming Support:**  See the conversation unfold in real-time with streaming output.
 
 
