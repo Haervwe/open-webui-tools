@@ -136,7 +136,7 @@ class MCTS:
             await self.pipe.emit_message(
                 f"\nResearch direction {i+1}: {improvement}\n\n"
             )
-
+            logger.debug(f"temperature:{temperature}")
             research = await self.pipe.gather_research(
                 f"""Generate a new arXiv search query based on the improvement suggestion:
             Topic: {self.topic}
@@ -169,7 +169,6 @@ class MCTS:
         dynamic: bool,
     ):
         if not self.pipe.valves.TEMPERATURE_DECAY:
-            logger.debug(f"temperature: 1")
             return 1
 
         if dynamic:
@@ -186,14 +185,13 @@ class MCTS:
             temperature_clamped = max(
                 temperature_min, min(temperature, temperature_max)
             )
-            logger.debug(f"temperature: {temperature_clamped}")
+
             return temperature_clamped
 
         else:  # Standard decay, not influenced by parent score
             temperature = temperature_max - (temperature_max - temperature_min) * (
                 current_depth / max_depth
             )
-            logger.debug(f"temperature:{temperature}")
             return temperature
 
     async def simulate(self, node):
@@ -368,7 +366,7 @@ class Pipe:
         )
         research = web_research + arxiv_research
         logger.debug(
-            f"Research Result and prompts:: {arxiv_query[:70]}::: {arxiv_research[:70]} . {web_query[:70]}::: {web_research[:70]}"
+            f"Research Result and prompts:: {arxiv_query[:70]}::: {arxiv_research[:10]} . {web_query[:70]}::: {web_research[:10]}"
         )
         await self.emit_status(
             "user",
