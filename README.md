@@ -147,7 +147,7 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
   - **Admin**:
     - **Model:** the model id from your llm provider conected to Open-WebUI
     - **Action-Model:** the model to be used in the task execution , leave as default to use the same in all the process.
-    - **Concurrency:** (do not use this if you dont whant to debug it, its higly experimental and nor correctly implemented leave it as 1)
+    - **Concurrency:** ("Concurrency support is currently experimental. Due to resource limitations, comprehensive testing of concurrent LLM operations has not been possible. Users may experience unexpected behavior when running multiple LLM processes simultaneously. Further testing and optimization are planned.")
     - **Max retries:** Number of times the refelction step and subsequent refinement can happen per step. 
 
 ### arXiv Search Tool
