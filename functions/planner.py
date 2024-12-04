@@ -120,10 +120,12 @@ class Pipe:
         temperature: float = 0.7,  # Default fallback temperature
         top_k: int = 50,  # Default fallback top_k
         top_p: float = 0.9,  # Default fallback top_p
+        model: str = "",
     ):
+        model = model if model else self.valves.MODEL
         try:
             form_data = {
-                "model": self.__model__,
+                "model": model,
                 "messages": messages,
                 "stream": True,
                 "temperature": temperature,
@@ -349,6 +351,7 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                         temperature=0.9,
                         top_k=70,
                         top_p=0.95,
+                        model=self.valves.ACTION_MODEL,
                     ):
                         complete_response += chunk
                         await self.emit_message(chunk)
@@ -627,15 +630,6 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                             required_corrections={},
                             output_quality_score=0.0,
                         )
-
-                    return ReflectionResult(  # Fallback result
-                        is_successful=False,
-                        confidence_score=0.0,
-                        issues=["Analysis failed"],
-                        suggestions=["Retry with simplified output"],
-                        required_corrections={},
-                        output_quality_score=0.0,
-                    )
 
             else:
                 try:

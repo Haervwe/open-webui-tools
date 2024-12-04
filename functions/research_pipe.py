@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from open_webui.constants import TASKS
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
-
+import re
 from open_webui.main import generate_chat_completions
 
 
@@ -295,6 +295,7 @@ class Pipe:
             }
             async with aiohttp.ClientSession() as session:
                 async with session.get(arxiv_url, params=params) as response:
+                    logger.debug(f"arXiv API response status: {response.status}")
                     if response.status == 200:
                         data = await response.text()
                         soup = BeautifulSoup(data, "xml")
@@ -307,6 +308,7 @@ class Pipe:
                             }
                             for entry in entries
                         ]
+                
         except Exception as e:
             logger.error(f"arXiv search error: {e}")
         return []
@@ -366,7 +368,7 @@ class Pipe:
         )
         research = web_research + arxiv_research
         logger.debug(
-            f"Research Result and prompts:: {arxiv_query[:70]}::: {arxiv_research[:10]} . {web_query[:70]}::: {web_research[:10]}"
+            f"Research Result Created : ArXiv papers found: {len(arxiv_research)}, Web sources found: {len(web_research)}"
         )
         await self.emit_status(
             "user",
@@ -502,24 +504,51 @@ class Pipe:
         return complete
 
     async def evaluate_content(self, content: str, topic: str) -> float:
-        """Evaluate research content quality"""
+        """Evaluate research content quality based on topic and content."""
+        logger.debug(f"Evaluating content for topic: {topic[:50]}...")
+        # Improved and detailed prompt
         prompt = f"""
-    Rate this research synthesis from 1-10:
-    "{content}"
-    For topic: "{topic}"
+        Evaluate the quality of the research synthesis provided below:
 
-    Consider:
-    1. Integration of sources
-    2. Depth of analysis
-    3. Clarity and coherence
-    4. Relevance to topic
+        Content: "{content}"
+        Topic: "{topic}"
 
-    Reply with a single number only.
-    """
-        result = await self.get_completion(prompt)
+        Consider the following criteria:
+        1. Integration of sources.
+        2. Depth of analysis.
+        3. Clarity and coherence.
+        4. Relevance to the topic.
+
+        Provide a single numeric score between 1 and 10, inclusive. 
+        Do not include any explanation or additional text in your response—just the number.
+        """
+
         try:
-            return float(result.strip())
-        except ValueError:
+            # Get the result from the LLM
+            result = await self.get_completion(prompt)
+
+            # Extract the first valid number using regex
+            match = re.search(r"\b(10|\d(\.\d+)?)\b", result.strip())
+            if match:
+                score = float(match.group())
+
+                # Ensure the score is within the valid range
+                if 1.0 <= score <= 10.0:
+                    return score
+                else:
+                    logger.debug(f"Score out of range: {score}. Result was: {result}")
+                    return 0.0
+            else:
+                # No valid number found in the response
+                logger.debug(f"No valid number in response: {result}")
+                return 0.0
+
+        except Exception as e:
+            # Catch unexpected exceptions for robustness
+            logger.debug(f"Error during evaluation: {e}")
+            return 0.0
+        finally: # This will always run, even if there's an exception.
+            logger.debug(f"Evaluation complete. Score: {score}") 
             return 0.0
 
     def get_chunk_content(self, chunk):
