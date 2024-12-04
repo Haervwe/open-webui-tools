@@ -5,7 +5,7 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.2.0
+version: 0.3.0
 """
 
 import logging
@@ -65,6 +65,9 @@ class Node:
         self.children = []
         self.visits = 0
         self.value = 0
+        self.score = 0
+        self.temperature = kwargs.get("temperature", 1)
+        self.depth = kwargs.get("depth", 1)
 
     def add_child(self, child: "Node"):
         child.parent = self
@@ -116,11 +119,19 @@ class MCTS:
             node = max(node.children, key=lambda child: child.uct_value())
         return node
 
-    async def expand(self, node):
+    async def expand(self, node: Node, depth):
         await self.pipe.progress(f"Exploring research paths from {node.id}...")
         await self.pipe.emit_replace(self.mermaid(node))
-
+        temperature = self.define_temperature(
+            depth,
+            node.score,
+            self.max_depth,
+            self.pipe.valves.TEMPERATURE_MAX,
+            self.pipe.valves.TEMPERATURE_MIN,
+            self.pipe.valves.DINAMYC_TEMPERATURE_DECAY,
+        )
         for i in range(self.breadth):
+            await self.pipe.emit_replace(self.mermaid())
             improvement = await self.pipe.get_improvement(node.content, self.topic)
             await self.pipe.emit_message(
                 f"\nResearch direction {i+1}: {improvement}\n\n"
@@ -131,16 +142,59 @@ class MCTS:
             Topic: {self.topic}
             Improvement: {improvement}"""
             )
-            synthesis = await self.pipe.synthesize_research(research, self.topic)
+
+            synthesis = await self.pipe.synthesize_research(
+                research, self.topic, temperature
+            )
 
             child = Node(
-                content=synthesis, research=research, max_children=self.breadth
+                content=synthesis,
+                research=research,
+                max_children=self.breadth,
+                temperature=temperature,
             )
             node.add_child(child)
 
             await self.pipe.emit_replace(self.mermaid())
 
         return random.choice(node.children)
+
+    def define_temperature(
+        self,
+        current_depth: int,
+        parent_score: float,
+        max_depth: int,
+        temperature_max: float,
+        temperature_min: float,
+        dynamic: bool,
+    ):
+        if not self.pipe.valves.TEMPERATURE_DECAY:
+            logger.debug(f"temperature: 1")
+            return 1
+
+        if dynamic:
+            # Inversely proportional to parent_score (higher temperature (creativity) for lower scores)
+            score_normalized = parent_score / 10.0  # Normalize to 0-1 range
+            scaling_factor = 1.0 + (1.0 - score_normalized) * (
+                temperature_max - temperature_min
+            )  # Scales with difference from ideal score
+            temperature = (
+                ((temperature_max - temperature_min) * (current_depth / max_depth))
+                + temperature_min
+            ) * scaling_factor
+            # Clamp within bounds
+            temperature_clamped = max(
+                temperature_min, min(temperature, temperature_max)
+            )
+            logger.debug(f"temperature: {temperature_clamped}")
+            return temperature_clamped
+
+        else:  # Standard decay, not influenced by parent score
+            temperature = temperature_max - (temperature_max - temperature_min) * (
+                current_depth / max_depth
+            )
+            logger.debug(f"temperature:{temperature}")
+            return temperature
 
     async def simulate(self, node):
         await self.pipe.progress(f"Evaluating research path {node.id}...")
@@ -150,6 +204,7 @@ class MCTS:
         while node:
             node.visits += 1
             node.value += score
+            node.score = score
             node = node.parent
 
     def mermaid(self, selected=None):
@@ -186,7 +241,6 @@ class Pipe:
         ARXIV_MAX_RESULTS: int = Field(
             default=3, description="Maximum number of arXiv papers to fetch"
         )
-
         TREE_DEPTH: int = Field(
             default=4, description="Maximum depth of the research tree"
         )
@@ -195,6 +249,22 @@ class Pipe:
         )
         EXPLORATION_WEIGHT: float = Field(
             default=1.414, description="Controls exploration vs exploitation"
+        )
+        TEMPERATURE_DECAY: bool = Field(
+            default=True,
+            description="Activates Temperature , lowers the Temperature in each subsequent step",
+        )
+        DINAMYC_TEMPERATURE_DECAY: bool = Field(
+            default=True,
+            description="Activates Temperature  Dynamic mapping, giving higher creativity for lower scored parent nodes",
+        )
+        TEMPERATURE_MAX: float = Field(
+            default=1.4,
+            description="Temperature for starting the MCTS process with Temperature decay ONLY if active",
+        )
+        TEMPERATURE_MIN: float = Field(
+            default=0.5,
+            description="Temperature the MCTS process will attempt to converge to with Temperature decay, if set to dinamic this value is not fixed",
         )
 
     def __init__(self):
@@ -205,8 +275,6 @@ class Pipe:
         out = [
             {"id": f"{name}-{self.valves.MODEL}", "name": f"{name} {self.valves.MODEL}"}
         ]
-        logger.debug(f"Available models: {out}")
-
         return out
 
     def resolve_model(self, body: dict) -> str:
@@ -264,7 +332,6 @@ class Pipe:
                     logger.debug(f"Tavily API response status: {response.status}")
                     if response.status == 200:
                         result = await response.json()
-                        logger.debug(f"Tavily API response data: {result}")
                         results = result.get("results", [])
                         return [
                             {
@@ -301,7 +368,7 @@ class Pipe:
         )
         research = web_research + arxiv_research
         logger.debug(
-            f"Research Result and promtps:: {arxiv_query}, ::: {arxiv_research} . {web_query}::: {web_research} , "
+            f"Research Result and prompts:: {arxiv_query[:70]}::: {arxiv_research[:70]} . {web_query[:70]}::: {web_research[:70]}"
         )
         await self.emit_status(
             "user",
@@ -358,12 +425,14 @@ class Pipe:
     async def get_streaming_completion(
         self,
         messages,
+        temperature: float = 1,
     ) -> AsyncGenerator[str, None]:
         try:
             form_data = {
                 "model": self.__model__,
                 "messages": messages,
                 "stream": True,
+                "temperature": temperature,
             }
             response = await generate_chat_completions(
                 form_data,
@@ -406,7 +475,9 @@ class Pipe:
     """
         return await self.get_completion(prompt)
 
-    async def synthesize_research(self, research: List[Dict], topic: str) -> str:
+    async def synthesize_research(
+        self, research: List[Dict], topic: str, temperature
+    ) -> str:
         """Synthesize research content with streaming"""
         research_text = "\n\n".join(
             f"Title: {r['title']}\nContent: {r['content']}\nURL: {r['url']}"
@@ -426,7 +497,7 @@ class Pipe:
     """
         complete = ""
         async for chunk in self.get_streaming_completion(
-            [{"role": "user", "content": prompt}]
+            [{"role": "user", "content": prompt}], temperature
         ):
             complete += chunk
             await self.emit_message(chunk)
@@ -489,8 +560,6 @@ class Pipe:
             await self.emit_message(chunk)
         return complete
 
-    # Event emission methods unchanged...
-
     async def pipe(
         self,
         body: dict,
@@ -511,17 +580,21 @@ class Pipe:
             )
             content = response["choices"][0]["message"]["content"]
             return f"{name}: {content}"
-        logger.debug(f"Pipe {name} received: {body}")
+        logger.debug(f"Pipe {name} received: {body}"[:70])
         self.__current_event_emitter__ = __event_emitter__
         self.__model__ = model  # Assign after title check
 
         topic = body.get("messages", [])[-1].get("content", "").strip()
 
         await self.progress("Initializing research process...")
-
+        initial_temperature = (
+            self.valves.TEMPERATURE_MAX if self.valves.TEMPERATURE_DECAY else 1
+        )
         # Initial research
         initial_research = await self.gather_research(topic)
-        initial_content = await self.synthesize_research(initial_research, topic)
+        initial_content = await self.synthesize_research(
+            initial_research, topic, initial_temperature
+        )
 
         root = Node(
             content=initial_content,
@@ -534,6 +607,7 @@ class Pipe:
             pipe=self,
             topic=topic,
             max_depth=self.valves.TREE_DEPTH,
+            breadth=self.valves.TREE_BREADTH,
         )
 
         best_content = initial_content
@@ -543,7 +617,7 @@ class Pipe:
             await self.progress(f"Research iteration {i+1}/{self.valves.TREE_DEPTH}...")
 
             leaf = await mcts.select()
-            child = await mcts.expand(leaf)
+            child = await mcts.expand(leaf, i + 1)
             score = await mcts.simulate(child)
             mcts.backpropagate(child, score)
 

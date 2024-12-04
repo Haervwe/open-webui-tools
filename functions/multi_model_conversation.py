@@ -31,6 +31,7 @@ def setup_logger():
         logger.propagate = False
     return logger
 
+logger = setup_logger()
 
 @dataclass
 class User:
