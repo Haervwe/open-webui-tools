@@ -59,11 +59,14 @@ It features advanced capabilities like:
 Search arXiv.org for relevant academic papers on any topic. No API key required!
 
 **Features:**
-- Search across paper titles, abstracts, and full text from Arxiv and Web with tavily
-- uses a MCTS aproach to make progressive refinements on a Research Summary on a given topic
-- uses a visual representantion of the tree nodes to provide some visual feedback
-- shows intermediate steps
-- Configurable Width and Breadth of the search on valves.
+
+* **Comprehensive Search:** Searches across paper titles, abstracts, and full text content from both arXiv and the web using Tavily.
+* **MCTS-Driven Refinement:** Employs a Monte Carlo Tree Search (MCTS) approach to iteratively refine a research summary on a given topic.
+* **Adaptive Temperature Control:** Offers both static and dynamic temperature decay settings.  Static decay progressively reduces the LLM's temperature with each level of the search tree. Dynamic decay adjusts the temperature based on both depth and parent node scores, allowing the LLM to explore more diverse options when previous results are less promising. This fine-grained control balances exploration and exploitation for optimal refinement.
+* **Visual Tree Representation:** Provides a visual representation of the search tree, offering intuitive feedback on the exploration process and the relationships between different research directions.
+* **Transparent Intermediate Steps:** Shows intermediate steps of the search, allowing users to track the evolution of the research summary and understand the reasoning behind the refinements.
+* **Configurable Search Scope:** Allows users to configure the breadth and depth of the search (tree width and depth) to control the exploration scope and computational resources used.
+
 
 
 ### 3. Multi Model Conversations Pipe
@@ -143,25 +146,28 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
 ### Planner Agent
   - **Admin**:
     - **Model:** the model id from your llm provider conected to Open-WebUI
-    - **Concurrency:** (do not use this if you dont whant to debug it, its higly experimental and nor correctly implemented leave it as 1)
+    - **Action-Model:** the model to be used in the task execution , leave as default to use the same in all the process.
+    - **Concurrency:** ("Concurrency support is currently experimental. Due to resource limitations, comprehensive testing of concurrent LLM operations has not been possible. Users may experience unexpected behavior when running multiple LLM processes simultaneously. Further testing and optimization are planned.")
     - **Max retries:** Number of times the refelction step and subsequent refinement can happen per step. 
 
 ### arXiv Search Tool
+
 No configuration required! The tool works out of the box.
 
-### arXiv Research MCTS Pipe
+### arXiv Research MCTS Pipeline
 
-  - **Admin:**
+  - **Admin**:
+    * **Tavily API Key:** Required. Obtain your API key from tavily.com.  This is used for web searches.
+    * **Max Web Search Results:**  The number of web search results to fetch per query.
+    * **Max arXiv Results:** The number of results to fetch from the arXiv API per query.
+    * **Tree Breadth:** The number of child nodes explored during each iteration of the MCTS algorithm.  This controls the width of the search tree.
+    * **Tree Depth:** The number of iterations of the MCTS algorithm. This controls the depth of the search tree.
+    * **Exploration Weight:** A constant (recommended range 0-2) controlling the balance between exploration and exploitation. Higher values encourage exploration of new branches, while lower values favor exploitation of promising paths.
+    * **Temperature Decay:** Exponentially decreases the LLM's temperature parameter with increasing tree depth. This focuses the LLM's output from creative exploration to refinement as the search progresses.
+    * **Dynamic Temperature Adjustment:** Provides finer-grained control over temperature decay based on parent node scores.  If a parent node has a low score, the temperature is increased for its children, encouraging more diverse outputs and potentially uncovering better paths.
+    * **Maximum Temperature:** The initial temperature of the LLM (0-2, default 1.4). Higher temperatures encourage more diverse and creative outputs at the beginning of the search.
+    * **Minimum Temperature:** The final temperature of the LLM at maximum tree depth (0-2, default 0.5). Lower temperatures promote focused refinement of promising branches.
 
-    - **Tavily API KEY:** required, create it in tavily.com
-    - **Max Search Results:** Amount of results fo fech form web search
-    - **Arxiv Max Results:** Amount of results to fetch for arxiv API
-
-  - **User:**
-
-    - **Tree Breadth:** how many nodes per round are searched-
-    - **Tree Depth:** how many rounds are made.
-    - **Exploration Weight:** constant to control exploration vs exploitation, (a higher value means more exploration of new paths, while a low values makes the system stick with one option, range from 0 to 2 recommended)
 
 ### Hugging Face Image Generator
 Required configuration in Open WebUI:
