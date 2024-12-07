@@ -96,7 +96,7 @@ class Pipe:
             default=None, description="Model to use (model id from ollama)"
         )
         ACTION_PROMPT_REQUIREMENTS_TEMPLATE: str = Field(
-            default = """Requirements:
+            default="""Requirements:
             1. Provide implementation that DIRECTLY achieves the step goal
             2. Include ALL necessary components
             3. For code:
@@ -108,10 +108,11 @@ class Pipe:
                - Include all relevant details
         
             """,
-            description="General requirements for task completions, used in ALL action steps, change it to make the outputs of the task align to your general goal" 
+            description="General requirements for task completions, used in ALL action steps, change it to make the outputs of the task align to your general goal",
         )
         AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT: bool = Field(
-            default = False, description = "Use an LLM call to refine the requirements of each ACTION based on the whole PLAN and GOAL before executing an ACTION (uses the ACTION_PROMPT_REQUIREMENTS_TEMPLATE as an example of requirements)"
+            default=False,
+            description="Use an LLM call to refine the requirements of each ACTION based on the whole PLAN and GOAL before executing an ACTION (uses the ACTION_PROMPT_REQUIREMENTS_TEMPLATE as an example of requirements)",
         )
         MAX_RETRIES: int = Field(
             default=3, description="Maximum number of retry attempts"
@@ -299,58 +300,37 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         )
 
     async def enhance_requirements(self, plan: Plan, action: Action):
-        dependencies_str = json.dumps(action.dependencies) if action.dependencies else "None"
+        dependencies_str = (
+            json.dumps(action.dependencies) if action.dependencies else "None"
+        )
         has_dependencies = bool(action.dependencies)
-        
+
         requirements_prompt = f"""
-        Given the overall goal: {plan.goal}
+        Focus on this specific action: {action.description}
 
-        And focusing on the following action: {action.description}
-
-        With parameters: {json.dumps(action.params)}
+        Parameters: {json.dumps(action.params)}
 
         """
         if has_dependencies:
             requirements_prompt += f"""
-            And dependencies: {dependencies_str}
-
-            Dependencies should be properly considered, and their outputs should be appropriately utilized in this action.
-
+            Dependencies: {dependencies_str}
+            Consider how dependencies should be used in this action.
             """
-        
+
         requirements_prompt += f"""
-        Please generate a detailed set of requirements for executing this action. These requirements should ensure that:
+        Generate concise and clear requirements to ensure this action is performed correctly.
 
-        - The action is performed correctly and contributes directly to achieving the main goal.
+        For code actions:
+        - Ensure complete and runnable code.
+        - Define all variables.
+        - Handle errors gracefully.
 
-        - All necessary components and steps are included.
+        For text/documentation actions:
+        - Be specific and actionable.
+        - Include all relevant details.
 
-        - For code-related actions, the implementation should be complete, runnable, and free of placeholders or undefined variables.
 
-        - For text or documentation actions, the content should be specific, actionable, and include all relevant details.
-
-        **Example Requirements for a Code Action:**
-
-        1. Implement the function `process_data` that takes `input_data` as a parameter.
-
-        2. Ensure that `input_data` is validated for type and format.
-
-        3. Handle any potential errors gracefully and log them appropriately.
-
-        4. The function should return the processed data in the specified format.
-
-        **Example Requirements for a Text Documentation Action:**
-
-        1. Describe the purpose of the `user_authentication` module.
-
-        2. List all the functions included in the module and their functionalities.
-
-        3. Provide examples of how to use each function.
-
-        4. Mention any dependencies or prerequisites needed to use the module.
-
-        Please format the requirements in a clear, list-based manner for easy reference.
-
+        Return a numbered list of requirements.  Be direct and avoid unnecessary explanations.
         """
         enhanced_requirements = await self.get_completion(
             requirements_prompt,
@@ -360,16 +340,20 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         )
         logger.debug(f"RAW Enahcned Requirements: {enhanced_requirements}")
         return enhanced_requirements
-    
+
     async def execute_action(
         self, plan: Plan, action: Action, results: Dict, step_number: int
     ) -> Dict:
         """Execute action with enhanced reflection, always returning best output"""
         action.start_time = datetime.now().strftime("%H:%M:%S")
         action.status = "in_progress"
-        
+
         context = {dep: results.get(dep, {}) for dep in action.dependencies}
-        requirements = self.enhance_requirements(plan, action) if self.valves.AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT else self.valves.ACTION_PROMPT_REQUIREMENTS_TEMPLATE
+        requirements = (
+            await self.enhance_requirements(plan, action)
+            if self.valves.AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT
+            else self.valves.ACTION_PROMPT_REQUIREMENTS_TEMPLATE
+        )
         base_prompt = f"""
             Execute step {step_number}: {action.description}
             Overall Goal: {plan.goal}
