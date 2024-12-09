@@ -1227,7 +1227,7 @@ Requirements:
     ) -> str:
         model = self.valves.MODEL
         self.__user__ = User(**__user__)
-        if __task__ == TASKS.TITLE_GENERATION:
+        if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
             response = await generate_chat_completions(
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,

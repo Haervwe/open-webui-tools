@@ -215,7 +215,7 @@ class Pipe:
         self.__current_event_emitter__ = __event_emitter__
         self.__user__ = User(**__user__)
         self.__model__ = __model__  # Store the default model
-        if __task__ == TASKS.TITLE_GENERATION:
+        if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
             model = (
                 self.valves.Participant1Model or self.__model__
             )  # Use Participant 1 or default

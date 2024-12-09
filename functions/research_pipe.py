@@ -24,7 +24,7 @@ import re
 from open_webui.main import generate_chat_completions
 
 
-name = "Research"
+name = "Research Pipe"
 
 
 @dataclass
@@ -171,7 +171,7 @@ class MCTS:
         if not self.pipe.valves.TEMPERATURE_DECAY:
             return 1
 
-        if dynamic:
+        if dynamic and parent_score > 0:
             # Inversely proportional to parent_score (higher temperature (creativity) for lower scores)
             score_normalized = parent_score / 10.0  # Normalize to 0-1 range
             scaling_factor = 1.0 + (1.0 - score_normalized) * (
@@ -270,9 +270,7 @@ class Pipe:
 
     def pipes(self) -> list[dict[str, str]]:
 
-        out = [
-            {"id": f"{name}-{self.valves.MODEL}", "name": f"{name} {self.valves.MODEL}"}
-        ]
+        out = [{"id": f"{name}-{self.valves.MODEL}", "name": f"{name}"}]
         return out
 
     def resolve_model(self, body: dict) -> str:
@@ -308,7 +306,7 @@ class Pipe:
                             }
                             for entry in entries
                         ]
-                
+
         except Exception as e:
             logger.error(f"arXiv search error: {e}")
         return []
@@ -547,8 +545,8 @@ class Pipe:
             # Catch unexpected exceptions for robustness
             logger.debug(f"Error during evaluation: {e}")
             return 0.0
-        finally: # This will always run, even if there's an exception.
-            logger.debug(f"Evaluation complete. Score: {score}") 
+        finally:  # This will always run, even if there's an exception.
+            logger.debug(f"Evaluation complete. Score: {score}")
             return 0.0
 
     def get_chunk_content(self, chunk):
@@ -599,7 +597,7 @@ class Pipe:
         logger.debug(f"Model {model}")
         logger.debug(f"User: {__user__}")
         self.__user__ = User(**__user__)
-        if __task__ == TASKS.TITLE_GENERATION:
+        if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
             logger.debug(f"Model {TASKS}")
             response = await generate_chat_completions(
                 {"model": model, "messages": body.get("messages"), "stream": False},
