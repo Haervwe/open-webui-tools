@@ -56,7 +56,7 @@ class Pipe:
         Model: str = Field(default="", description="Model tag")
         Dataset_path: str = Field(
             default="/app/backend/data/UpdatedResumeDataSet.csv",
-            description="""Path tho the dataset for CSV, the script assumes two coloums "Category" and "Resume" """,
+            description="""Path to the dataset for CSV, the script assumes two coloums "Category" and "Resume" """,
         )
         GOOGLE_CSE_API_KEY: str = Field(
             default="", description="YOUR GOOGLE CSE API KEY"
@@ -370,6 +370,7 @@ class Pipe:
         relevant_jobs = await self.search_relevant_jobs(user_message)
 
         if relevant_jobs:
+            await self.emit_message("\n\n---\n\n")
             await self.emit_message(f"\n\n**Relevant Job Postings:**\n")
             for job in relevant_jobs:
                 await self.emit_message(
