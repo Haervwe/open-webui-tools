@@ -330,6 +330,20 @@ class Pipe:
             logger.error(f"Error in Google Search: {e}")
             return []
 
+    async def carrer_advisor_response (self, messages):
+        system_prompt = f"""You are an expert carrer advisor, take all the convesation an resume analysis in to acount and provide the User with actionable steps to improve his job prospects"""
+        messages = [
+                        {"role": "system", "content": system_prompt},
+                        *messages,
+                    ]
+        full_response = ""
+        async for chunk in self.get_streaming_completion(messages,model= self.valves.Model):
+            full_response += chunk
+            await self.emit_message(
+                chunk
+            )
+        
+        
     async def pipe(
         self,
         body: dict,
@@ -355,11 +369,14 @@ class Pipe:
             )
             return f"{name}: {response['choices'][0]['message']['content']}"
 
-        dataset_path = self.valves.Dataset_path  # Or your path
-        await self.emit_status("info", "Processing resume...", False)
-
+        dataset_path = self.valves.Dataset_path  
+                
         user_message = body.get("messages", [])[-1].get("content", "").strip()
-
+        if len(body.get("messages",[]))>1:
+            await self.carrer_advisor_response(body.get("messages",[]))
+            return ""
+        
+        await self.emit_status("info", "Processing resume...", False)
         try:
             df = pd.read_csv(dataset_path)
             valid_tags = df["Category"].unique().tolist()
