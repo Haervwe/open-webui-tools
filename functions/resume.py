@@ -130,7 +130,9 @@ class Pipe:
     async def generate_tags(self, resume_text, valid_tags):
         """Generates tags for a resume."""
         tag_prompt = f"""
-            Analyze the provided resume and identify the most relevant categories that describe the candidate's qualifications and experience.  Consider both hard skills (technical proficiencies) and soft skills (communication, teamwork, leadership, etc.).  The returned categories should be chosen from the provided list and formatted as a comma-separated string.
+            Analyze the provided resume and identify the most relevant categories that describe the candidate's qualifications and experience.  
+            Consider both hard skills (technical proficiencies) and soft skills (communication, teamwork, leadership, etc.).  
+            The returned categories should be chosen from the provided list and formatted as a comma-separated string.
 
             Valid Tags: {', '.join(valid_tags)}
         """
@@ -158,14 +160,16 @@ class Pipe:
     async def first_impression(self, resume_text):
         """Generates a first impression of the resume."""
         impression_prompt = f"""
-            You're an experienced recruiter reviewing a resume. Provide a concise and insightful first impression, focusing on the candidate's strengths and weaknesses.  Consider the clarity, conciseness, and overall presentation. Does the resume effectively highlight relevant skills and experience for a target role? Does the language used seem authentic and tailored, or does it appear generic and potentially AI-generated? Avoid overly positive or negative assessments; focus on objective observations.
+            You're an experienced recruiter reviewing a resume. Provide a concise and insightful first impression, focusing on the candidate's strengths and weaknesses.  
+            Consider the clarity, conciseness, and overall presentation. Does the resume effectively highlight relevant skills and experience for a target role? 
+            Does the language used seem authentic and tailored, or does it appear generic and potentially AI-generated? Avoid overly positive or negative assessments; focus on objective observations.
+            never output the words "first impressions"
             """
         impression_user_prompt=f"""
             Resume:
             ```
             {resume_text}
             ```
-            never output the words "first impressions"
         """
         response = await generate_chat_completions(
             {
@@ -267,67 +271,77 @@ class Pipe:
         )
         return response["choices"][0]["message"]["content"]
 
-    async def search_relevant_jobs(self, resume_text, num_results=5):
-
-        query_system_prompt = f"""
-        Generate a concise Google search query (no explanations) to find entry-level or internship job postings relevant to the provided resume. 
-        Prioritize key skills and job titles over specific technologies.  If a clear location preference is stated in the resume, include it in the query do not use " " in more than 1 query item.
-        dont be overly specific, add the keyword REMOTE if the job can be done remotely , don use extensive quoting, use it only for single words such as "AI"
-
-        Example Query:
-        
-        'site:linkedin.com/in/ "Ualá" AND '
-        '"Argentina" AND '
-        '("Recruiter" OR "HeadHunter" OR "Talent Acquisition" OR "HR" OR "Human Resources" OR '
-        '"People" OR "People Partner" OR "Tech Recruiter" OR "Technical Recruiter" OR "HR Business Partner")'
+    async def search_relevant_jobs(self, resume_text:str, num_results:int, tags:list):
         """
-        
-        query_user_prompt =f"""
-        Resume:
-        ```
-        {resume_text}
-        ```
+        Search for relevant job postings using provided tags
         """
-        response = await generate_chat_completions(
-            {
-                "model": self.valves.Model or self.__model__,
-                "messages": [{"role": "system", "content": query_system_prompt},{"role": "user", "content": query_user_prompt}],
-                "stream": False,
-            },
-            user=self.__user__,
-        )
-        search_query = response["choices"][0]["message"]["content"]
-        logger.debug(search_query)
-        service = build(
-            "customsearch", "v1", developerKey=self.valves.GOOGLE_CSE_API_KEY
-        )
+        # Validate and prepare tags
+        search_tags = list(set(tags))  # Remove duplicates
+        
+        # If no tags, return empty list
+        if not search_tags:
+            logger.warning("No tags provided for job search")
+            return []
 
+        # Construct a robust search query
+        query_components = []
+        
+        # Add tags to search query
+        tag_query = " OR ".join([f'"{tag}"' for tag in search_tags])
+        location_query = "Argentina OR Remote"
+        
+        # Encapsulate each component in parentheses
+        query_components.append(f"({location_query})")
+        query_components.append(f"({tag_query})")
+        
+        # Add search sites as alternatives
+        site_query = " OR ".join([
+            'site:linkedin.com/jobs',
+            'site:indeed.com/jobs',
+            'site:glassdoor.com/Job'
+        ])
+        query_components.append(f"({site_query})")
+        
+        # Construct the final search query
+        search_query = " AND ".join(query_components)
+        
+        logger.debug(f"Generated search query: {search_query}")
+
+        # Perform Google Custom Search
         try:
+            service = build(
+                "customsearch", "v1", developerKey=self.valves.GOOGLE_CSE_API_KEY
+            )
+
             res = (
                 service.cse()
                 .list(
                     q=search_query,
-                    cx=self.valves.GOOGLE_CSE_ID,  # Your Custom Search Engine ID
-                    num=num_results,  # Number of results
+                    cx=self.valves.GOOGLE_CSE_ID,  
+                    num=num_results,
                 )
                 .execute()
             )
-            logger.debug("Web Searched")
-            logger.debug(res)
+            logger.debug("Web Search Completed")
+
+            # Process and return job results
             jobs = []
             for item in res.get("items", []):
-                jobs.append(
-                    {
-                        "title": item.get("title"),
-                        "link": item.get("link"),
-                        "snippet": item.get("snippet"),
-                    }
-                )
+                jobs.append({
+                    "title": item.get("title"),
+                    "link": item.get("link"),
+                    "snippet": item.get("snippet"),
+                })
 
             return jobs
 
         except Exception as e:
             logger.error(f"Error in Google Search: {e}")
+            # Fallback to returning an empty list
+            return []
+        except Exception as e:
+            logger.error(f"Error in Google Search: {e}")
+            # Fallback to returning an empty list
             return []
 
     async def carrer_advisor_response (self, messages):
@@ -398,7 +412,7 @@ class Pipe:
         await self.emit_message("\n\n---\n\n")
         await self.emit_message(f"**Adversarial Analysis:**\n{analysis}")
         await self.emit_status("info", "Searching for relevant jobs...", False)
-        relevant_jobs = await self.search_relevant_jobs(user_message)
+        relevant_jobs = await self.search_relevant_jobs(user_message,5,tags)
 
         if relevant_jobs:
             await self.emit_message("\n\n---\n\n")
