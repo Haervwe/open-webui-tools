@@ -1250,7 +1250,7 @@ Requirements:
         await self.emit_status("info", "Creating final result...", False)
         final_result = await self.synthesize_results(
             plan, results
-        )  # No need to return here
+        ) 
         await self.emit_replace("")
         await self.emit_replace_mermaid(plan)
         await self.emit_message(final_result)

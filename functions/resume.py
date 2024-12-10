@@ -56,7 +56,7 @@ class Pipe:
         Model: str = Field(default="", description="Model tag")
         Dataset_path: str = Field(
             default="/app/backend/data/UpdatedResumeDataSet.csv",
-            description="""Path to the dataset for CSV, the script assumes two coloums "Category" and "Resume" """,
+            description="""Path tho the dataset for CSV, the script assumes two coloums "Category" and "Resume" """,
         )
         GOOGLE_CSE_API_KEY: str = Field(
             default="", description="YOUR GOOGLE CSE API KEY"
@@ -133,16 +133,18 @@ class Pipe:
             Analyze the provided resume and identify the most relevant categories that describe the candidate's qualifications and experience.  Consider both hard skills (technical proficiencies) and soft skills (communication, teamwork, leadership, etc.).  The returned categories should be chosen from the provided list and formatted as a comma-separated string.
 
             Valid Tags: {', '.join(valid_tags)}
-
+        """
+        tag_user_prompt=f"""
             Resume:
             ```
             {resume_text}
             ```
         """
+        
         response = await generate_chat_completions(
             {
                 "model": self.valves.Model or self.__model__,
-                "messages": [{"role": "user", "content": tag_prompt}],
+                "messages": [{"role": "system", "content": tag_prompt},{"role": "user", "content": tag_user_prompt}],
                 "stream": False,
             },
             user=self.__user__,
@@ -157,7 +159,8 @@ class Pipe:
         """Generates a first impression of the resume."""
         impression_prompt = f"""
             You're an experienced recruiter reviewing a resume. Provide a concise and insightful first impression, focusing on the candidate's strengths and weaknesses.  Consider the clarity, conciseness, and overall presentation. Does the resume effectively highlight relevant skills and experience for a target role? Does the language used seem authentic and tailored, or does it appear generic and potentially AI-generated? Avoid overly positive or negative assessments; focus on objective observations.
-
+            """
+        impression_user_prompt=f"""
             Resume:
             ```
             {resume_text}
@@ -167,7 +170,7 @@ class Pipe:
         response = await generate_chat_completions(
             {
                 "model": self.valves.Model or self.__model__,
-                "messages": [{"role": "user", "content": impression_prompt}],
+                "messages": [{"role": "system", "content": impression_prompt},{"role": "user", "content": impression_user_prompt}],
                 "stream": False,
             },
             user=self.__user__,
@@ -194,7 +197,8 @@ class Pipe:
             highlighting any weaknesses or areas for improvement that could hinder their chances. Focus on specific, actionable feedback the candidate can use to strengthen 
             their application materials.  Consider how the user's experience and skills stack up against the competition. 
             Avoid generic advice; offer tailored recommendations based on the context of similar resumes.
-
+            """
+        analysis_user_prompt=f"""
             User Resume:
             ```
             {user_resume}
@@ -208,7 +212,7 @@ class Pipe:
         response = await generate_chat_completions(
             {
                 "model": self.valves.Model or self.__model__,
-                "messages": [{"role": "user", "content": analysis_prompt}],
+                "messages": [{"role": "system", "content": analysis_prompt},{"role": "user", "content": analysis_user_prompt}],
                 "stream": False,
             },
             user=self.__user__,
@@ -226,11 +230,13 @@ class Pipe:
             Craft 5 insightful interview questions that go beyond simply verifying information on the resume.  
             These questions should encourage the candidate to tell stories, demonstrate their thought processes, 
             and reveal their potential for growth. Consider the nuances of the resume and tailor the questions accordingly.
+            """
+            persona_user_prompt=f"""
             Resume:
             ```
             {resume_text}
             ```
-        """
+            """
         else:
             jobs_context = "\n\n".join(
                 [f"- **{job['title']}**: {job['snippet']}" for job in relevant_jobs]
@@ -241,7 +247,8 @@ class Pipe:
                 Focus on evaluating their skills, experience, and problem-solving abilities in the context of the target positions.
                 Formulate 5 diverse interview questions that delve deeper than surface-level qualifications.  
                 Encourage the candidate to demonstrate their critical thinking, relevant expertise, and potential to excel in these roles.
-
+                """
+            persona_user_prompt=f"""
                 Resume:
                 ```
                 {resume_text}
@@ -253,7 +260,7 @@ class Pipe:
         response = await generate_chat_completions(
             {
                 "model": self.valves.Model or self.__model__,
-                "messages": [{"role": "user", "content": persona_prompt}],
+                "messages": [{"role": "system", "content": persona_prompt},{"role": "user", "content": persona_user_prompt}],
                 "stream": False,
             },
             user=self.__user__,
@@ -262,13 +269,20 @@ class Pipe:
 
     async def search_relevant_jobs(self, resume_text, num_results=5):
 
-        search_query_prompt = f"""
+        query_system_prompt = f"""
         Generate a concise Google search query (no explanations) to find entry-level or internship job postings relevant to the provided resume. 
         Prioritize key skills and job titles over specific technologies.  If a clear location preference is stated in the resume, include it in the query do not use " " in more than 1 query item.
-        dont be overly specific, add the keyword REMOTE if the job can be done remotely , don use extensive quting, use it only for single words such as "AI"
+        dont be overly specific, add the keyword REMOTE if the job can be done remotely , don use extensive quoting, use it only for single words such as "AI"
 
         Example Query:
         
+        'site:linkedin.com/in/ "Ualá" AND '
+        '"Argentina" AND '
+        '("Recruiter" OR "HeadHunter" OR "Talent Acquisition" OR "HR" OR "Human Resources" OR '
+        '"People" OR "People Partner" OR "Tech Recruiter" OR "Technical Recruiter" OR "HR Business Partner")'
+        """
+        
+        query_user_prompt =f"""
         Resume:
         ```
         {resume_text}
@@ -277,7 +291,7 @@ class Pipe:
         response = await generate_chat_completions(
             {
                 "model": self.valves.Model or self.__model__,
-                "messages": [{"role": "user", "content": search_query_prompt}],
+                "messages": [{"role": "system", "content": query_system_prompt},{"role": "user", "content": query_user_prompt}],
                 "stream": False,
             },
             user=self.__user__,
@@ -330,13 +344,13 @@ class Pipe:
         if __task__ in (
             TASKS.TITLE_GENERATION,
             TASKS.TAGS_GENERATION,
-        ):  # Simplified condition
+        ): 
             response = await generate_chat_completions(
                 {
                     "model": self.__model__,
                     "messages": body.get("messages"),
                     "stream": False,
-                },  # Use __model__ directly
+                }, 
                 user=self.__user__,
             )
             return f"{name}: {response['choices'][0]['message']['content']}"
@@ -351,19 +365,19 @@ class Pipe:
             valid_tags = df["Category"].unique().tolist()
         except FileNotFoundError:
             await self.emit_status("error", f"Dataset not found: {dataset_path}", True)
-            return ""  # or handle the error differently
+            return ""  
 
         tags = await self.generate_tags(user_message, valid_tags)
         first_impression = await self.first_impression(user_message)
 
-        # Emit ONLY the first impression ONCE
+       
         await self.emit_message(f"**First Impression:**\n{first_impression}")
 
         await self.emit_status("info", "Performing adversarial analysis...", False)
 
         analysis = await self.adversarial_analysis(
             user_message, df, tags
-        )  # Pass df and tags
+        )
         await self.emit_message("\n\n---\n\n")
         await self.emit_message(f"**Adversarial Analysis:**\n{analysis}")
         await self.emit_status("info", "Searching for relevant jobs...", False)
@@ -377,7 +391,6 @@ class Pipe:
                     f"- **{job['title']}** ({job['link']})\n{job['snippet']}\n"
                 )
 
-        # 4. Generate interview questions
         await self.emit_status("info", "Generating interview questions...", False)
         interview_questions = await self.generate_interview_questions(
             user_message, relevant_jobs
