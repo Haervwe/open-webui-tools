@@ -61,6 +61,7 @@ class Pipe:
         GOOGLE_CSE_API_KEY: str = Field(
             default="", description="YOUR GOOGLE CSE API KEY"
         )
+        web_search:bool = Field(default=False,desciption= "Activates web search for relevant job postings.")
         GOOGLE_CSE_ID: str = Field(default="", description="YOUR GOOGLE CSE ID")
         Temperature: float = Field(default=1, description="Model temperature")
         Top_k: int = Field(default=50, description="Model top_k")
@@ -127,7 +128,7 @@ class Pipe:
             except json.JSONDecodeError:
                 logger.error(f'ChunkDecodeError: unable to parse "{chunk_str[:100]}"')
 
-    async def generate_tags(self, resume_text, valid_tags):
+    async def generate_tags(self, resume_text:str, valid_tags:list):
         """Generates tags for a resume."""
         tag_prompt = f"""
             Analyze the provided resume and identify the most relevant categories that describe the candidate's qualifications and experience.  
@@ -157,7 +158,7 @@ class Pipe:
         ]
         return [tag for tag in tags if tag in valid_tags]  # Filter out invalid tags
 
-    async def first_impression(self, resume_text):
+    async def first_impression(self, resume_text:str):
         """Generates a first impression of the resume."""
         impression_prompt = f"""
             You're an experienced recruiter reviewing a resume. Provide a concise and insightful first impression, focusing on the candidate's strengths and weaknesses.  
@@ -182,8 +183,8 @@ class Pipe:
         return response["choices"][0]["message"]["content"]
 
     async def adversarial_analysis(
-        self, user_resume, df, tags
-    ):  # Add df and tags as arguments
+        self, user_resume:str, df, tags:list
+    )->str:  
         """Performs an adversarial analysis of the resume against similar ones."""
         similar_resumes = (
             df[df["Category"].isin(tags)]["Resume"]
@@ -223,7 +224,7 @@ class Pipe:
         )
         return response["choices"][0]["message"]["content"]
 
-    async def generate_interview_questions(self, resume_text, relevant_jobs):
+    async def generate_interview_questions(self, resume_text:str, relevant_jobs:list|None)->str:
         """Generates potential interview questions based on the resume and relevant jobs."""
 
         if not relevant_jobs:
@@ -271,7 +272,7 @@ class Pipe:
         )
         return response["choices"][0]["message"]["content"]
 
-    async def search_relevant_jobs(self, resume_text:str, num_results:int, tags:list):
+    async def search_relevant_jobs(self, resume_text:str, num_results:int, tags:list)->list:
         """
         Search for relevant job postings using provided tags
         """
@@ -300,7 +301,7 @@ class Pipe:
             'site:indeed.com/jobs',
             'site:glassdoor.com/Job'
         ])
-        query_components.append(f"({site_query})")
+        query_components.append(f"({site_query:str})")
         
         # Construct the final search query
         search_query = " AND ".join(query_components)
@@ -344,7 +345,7 @@ class Pipe:
             # Fallback to returning an empty list
             return []
 
-    async def carrer_advisor_response (self, messages):
+    async def carrer_advisor_response (self, messages:list)->str:
         system_prompt = f"""You are an expert carrer advisor, take all the convesation an resume analysis in to acount and provide the User with actionable steps to improve his job prospects"""
         messages = [
                         {"role": "system", "content": system_prompt},
@@ -356,7 +357,7 @@ class Pipe:
             await self.emit_message(
                 chunk
             )
-        
+        return full_response
         
     async def pipe(
         self,
@@ -411,15 +412,18 @@ class Pipe:
         )
         await self.emit_message("\n\n---\n\n")
         await self.emit_message(f"**Adversarial Analysis:**\n{analysis}")
-        await self.emit_status("info", "Searching for relevant jobs...", False)
-        relevant_jobs = await self.search_relevant_jobs(user_message,5,tags)
-
-        if relevant_jobs:
-            await self.emit_message("\n\n---\n\n")
-            await self.emit_message(f"\n\n**Relevant Job Postings:**\n")
-            for job in relevant_jobs:
-                await self.emit_message(
-                    f"- **{job['title']}** ({job['link']})\n{job['snippet']}\n"
+        
+        
+        if self.valves.web_search:
+            
+            relevant_jobs = await self.search_relevant_jobs(user_message,5,tags)
+            await self.emit_status("info", "Searching for relevant jobs...", False)
+            if relevant_jobs:
+                await self.emit_message("\n\n---\n\n")
+                await self.emit_message(f"\n\n**Relevant Job Postings:**\n")
+                for job in relevant_jobs:
+                    await self.emit_message(
+                        f"- **{job['title']}** ({job['link']})\n{job['snippet']}\n"
                 )
 
         await self.emit_status("info", "Generating interview questions...", False)
