@@ -2,9 +2,10 @@
 title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
-version: 0.0.1
+version: 0.0.2
 important note: this script requires a database for resumes , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
             and either you put it as is on /app/backend/data/UpdatedResumeDataSet.csv or change the  dataset_path in Valves.
+            if websearch is setted you must provide (for now the api key for this rapidapi endpoint https://rapidapi.com/Pat92/api/jobs-api14)
 """
 
 import logging
@@ -59,7 +60,7 @@ class Pipe:
             default="/app/backend/data/UpdatedResumeDataSet.csv",
             description="""Path tho the dataset for CSV, the script assumes two coloums "Category" and "Resume" """,
         )
-        RapidAPI_key: str = Field(default="", description="YOUR RapidAPI KEY")
+        RapidAPI_key: str = Field(default="", description="Your  jobs RapidAPI Key")
         web_search: bool = Field(
             default=False, desciption="Activates web search for relevant job postings."
         )
@@ -278,13 +279,7 @@ class Pipe:
             jobs_context = "\n\n".join(
                 [f"- **{job['title']}**: {job['description']}" for job in relevant_jobs]
             )
-            persona_prompt = f"""
-                You are an expert interviewer preparing questions for a candidate based on their resume and a set of relevant job descriptions.  
-                Your goal is to craft insightful questions that assess the candidate's suitability for these specific roles.
-                Focus on evaluating their skills, experience, and problem-solving abilities in the context of the target positions.
-                Formulate 5 diverse interview questions that delve deeper than surface-level qualifications.  
-                Encourage the candidate to demonstrate their critical thinking, relevant expertise, and potential to excel in these roles.
-                """
+            persona_prompt = self.valves.system_persona_prompt
             persona_user_prompt = f"""
                 Resume:
                 ```
@@ -440,6 +435,7 @@ class Pipe:
         await self.emit_message("\n\n---\n\n")
         await self.emit_message(f"**Adversarial Analysis:**\n{analysis}")
 
+        relevant_jobs = []
         if self.valves.web_search:
 
             relevant_jobs = await self.search_relevant_jobs(user_message, 5, tags)

@@ -106,10 +106,9 @@ Now, enhance the following prompt:
         context_str = f'\n\nContext:\n"""{context}"""\n\n' if context else ""
 
         # Construct the system prompt with clear delimiters
-        system_prompt = self.valves.user_customizable_template       
+        system_prompt = self.valves.user_customizable_template
         user_prompt = (
-            f"Context: {context_str}"
-            f'Prompt:\n"""{user_message}"""\n\n'
+            f"Context: {context_str}" f'Prompt to enhance:\n"""{user_message}"""\n\n'
         )
 
         # Log the system prompt before sending to LLM
@@ -124,7 +123,10 @@ Now, enhance the following prompt:
             "model": model_to_use,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Enhance the given user prompt based on context: {user_prompt}"},
+                {
+                    "role": "user",
+                    "content": f"Enhance the given user prompt based on context: {user_prompt}",
+                },
             ],
             "stream": False,
         }
@@ -136,7 +138,9 @@ Now, enhance the following prompt:
 
             # Update the messages with the enhanced prompt
             messages[-1]["content"] = enhanced_prompt
+            logger.debug(f"""After:{body["messages"]}""")
             body["messages"] = messages
+            logger.debug(f"""Before:{body["messages"]}""")
             logger.debug("Enhanced prompt: %s", enhanced_prompt)
             if self.valves.show_status:
                 await __event_emitter__(
