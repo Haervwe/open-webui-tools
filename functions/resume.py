@@ -6,7 +6,15 @@ version: 0.0.2
 important note: this script requires a database for resumes , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
             and either you put it as is on /app/backend/data/UpdatedResumeDataSet.csv or change the  dataset_path in Valves.
             if websearch is setted you must provide (for now the api key for this rapidapi endpoint https://rapidapi.com/Pat92/api/jobs-api14)
+
+TODO: make database download automatic.
+
+Call for Help: this script is made for testing purpuses in the context of a larger project aimed to create a set of LLM assisntants 
+for helping in job search and career advice based on ground truth examples and proffesional experice, all open sourced, so
+every feature you might think is useful, every bug or output , model that worked the best for you , any information really you wanna share will be greatly appeciated!
+you can contact me through  github
 """
+
 
 import logging
 import json
@@ -66,16 +74,14 @@ class Pipe:
         )
         Temperature: float = Field(default=1, description="Model temperature")
         system_prompt_tags: str = Field(
-            default="""
-            Analyze the provided resume and identify the most relevant categories that describe the candidate's qualifications and experience.  
+            default="""Analyze the provided resume and identify the most relevant categories that describe the candidate's qualifications and experience.  
             Consider both hard skills (technical proficiencies) and soft skills (communication, teamwork, leadership, etc.).  
             The returned categories should be chosen from the provided list and formatted as a comma-separated string.
             """,
             description="system prompt for tag generation",
         )
         system_impresion_prompt: str = Field(
-            default="""
-            You're an experienced recruiter reviewing a resume. Provide a concise and insightful first impression, focusing on the candidate's strengths and weaknesses.  
+            default="""You're an experienced recruiter reviewing a resume. Provide a concise and insightful first impression, focusing on the candidate's strengths and weaknesses.  
             Consider the clarity, conciseness, and overall presentation. Does the resume effectively highlight relevant skills and experience for a target role? 
             Does the language used seem authentic and tailored, or does it appear generic and potentially AI-generated? Avoid overly positive or negative assessments; focus on objective observations.
             never output the words "first impressions"
@@ -83,8 +89,7 @@ class Pipe:
             description="system prompt for first impressions",
         )
         system_analysis_prompt: str = Field(
-            default="""
-            Imagine you are a recruiter evaluating candidates for a competitive role. Analyze the user's resume in comparison to similar resumes, 
+            default="""Imagine you are a recruiter evaluating candidates for a competitive role. Analyze the user's resume in comparison to similar resumes, 
             highlighting any weaknesses or areas for improvement that could hinder their chances. Focus on specific, actionable feedback the candidate can use to strengthen 
             their application materials.  Consider how the user's experience and skills stack up against the competition. 
             Avoid generic advice; offer tailored recommendations based on the context of similar resumes.
@@ -92,8 +97,7 @@ class Pipe:
             description="system prompt for adversarial analysis",
         )
         system_persona_prompt: str = Field(
-            default="""
-            You are a highly skilled recruiter known for your insightful interview questions. You're preparing to interview a candidate based on the resume provided below. 
+            default="""You are a highly skilled recruiter known for your insightful interview questions. You're preparing to interview a candidate based on the resume provided below. 
             Your goal is to assess not only the candidate's stated skills and experience but also their deeper understanding, problem-solving abilities, and personality fit for the role. 
             Craft 5 insightful interview questions that go beyond simply verifying information on the resume.  
             These questions should encourage the candidate to tell stories, demonstrate their thought processes, 
