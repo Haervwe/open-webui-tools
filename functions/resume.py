@@ -2,19 +2,16 @@
 title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
-version: 0.0.2
-important note: this script requires a database for resumes , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
+version: 0.1.0
+important note: this script requires a database for resumes it automatically downloads it from my github but if u have trouble : , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
             and either you put it as is on /app/backend/data/UpdatedResumeDataSet.csv or change the  dataset_path in Valves.
             if websearch is setted you must provide (for now the api key for this rapidapi endpoint https://rapidapi.com/Pat92/api/jobs-api14)
-
-TODO: make database download automatic.
 
 Call for Help: this script is made for testing purpuses in the context of a larger project aimed to create a set of LLM assisntants 
 for helping in job search and career advice based on ground truth examples and proffesional experice, all open sourced, so
 every feature you might think is useful, every bug or output , model that worked the best for you , any information really you wanna share will be greatly appeciated!
 you can contact me through  github
 """
-
 
 import logging
 import json
@@ -26,7 +23,8 @@ from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
 import pandas as pd
 import requests
-from googleapiclient.discovery import build
+import aiohttp
+import os
 
 name = "Resume"
 
@@ -66,7 +64,11 @@ class Pipe:
         Model: str = Field(default="", description="Model tag")
         Dataset_path: str = Field(
             default="/app/backend/data/UpdatedResumeDataSet.csv",
-            description="""Path tho the dataset for CSV, the script assumes two coloums "Category" and "Resume" """,
+            description="""Path to the dataset for CSV, the script assumes two coloums "Category" and "Resume" """,
+        )
+        Dataset_url: str = Field(
+            default="https://raw.githubusercontent.com/Haervwe/open-webui-tools/main/Extras/UpdatedResumeDataSet.csv",
+            description="""URL for the Resumes DB""",
         )
         RapidAPI_key: str = Field(default="", description="Your  jobs RapidAPI Key")
         web_search: bool = Field(
@@ -388,6 +390,29 @@ class Pipe:
             await self.emit_message(chunk)
         return full_response
 
+    async def check_and_download_file(self, file_path: str, url: str):
+        # Check if the file exists
+        if not os.path.exists(file_path):
+            await self.emit_status(
+                "info", f"Resume DB not found at {file_path}. Downloading...", False
+            )
+
+            # Download the file
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as response:
+                        response.raise_for_status()  # Raise an error for bad HTTP status codes
+
+                        # Write the file to the specified path
+                        with open(file_path, "wb") as file:
+                            file.write(await response.read())
+
+                print(f"File downloaded and saved to {file_path}")
+            except aiohttp.ClientError as e:
+                print(f"An error occurred while downloading the file: {e}")
+        else:
+            print(f"File already exists at {file_path}.")
+
     async def pipe(
         self,
         body: dict,
@@ -414,7 +439,8 @@ class Pipe:
             return f"{name}: {response['choices'][0]['message']['content']}"
 
         dataset_path = self.valves.Dataset_path
-
+        dataset_url = self.valves.Dataset_url
+        await self.check_and_download_file(dataset_path, dataset_url)
         user_message = body.get("messages", [])[-1].get("content", "").strip()
         if len(body.get("messages", [])) > 1:
             await self.carrer_advisor_response(body.get("messages", []))
