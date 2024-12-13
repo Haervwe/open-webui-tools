@@ -81,7 +81,16 @@ This pipe allows you to simulate conversations between multiple language models,
 * **Group-Chat-Manager:** Use an LLM model to select the next participant in the conversation. (toggleable in valves)
 * **Streaming Support:**  See the conversation unfold in real-time with streaming output.
 
+### 4. Resume Analyzer Pipe
+Analyze resumes and provide tags, first impressions, adversarial analysis, potential interview questions, and career advice.
 
+**Features:**
+- **Resume Analysis:** Breaks down a resume into relevant categories, highlighting strengths and weaknesses.
+- **Tags Generation:** Identifies key skills and experience from the resume and assigns relevant tags.
+- **First Impression:** Provides an initial assessment of the resume's effectiveness in showcasing the candidate's qualifications for a target role.
+- **Adversarial Analysis:** Compares the analyzed resume to similar ones, offering actionable feedback on areas for improvement.
+- **Interview Questions:** Suggests insightful questions tailored to the candidate's experience and the target role.
+- **Career Advisor Response:** Offers personalized career advice based on the resume analysis and conversation history.
 
 ## Filters Included
 
@@ -144,11 +153,11 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
 ## Configuration
 
 ### Planner Agent
-  - **Admin**:
-    - **Model:** the model id from your llm provider conected to Open-WebUI
-    - **Action-Model:** the model to be used in the task execution , leave as default to use the same in all the process.
-    - **Concurrency:** ("Concurrency support is currently experimental. Due to resource limitations, comprehensive testing of concurrent LLM operations has not been possible. Users may experience unexpected behavior when running multiple LLM processes simultaneously. Further testing and optimization are planned.")
-    - **Max retries:** Number of times the refelction step and subsequent refinement can happen per step. 
+
+* **Model:** the model id from your llm provider conected to Open-WebUI
+* **Action-Model:** the model to be used in the task execution , leave as default to use the same in all the process.
+* **Concurrency:** ("Concurrency support is currently experimental. Due to resource limitations, comprehensive testing of concurrent LLM operations has not been possible. Users may experience unexpected behavior when running multiple LLM processes simultaneously. Further testing and optimization are planned.")
+* **Max retries:** Number of times the refelction step and subsequent refinement can happen per step. 
 
 ### arXiv Search Tool
 
@@ -156,37 +165,18 @@ No configuration required! The tool works out of the box.
 
 ### arXiv Research MCTS Pipeline
 
-  - **Admin**:
-    * **Tavily API Key:** Required. Obtain your API key from tavily.com.  This is used for web searches.
-    * **Max Web Search Results:**  The number of web search results to fetch per query.
-    * **Max arXiv Results:** The number of results to fetch from the arXiv API per query.
-    * **Tree Breadth:** The number of child nodes explored during each iteration of the MCTS algorithm.  This controls the width of the search tree.
-    * **Tree Depth:** The number of iterations of the MCTS algorithm. This controls the depth of the search tree.
-    * **Exploration Weight:** A constant (recommended range 0-2) controlling the balance between exploration and exploitation. Higher values encourage exploration of new branches, while lower values favor exploitation of promising paths.
-    * **Temperature Decay:** Exponentially decreases the LLM's temperature parameter with increasing tree depth. This focuses the LLM's output from creative exploration to refinement as the search progresses.
-    * **Dynamic Temperature Adjustment:** Provides finer-grained control over temperature decay based on parent node scores.  If a parent node has a low score, the temperature is increased for its children, encouraging more diverse outputs and potentially uncovering better paths.
-    * **Maximum Temperature:** The initial temperature of the LLM (0-2, default 1.4). Higher temperatures encourage more diverse and creative outputs at the beginning of the search.
-    * **Minimum Temperature:** The final temperature of the LLM at maximum tree depth (0-2, default 0.5). Lower temperatures promote focused refinement of promising branches.
-
-
-### Hugging Face Image Generator
-Required configuration in Open WebUI:
-
-1. **API Key** (Required):
-   - Obtain a Hugging Face API key from your HuggingFace account
-   - Set it in the tool's configuration in Open WebUI
-
-2. **API URL** (Optional):
-   - Default: Uses Stability AI's SD 3.5 Turbo model
-   - Can be customized to use other HF text-to-image model endpoints such as flux
   
-### Prompt Enhancer Filter
-
-* **User Customizable Template:**  Allows you to tailor the instructions given to the prompt-enhancing LLM.
-* **Show Status:** Displays status updates during the enhancement process.
-* **Show Enhanced Prompt:**  Outputs the enhanced prompt to the chat window for visibility.
-* **Model ID:** Select the specific model to use for prompt enhancement.
-
+* **Model:** The model ID from your LLM provider connected to Open WebUI.
+* **Tavily API Key:** Required. Obtain your API key from tavily.com.  This is used for web searches.
+* **Max Web Search Results:**  The number of web search results to fetch per query.
+* **Max arXiv Results:** The number of results to fetch from the arXiv API per query.
+* **Tree Breadth:** The number of child nodes explored during each iteration of the MCTS algorithm.  This controls the width of the search tree.
+* **Tree Depth:** The number of iterations of the MCTS algorithm. This controls the depth of the search tree.
+* **Exploration Weight:** A constant (recommended range 0-2) controlling the balance between exploration and exploitation. Higher values encourage exploration of new branches, while lower values favor exploitation of promising paths.
+* **Temperature Decay:** Exponentially decreases the LLM's temperature parameter with increasing tree depth. This focuses the LLM's output from creative exploration to refinement as the search progresses.
+* **Dynamic Temperature Adjustment:** Provides finer-grained control over temperature decay based on parent node scores.  If a parent node has a low score, the temperature is increased for its children, encouraging more diverse outputs and potentially uncovering better paths.
+* **Maximum Temperature:** The initial temperature of the LLM (0-2, default 1.4). Higher temperatures encourage more diverse and creative outputs at the beginning of the search.
+* **Minimum Temperature:** The final temperature of the LLM at maximum tree depth (0-2, default 0.5). Lower temperatures promote focused refinement of promising branches.
 
 ### Multi Model Conversations Pipe
 
@@ -198,8 +188,31 @@ Required configuration in Open WebUI:
 * **All Participants Appended Message:** A global instruction appended to each participant's prompt.
 * **Temperature, Top_k, Top_p:** Standard model parameters.
 
-* **(note, the valves for the characters that wont be used must be setted to default or have correct paramenters) 
+* **(note, the valves for the characters that wont be used must be setted to default or have correct paramenters)
 
+### Resume Analyzer Pipe
+
+* **Model:** The model ID from your LLM provider connected to Open WebUI.
+* **Dataset Path:** Local path to the resume dataset CSV file. Includes "Category" and "Resume" columns.
+* **RapidAPI Key (optional):** Required for job search functionality. Obtain an API key from RapidAPI Jobs API.
+* **Web Search:** Enable/disable web search for relevant job postings.
+* **Prompt templates:** Customizable templates for all the steps
+
+
+### Hugging Face Image Generator
+Required configuration in Open WebUI:
+
+* **API Key** (Required): Obtain a Hugging Face API key from your HuggingFace account and set it in the tool's configuration in Open WebUI
+*  **API URL** (Optional): Uses Stability AI's SD 3.5 Turbo model as Default,Can be customized to use other HF text-to-image model endpoints such as flux
+  
+### Prompt Enhancer Filter
+
+* **User Customizable Template:**  Allows you to tailor the instructions given to the prompt-enhancing LLM.
+* **Show Status:** Displays status updates during the enhancement process.
+* **Show Enhanced Prompt:**  Outputs the enhanced prompt to the chat window for visibility.
+* **Model ID:** Select the specific model to use for prompt enhancement.
+
+  
 
 ## Usage for Pipes
 
@@ -235,10 +248,34 @@ Select the pipe with the corresponding model, it show as this:
 
 ### Multi Model Conversations Pipe
 
-Select the pipe in the Open WebUI interface.  Configure the valves (settings) for the desired conversation setup. Start the conversation by sending a user message.
+1.Select the pipe in the Open WebUI interface.  
+2.Configure the valves (settings) for the desired conversation setup in the admin panel. 
+3 Start the conversation by sending a user message to the conversation pipe.
 
 ![Screenshot from 2024-11-30 20-54-28](https://github.com/user-attachments/assets/dc489a5b-f3a1-42a8-a7d5-b0ed1e570af8)
 
+
+### Resume Analyzer Pipe
+
+**Usage:**
+1. Select the Resume Analyzer Pipe in the Open WebUI interface.
+2. Configure the valves with the desired model, dataset path (optional), and other settings.
+3. Send a resume text as an attachment (make sure to user whle document setting) and a message to start the analysis process.
+4. Review the first impression, adversarial analysis, interview questions, and then ask for career advice.
+
+**Example Usage:**
+```python
+# Example usage in your prompt
+Analyze this resume:
+[Insert resume or resume text here]
+```
+
+![Screenshot from 2024-12-13 03-31-54](https://github.com/user-attachments/assets/2b7b16f8-38b0-40eb-8dac-9cae29d917cb)
+![Screenshot from 2024-12-13 02-50-15](https://github.com/user-attachments/assets/3520cec6-01fa-4d88-bc61-7d77e7c8ecc9)
+![Screenshot from 2024-12-13 03-23-11](https://github.com/user-attachments/assets/5d0a048a-24ba-4726-ad5e-a36daae2b607)
+
+
+The Resume Analyzer Pipe offers a comprehensive analysis of resumes, providing valuable insights and actionable feedback to help candidates improve their job prospects.
 
 ## Usage for tools
 
