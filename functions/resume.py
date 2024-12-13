@@ -2,7 +2,7 @@
 title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
-version: 0.1.0
+version: 0.1.2
 important note: this script requires a database for resumes it automatically downloads it from my github but if u have trouble : , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
             and either you put it as is on /app/backend/data/UpdatedResumeDataSet.csv or change the  dataset_path in Valves.
             if websearch is setted you must provide (for now the api key for this rapidapi endpoint https://rapidapi.com/Pat92/api/jobs-api14)
@@ -307,10 +307,8 @@ class Pipe:
             user=self.__user__,
         )
         return response["choices"][0]["message"]["content"]
-    
-    async def search_relevant_jobs(
-        self, num_results: int, tags: list
-    ) -> list:
+
+    async def search_relevant_jobs(self, num_results: int, tags: list) -> list:
         """Search for relevant job postings using RapidAPI Jobs API and provided tags.
 
         Args:
@@ -319,8 +317,8 @@ class Pipe:
 
         Returns:
             list: list of job postings from the API
-        
-        
+
+
         """
         # Validate and prepare tags
         search_tags = list(set(tags))  # Remove duplicates
@@ -392,7 +390,7 @@ class Pipe:
 
         Returns:
             str: career advisor LLM response
-        """       
+        """
         system_prompt = self.valves.system_career_advisor_prompt
         messages = [
             {"role": "system", "content": system_prompt},
@@ -435,6 +433,39 @@ class Pipe:
         else:
             print(f"File already exists at {file_path}.")
 
+    def parse_resume_context(self, messages):
+        # Find the system message with the resume context
+        system_message = next(
+            (msg for msg in messages if msg["role"] == "system"), None
+        )
+
+        if system_message["content"].find("<source_context>"):
+            # Extract the context from the source_context
+            context_start = system_message["content"].find("<source_context>")
+            context_end = system_message["content"].find("</source_context>")
+
+            if context_start != -1 and context_end != -1:
+                # Extract the resume content
+                resume_content = system_message["content"][
+                    context_start + len("<source_context>") : context_end
+                ].strip()
+
+                # Find the user message
+                user_message = next(
+                    (msg["content"] for msg in messages if msg["role"] == "user"), ""
+                )
+
+                # Combine resume content with user message
+                combined_message = f"{resume_content}\n\n{user_message}"
+
+                return combined_message
+
+        # If no system message or context found, return the user message
+        user_message = next(
+            (msg["content"] for msg in messages if msg["role"] == "user"), ""
+        )
+        return user_message
+
     async def pipe(
         self,
         body: dict,
@@ -474,8 +505,11 @@ class Pipe:
         dataset_path = self.valves.Dataset_path
         dataset_url = self.valves.Dataset_url
         await self.check_and_download_file(dataset_path, dataset_url)
-        user_message = body.get("messages", [])[-1].get("content", "").strip()
-        if len(body.get("messages", [])) > 1:
+        user_message = self.parse_resume_context(body.get("messages", []))
+        if ((body.get("messages", []))[-1].get("role", "").strip() != "user") and (
+            len(body.get("messages", [])) > 1
+        ):
+            logger.debug(body.get("messages", []))
             await self.carrer_advisor_response(body.get("messages", []))
             return ""
 
@@ -501,7 +535,7 @@ class Pipe:
         relevant_jobs = []
         if self.valves.web_search:
 
-            relevant_jobs = await self.search_relevant_jobs( 5, tags)
+            relevant_jobs = await self.search_relevant_jobs(5, tags)
             await self.emit_status("info", "Searching for relevant jobs...", False)
             if relevant_jobs:
                 await self.emit_message("\n\n---\n\n")
