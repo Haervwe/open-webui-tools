@@ -307,12 +307,20 @@ class Pipe:
             user=self.__user__,
         )
         return response["choices"][0]["message"]["content"]
-
+    
     async def search_relevant_jobs(
-        self, resume_text: str, num_results: int, tags: list
+        self, num_results: int, tags: list
     ) -> list:
-        """
-        Search for relevant job postings using RapidAPI Jobs API and provided tags.
+        """Search for relevant job postings using RapidAPI Jobs API and provided tags.
+
+        Args:
+            num_results (int):number of results to get from the API
+            tags (list): list fo tags for the job search
+
+        Returns:
+            list: list of job postings from the API
+        
+        
         """
         # Validate and prepare tags
         search_tags = list(set(tags))  # Remove duplicates
@@ -377,6 +385,14 @@ class Pipe:
             return []
 
     async def carrer_advisor_response(self, messages: list) -> str:
+        """Defines the system prompts and calls LLM to get response after the first resume process is done and the user sends a new message.
+
+        Args:
+            messages (list): last messages from the chat
+
+        Returns:
+            str: career advisor LLM response
+        """       
         system_prompt = self.valves.system_career_advisor_prompt
         messages = [
             {"role": "system", "content": system_prompt},
@@ -391,6 +407,12 @@ class Pipe:
         return full_response
 
     async def check_and_download_file(self, file_path: str, url: str):
+        """check if the resume db exits , if not it downloads it from url
+
+        Args:
+            file_path (str): path to the resume DB
+            url (str): url to fetch the DB
+        """
         # Check if the file exists
         if not os.path.exists(file_path):
             await self.emit_status(
@@ -421,6 +443,17 @@ class Pipe:
         __task__=None,
         __model__=None,
     ) -> str:
+        """
+        Analyzes a resume and provides feedback, tags, first impression, adversarial analysis, potential interview questions, and career advice.
+
+        :param body: The input data for the pipe.
+        :param __user__: The user object containing information about the user.
+        :param __event_emitter__: The event emitter object to emit messages and status updates.
+        :param __task__: The task identifier for the current operation (e.g., TITLE_GENERATION, TAGS_GENERATION).
+        :param __model__: The model to use for generating completions.
+
+        Returns: None
+        """
         self.__current_event_emitter__ = __event_emitter__
         self.__user__ = User(**__user__)
         self.__model__ = self.valves.Model
@@ -468,7 +501,7 @@ class Pipe:
         relevant_jobs = []
         if self.valves.web_search:
 
-            relevant_jobs = await self.search_relevant_jobs(user_message, 5, tags)
+            relevant_jobs = await self.search_relevant_jobs( 5, tags)
             await self.emit_status("info", "Searching for relevant jobs...", False)
             if relevant_jobs:
                 await self.emit_message("\n\n---\n\n")
