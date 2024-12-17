@@ -2,7 +2,8 @@
 title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
-version: 0.1.2
+version: 0.3.0
+requirements: aiofiles
 important note: this script requires a database for resumes it automatically downloads it from my github but if u have trouble : , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
             and either you put it as is on /app/backend/data/UpdatedResumeDataSet.csv or change the  dataset_path in Valves.
             if websearch is setted you must provide (for now the api key for this rapidapi endpoint https://rapidapi.com/Pat92/api/jobs-api14)
@@ -22,9 +23,11 @@ from dataclasses import dataclass
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
 import pandas as pd
-import requests
+import aiofiles
 import aiohttp
 import os
+import re
+
 
 name = "Resume"
 
@@ -76,10 +79,13 @@ class Pipe:
         )
         Temperature: float = Field(default=1, description="Model temperature")
         system_prompt_tags: str = Field(
-            default="""Analyze the provided resume and identify the most relevant categories that describe the candidate's qualifications and experience.  
+            default="""You are tasked with analyzing a resume to identify relevant categories that describe the candidate's qualifications and experience, Analyze the provided resume and identify the most relevant categories that describe the candidate's qualifications and experience.  
             Consider both hard skills (technical proficiencies) and soft skills (communication, teamwork, leadership, etc.).  
-            The returned categories should be chosen from the provided list and formatted as a comma-separated string.
-            """,
+            The returned categories should be chosen from the provided list and formatted as a comma-separated string. 
+            **Instructions:**
+            - Only use tags from the provided list of Valid Tags.
+            - Format your response as a comma-separated list with no additional text or symbols.
+            - Ensure each tag exactly matches one of the Valid Tags in spelling and capitalization.""",
             description="system prompt for tag generation",
         )
         system_impresion_prompt: str = Field(
@@ -175,37 +181,68 @@ class Pipe:
             except json.JSONDecodeError:
                 logger.error(f'ChunkDecodeError: unable to parse "{chunk_str[:100]}"')
 
-    async def generate_tags(self, resume_text: str, valid_tags: list):
-        """Generates tags for a resume."""
-        tag_prompt = (
-            self.valves.system_prompt_tags
-            + f"""
-            Valid Tags: {', '.join(valid_tags)}
-        """
-        )
+    async def generate_tags(self, resume_text: str, valid_tags: List[str]) -> List[str]:
+        """Generates tags for a resume with improved validation."""
+
+        # Create case-insensitive mapping of valid tags
+        valid_tags_map = {tag.lower(): tag for tag in valid_tags}
+
+        # Properly format the valid tags string
+        valid_tags_str = "**Valid Tags:** " + ", ".join(valid_tags)
+
+        system_prompt = f"""{self.valves.system_prompt_tags}
+    
+    {valid_tags_str}
+    """
+
         tag_user_prompt = f"""
-            Resume:
-            ```
-            {resume_text}
-            ```
+        Resume:
+        ```
+        {resume_text}
+        ```
         """
 
-        response = await generate_chat_completions(
-            {
-                "model": self.valves.Model or self.__model__,
-                "messages": [
-                    {"role": "system", "content": tag_prompt},
-                    {"role": "user", "content": tag_user_prompt},
-                ],
-                "stream": False,
-            },
-            user=self.__user__,
-        )
-        tags = [
-            tag.strip()
-            for tag in response["choices"][0]["message"]["content"].split(",")
-        ]
-        return [tag for tag in tags if tag in valid_tags]  # Filter out invalid tags
+        try:
+            response = await generate_chat_completions(
+                {
+                    "model": self.valves.Model or self.__model__,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": tag_user_prompt},
+                    ],
+                    "temperature": 0.2,
+                    "top_p": 0.8,
+                    "stream": False,
+                },
+                user=self.__user__,
+            )
+
+            raw_content = response["choices"][0]["message"]["content"]
+            logger.debug(f"Raw tag generation response: {raw_content}")
+
+            # Split by comma and clean up
+            raw_tags = [tag.strip() for tag in raw_content.split(",")]
+
+            # More flexible validation
+            filtered_tags = []
+            for tag in raw_tags:
+                tag_lower = tag.lower()
+                if tag_lower in valid_tags_map:
+                    filtered_tags.append(valid_tags_map[tag_lower])
+                else:
+                    # Try to match partial tags
+                    for valid_lower, valid_original in valid_tags_map.items():
+                        if tag_lower in valid_lower or valid_lower in tag_lower:
+                            filtered_tags.append(valid_original)
+                            break
+
+            logger.debug(f"Filtered tags: {filtered_tags}")
+            return list(set(filtered_tags))  # Remove duplicates
+
+        except Exception as e:
+            logger.error(f"Error generating tags: {e}")
+            await self.emit_status("error", f"Failed to generate tags: {e}", True)
+            return []
 
     async def first_impression(self, resume_text: str):
         """Generates a first impression of the resume."""
@@ -308,17 +345,17 @@ class Pipe:
         )
         return response["choices"][0]["message"]["content"]
 
-    async def search_relevant_jobs(self, num_results: int, tags: list) -> list:
+    async def search_relevant_jobs(
+        self, num_results: int, tags: List[str]
+    ) -> List[Dict[str, str]]:
         """Search for relevant job postings using RapidAPI Jobs API and provided tags.
 
         Args:
-            num_results (int):number of results to get from the API
-            tags (list): list fo tags for the job search
+            num_results (int): Number of results to get from the API.
+            tags (list): List of tags for the job search.
 
         Returns:
-            list: list of job postings from the API
-
-
+            list: List of job postings from the API.
         """
         # Validate and prepare tags
         search_tags = list(set(tags))  # Remove duplicates
@@ -346,12 +383,12 @@ class Pipe:
         }
 
         try:
-            # Make the API request
-            response = requests.get(url, headers=headers, params=querystring)
-            response.raise_for_status()
-
-            # Parse the response
-            data = response.json()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, headers=headers, params=querystring
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
 
             # Validate and process job data
             jobs = []
@@ -375,7 +412,7 @@ class Pipe:
 
             return jobs
 
-        except requests.exceptions.RequestException as e:
+        except aiohttp.ClientError as e:
             logger.error(f"Error fetching job postings: {e}")
             return []
         except ValueError as e:
@@ -405,11 +442,11 @@ class Pipe:
         return full_response
 
     async def check_and_download_file(self, file_path: str, url: str):
-        """check if the resume db exits , if not it downloads it from url
+        """Check if the resume DB exists, if not download it from the URL.
 
         Args:
-            file_path (str): path to the resume DB
-            url (str): url to fetch the DB
+            file_path (str): Path to the resume DB.
+            url (str): URL to fetch the DB.
         """
         # Check if the file exists
         if not os.path.exists(file_path):
@@ -421,49 +458,71 @@ class Pipe:
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url) as response:
-                        response.raise_for_status()  # Raise an error for bad HTTP status codes
+                        response.raise_for_status()
+                        content = await response.read()
 
-                        # Write the file to the specified path
-                        with open(file_path, "wb") as file:
-                            file.write(await response.read())
+                # Use aiofiles for asynchronous file writing
+                async with aiofiles.open(file_path, "wb") as file:
+                    await file.write(content)
 
-                print(f"File downloaded and saved to {file_path}")
+                logger.info(f"File downloaded and saved to {file_path}")
             except aiohttp.ClientError as e:
-                print(f"An error occurred while downloading the file: {e}")
+                logger.error(
+                    f"An error occurred while downloading the file from {url}: {e}"
+                )
+                await self.emit_status(
+                    "error", f"Failed to download dataset: {e}", True
+                )
+            except Exception as e:
+                logger.error(f"Unexpected error: {e}")
+                await self.emit_status("error", f"Unexpected error: {e}", True)
         else:
-            print(f"File already exists at {file_path}.")
+            logger.info(f"File already exists at {file_path}.")
 
-    def parse_resume_context(self, messages):
+    def parse_resume_context(self, messages: List[Dict[str, str]]) -> str:
+        """Parses the resume context from the messages.
+
+        Args:
+            messages (List[Dict[str, str]]): List of messages containing roles and content.
+
+        Returns:
+            str: Combined resume and user message.
+        """
         # Find the system message with the resume context
         system_message = next(
             (msg for msg in messages if msg["role"] == "system"), None
         )
 
-        if system_message["content"].find("<source_context>"):
-            # Extract the context from the source_context
-            context_start = system_message["content"].find("<source_context>")
-            context_end = system_message["content"].find("</source_context>")
+        resume_content = ""
+        if system_message:
+            start_tag = "<source_context>"
+            end_tag = "</source_context>"
+            context_start = system_message["content"].find(start_tag)
+            context_end = system_message["content"].find(end_tag)
 
-            if context_start != -1 and context_end != -1:
+            if (
+                context_start != -1
+                and context_end != -1
+                and context_end > context_start
+            ):
                 # Extract the resume content
                 resume_content = system_message["content"][
-                    context_start + len("<source_context>") : context_end
+                    context_start + len(start_tag) : context_end
                 ].strip()
-
-                # Find the user message
-                user_message = next(
-                    (msg["content"] for msg in messages if msg["role"] == "user"), ""
+            else:
+                logger.warning(
+                    "Incomplete or missing <source_context> tags in system message."
                 )
 
-                # Combine resume content with user message
-                combined_message = f"{resume_content}\n\n{user_message}"
+        # Find the most recent user message
+        user_message = ""
+        for msg in reversed(messages):
+            if msg["role"] == "user":
+                user_message = msg["content"]
+                break
 
-                return combined_message
-
-        # If no system message or context found, return the user message
-        user_message = next(
-            (msg["content"] for msg in messages if msg["role"] == "user"), ""
-        )
+        if resume_content:
+            return f"{resume_content}\n\n{user_message}"
         return user_message
 
     async def pipe(
@@ -475,7 +534,8 @@ class Pipe:
         __model__=None,
     ) -> str:
         """
-        Analyzes a resume and provides feedback, tags, first impression, adversarial analysis, potential interview questions, and career advice.
+        Analyzes a resume and provides feedback, tags, first impression, adversarial analysis,
+        potential interview questions, and career advice.
 
         :param body: The input data for the pipe.
         :param __user__: The user object containing information about the user.
@@ -492,67 +552,118 @@ class Pipe:
             TASKS.TITLE_GENERATION,
             TASKS.TAGS_GENERATION,
         ):
-            response = await generate_chat_completions(
-                {
-                    "model": self.__model__,
-                    "messages": body.get("messages"),
-                    "stream": False,
-                },
-                user=self.__user__,
-            )
-            return f"{name}: {response['choices'][0]['message']['content']}"
+            try:
+                response = await generate_chat_completions(
+                    {
+                        "model": self.__model__,
+                        "messages": body.get("messages"),
+                        "stream": False,
+                    },
+                    user=self.__user__,
+                )
+                return f"{name}: {response['choices'][0]['message']['content']}"
+            except Exception as e:
+                logger.error(f"Error during {__task__}: {e}")
+                await self.emit_status(
+                    "error", f"Failed to generate {__task__}: {e}", True
+                )
+                return ""
 
         dataset_path = self.valves.Dataset_path
         dataset_url = self.valves.Dataset_url
         await self.check_and_download_file(dataset_path, dataset_url)
         user_message = self.parse_resume_context(body.get("messages", []))
-        if ((body.get("messages", []))[-1].get("role", "").strip() != "user") and (
-            len(body.get("messages", [])) > 1
-        ):
+        if (body.get("messages", []))[-1].get("role", "").strip() != "user" and len(
+            body.get("messages", [])
+        ) > 1:
             logger.debug(body.get("messages", []))
-            await self.carrer_advisor_response(body.get("messages", []))
+            try:
+                await self.carrer_advisor_response(body.get("messages", []))
+            except Exception as e:
+                logger.error(f"Error generating career advisor response: {e}")
+                await self.emit_status(
+                    "error", f"Failed to generate career advice: {e}", True
+                )
             return ""
 
         await self.emit_status("info", "Processing resume...", False)
         try:
             df = pd.read_csv(dataset_path)
+            required_columns = {"Category", "Resume"}
+            if not required_columns.issubset(df.columns):
+                missing = required_columns - set(df.columns)
+                logger.error(f"Dataset is missing required columns: {missing}")
+                await self.emit_status(
+                    "error", f"Dataset is missing required columns: {missing}", True
+                )
+                return ""
             valid_tags = df["Category"].unique().tolist()
         except FileNotFoundError:
+            logger.error(f"Dataset not found: {dataset_path}")
             await self.emit_status("error", f"Dataset not found: {dataset_path}", True)
             return ""
+        except pd.errors.EmptyDataError:
+            logger.error(f"Dataset is empty: {dataset_path}")
+            await self.emit_status("error", f"Dataset is empty: {dataset_path}", True)
+            return ""
+        except Exception as e:
+            logger.error(f"Unexpected error loading dataset: {e}")
+            await self.emit_status(
+                "error", f"Unexpected error loading dataset: {e}", True
+            )
+            return ""
 
-        tags = await self.generate_tags(user_message, valid_tags)
-        first_impression = await self.first_impression(user_message)
-
-        await self.emit_message(f"**First Impression:**\n{first_impression}")
+        try:
+            tags = await self.generate_tags(user_message, valid_tags)
+            first_impression = await self.first_impression(user_message)
+            await self.emit_message(f"**First Impression:**\n{first_impression}")
+        except Exception as e:
+            logger.error(f"Error during tag generation or first impression: {e}")
+            await self.emit_status("error", f"Failed during analysis: {e}", True)
+            return ""
 
         await self.emit_status("info", "Performing adversarial analysis...", False)
-
-        analysis = await self.adversarial_analysis(user_message, df, tags)
-        await self.emit_message("\n\n---\n\n")
-        await self.emit_message(f"**Adversarial Analysis:**\n{analysis}")
+        try:
+            analysis = await self.adversarial_analysis(user_message, df, tags)
+            await self.emit_message("\n\n---\n\n")
+            await self.emit_message(f"**Adversarial Analysis:**\n{analysis}")
+        except Exception as e:
+            logger.error(f"Error during adversarial analysis: {e}")
+            await self.emit_status(
+                "error", f"Failed during adversarial analysis: {e}", True
+            )
+            return ""
 
         relevant_jobs = []
         if self.valves.web_search:
-
-            relevant_jobs = await self.search_relevant_jobs(5, tags)
             await self.emit_status("info", "Searching for relevant jobs...", False)
-            if relevant_jobs:
-                await self.emit_message("\n\n---\n\n")
-                await self.emit_message(f"\n\n**Relevant Job Postings:**\n")
-                for job in relevant_jobs:
-                    await self.emit_message(
-                        f"- **{job['title']}** ({job['company']})\n{job['description']}\n{job['location']}\n{job['link']}\n"
-                    )
+            try:
+                relevant_jobs = await self.search_relevant_jobs(5, tags)
+                if relevant_jobs:
+                    await self.emit_message("\n\n---\n\n")
+                    await self.emit_message(f"\n\n**Relevant Job Postings:**\n")
+                    for job in relevant_jobs:
+                        await self.emit_message(
+                            f"- **{job['title']}** ({job['company']})\n{job['description']}\n{job['location']}\n{job['link']}\n"
+                        )
+            except Exception as e:
+                logger.error(f"Error searching for relevant jobs: {e}")
+                await self.emit_status("error", f"Failed to search for jobs: {e}", True)
 
         await self.emit_status("info", "Generating interview questions...", False)
-        interview_questions = await self.generate_interview_questions(
-            user_message, relevant_jobs
-        )
-        await self.emit_message("\n\n---\n\n")
-        await self.emit_message(
-            f"**Potential Interview Questions**:\n{interview_questions}"
-        )
+        try:
+            interview_questions = await self.generate_interview_questions(
+                user_message, relevant_jobs
+            )
+            await self.emit_message("\n\n---\n\n")
+            await self.emit_message(
+                f"**Potential Interview Questions**:\n{interview_questions}"
+            )
+        except Exception as e:
+            logger.error(f"Error generating interview questions: {e}")
+            await self.emit_status(
+                "error", f"Failed to generate interview questions: {e}", True
+            )
 
         await self.emit_status("success", "Resume analysis complete.", True)
         return ""
