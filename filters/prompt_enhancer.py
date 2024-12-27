@@ -3,14 +3,14 @@ title: Prompt Enhancer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/open-webui
-version: 0.3
+version: 0.4
 """
 
 import logging
 from pydantic import BaseModel, Field
 from typing import Callable, Awaitable, Any, Optional
 import json
-
+from dataclasses import dataclass
 from open_webui.models.users import Users
 from open_webui.main import generate_chat_completions
 from open_webui.utils.misc import get_last_user_message
@@ -35,6 +35,13 @@ def setup_logger():
 
 logger = setup_logger()
 
+
+@dataclass
+class User:
+    id: str
+    email: str
+    name: str
+    role: str
 
 class Filter:
     class Valves(BaseModel):
@@ -82,6 +89,7 @@ Now, enhance the following prompt:
         messages = body["messages"]
         user_message = get_last_user_message(messages)
         self.__request__=__request__
+        self.__user__ = User(**__user__)
 
         if self.valves.show_status:
             await __event_emitter__(
@@ -115,7 +123,7 @@ Now, enhance the following prompt:
 
         # Log the system prompt before sending to LLM
 
-        logger.debug("System Prompt:\n%s", system_prompt)
+        logger.debug("System Prompt:\n\n", system_prompt)
 
         # Determine the model to use
         model_to_use = self.valves.model_id if self.valves.model_id else body["model"]
@@ -134,16 +142,16 @@ Now, enhance the following prompt:
         }
 
         try:
-            user = Users.get_user_by_id(__user__["id"])
-            response = await generate_chat_completions(self.__request__,form_data=payload, user=user)
+            logger.debug(f"""API CALL:\n Request: {self.__request__}\n Form_data: {payload}\n User: {self.__user__}\n""")
+            response = await generate_chat_completions(self.__request__,payload,user=self.__user__)
             enhanced_prompt = response["choices"][0]["message"]["content"]
-
+            logger.debug(f"enhanced_prompt")
             # Update the messages with the enhanced prompt
             messages[-1]["content"] = enhanced_prompt
             logger.debug(f"""After:{body["messages"]}""")
             body["messages"] = messages
             logger.debug(f"""Before:{body["messages"]}""")
-            logger.debug("Enhanced prompt: %s", enhanced_prompt)
+            logger.debug("Enhanced prompt:\n\n", enhanced_prompt)
             if self.valves.show_status:
                 await __event_emitter__(
                     {
@@ -161,7 +169,7 @@ Now, enhance the following prompt:
                 await __event_emitter__(
                     {
                         "type": "message",
-                        "data": {"content": enhanced_prompt_message},
+                        "data": {"content": enhanced_prompt_message, },
                     }
                 )
 
