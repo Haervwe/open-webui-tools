@@ -2,7 +2,7 @@
 title: Multi Model Conversations
 author: Haervwe
 author_url: https://github.com/Haervwe
-version: 0.3
+version: 0.6
 """
 
 import logging
