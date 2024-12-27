@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from typing import Callable, Awaitable, Any, Optional
 import json
 
-from open_webui.apps.webui.models.users import Users
+from open_webui.models.users import Users
 from open_webui.main import generate_chat_completions
 from open_webui.utils.misc import get_last_user_message
 
@@ -77,9 +77,11 @@ Now, enhance the following prompt:
         __event_emitter__: Callable[[Any], Awaitable[None]],
         __user__: Optional[dict] = None,
         __model__: Optional[dict] = None,
+        __request__ =None
     ) -> dict:
         messages = body["messages"]
         user_message = get_last_user_message(messages)
+        self.__request__=__request__
 
         if self.valves.show_status:
             await __event_emitter__(
@@ -133,7 +135,7 @@ Now, enhance the following prompt:
 
         try:
             user = Users.get_user_by_id(__user__["id"])
-            response = await generate_chat_completions(form_data=payload, user=user)
+            response = await generate_chat_completions(self.__request__,form_data=payload, user=user)
             enhanced_prompt = response["choices"][0]["message"]["content"]
 
             # Update the messages with the enhanced prompt

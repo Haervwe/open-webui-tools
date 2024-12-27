@@ -433,9 +433,9 @@ class Pipe:
                 "temperature": temperature,
             }
             response = await generate_chat_completions(
+                self.__request__,
                 form_data,
                 user=self.__user__,
-                bypass_filter=False,
             )
 
             # Ensure the response has body_iterator
@@ -452,6 +452,7 @@ class Pipe:
 
     async def get_completion(self, messages) -> str:
         response = await generate_chat_completions(
+            self.__request__,
             {
                 "model": self.__model__,
                 "messages": [{"role": "user", "content": messages}],
@@ -592,14 +593,17 @@ class Pipe:
         __event_emitter__=None,
         __task__=None,
         __model__=None,
+        __request__=None,
     ) -> str:
         model = self.valves.MODEL
         logger.debug(f"Model {model}")
         logger.debug(f"User: {__user__}")
         self.__user__ = User(**__user__)
+        self.__request__=__request__
         if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
             logger.debug(f"Model {TASKS}")
             response = await generate_chat_completions(
+                self.__request__,
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,
             )

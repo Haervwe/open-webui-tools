@@ -154,9 +154,9 @@ class Pipe:
                 "top_p": self.valves.Top_p,
             }
             response = await generate_chat_completions(
+                self.__request__,
                 form_data,
                 user=self.__user__,
-                bypass_filter=False,
             )
             if not hasattr(response, "body_iterator"):
                 raise ValueError("Response does not support streaming")
@@ -211,15 +211,18 @@ class Pipe:
         __event_emitter__=None,
         __task__=None,
         __model__=None,
+        __request__=None,
     ) -> str:
         self.__current_event_emitter__ = __event_emitter__
         self.__user__ = User(**__user__)
         self.__model__ = __model__  # Store the default model
+        self.__request__ = __request__
         if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
             model = (
                 self.valves.Participant1Model or self.__model__
             )  # Use Participant 1 or default
             response = await generate_chat_completions(
+                self.__request__,
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,
             )
@@ -286,6 +289,7 @@ class Pipe:
 
                 # get the manager response
                 manager_response = await generate_chat_completions(
+                    self.__request__,
                     {
                         "model": self.valves.ManagerModel,
                         "messages": manager_messages,
@@ -302,7 +306,7 @@ class Pipe:
                     (p for p in participants if p["alias"] == selected_alias), None
                 )
                 # if valid  and not repeated proceed
-                if selected_participant and selected_alias not in selected_participants:
+                if (selected_participant and selected_alias not in selected_participants) and selected_participant != last_speaker:
                     selected_participants.add(selected_alias)
                     last_speaker = selected_participant["alias"]
                     selected_participants.add(selected_alias)  # Mark as used

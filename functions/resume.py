@@ -62,6 +62,7 @@ class Pipe:
     __current_event_emitter__: Callable[[dict], Awaitable[None]]
     __user__: User
     __model__: str
+    __request__: None
 
     class Valves(BaseModel):
         Model: str = Field(default="", description="Model tag")
@@ -149,6 +150,7 @@ class Pipe:
     async def get_streaming_completion(
         self, messages: List[Dict[str, str]], model: str
     ):
+        request = (self.__request__,)
         form_data = {
             "model": model,
             "messages": messages,
@@ -160,7 +162,6 @@ class Pipe:
         response = await generate_chat_completions(
             form_data,
             user=self.__user__,
-            bypass_filter=False,
         )
         async for chunk in response.body_iterator:
             for part in self.get_chunk_content(chunk):
@@ -204,7 +205,8 @@ class Pipe:
 
         try:
             response = await generate_chat_completions(
-                {
+                request=self.__request__,
+                form_data={
                     "model": self.valves.Model or self.__model__,
                     "messages": [
                         {"role": "system", "content": system_prompt},
@@ -254,7 +256,8 @@ class Pipe:
             ```
         """
         response = await generate_chat_completions(
-            {
+            request=self.__request__,
+            form_data={
                 "model": self.valves.Model or self.__model__,
                 "messages": [
                     {"role": "system", "content": impression_prompt},
@@ -292,7 +295,8 @@ class Pipe:
             ```
         """
         response = await generate_chat_completions(
-            {
+            request=self.__request__,
+            form_data={
                 "model": self.valves.Model or self.__model__,
                 "messages": [
                     {"role": "system", "content": analysis_prompt},
@@ -333,7 +337,8 @@ class Pipe:
                 {jobs_context}
             """
         response = await generate_chat_completions(
-            {
+            request=self.__request__,
+            form_data={
                 "model": self.valves.Model or self.__model__,
                 "messages": [
                     {"role": "system", "content": persona_prompt},
@@ -435,7 +440,7 @@ class Pipe:
         ]
         full_response = ""
         async for chunk in self.get_streaming_completion(
-            messages, model=self.valves.Model
+            self.__request__, messages, model=self.valves.Model
         ):
             full_response += chunk
             await self.emit_message(chunk)
@@ -532,6 +537,7 @@ class Pipe:
         __event_emitter__=None,
         __task__=None,
         __model__=None,
+        __request__=None,
     ) -> str:
         """
         Analyzes a resume and provides feedback, tags, first impression, adversarial analysis,
@@ -548,13 +554,15 @@ class Pipe:
         self.__current_event_emitter__ = __event_emitter__
         self.__user__ = User(**__user__)
         self.__model__ = self.valves.Model
+        self.__request__ = __request__
         if __task__ in (
             TASKS.TITLE_GENERATION,
             TASKS.TAGS_GENERATION,
         ):
             try:
                 response = await generate_chat_completions(
-                    {
+                    request=self.__request__,
+                    form_data={
                         "model": self.__model__,
                         "messages": body.get("messages"),
                         "stream": False,

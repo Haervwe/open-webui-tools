@@ -152,9 +152,9 @@ class Pipe:
                 "top_p": top_p,
             }
             response = await generate_chat_completions(
+                self.__request__,
                 form_data,
                 user=self.__user__,
-                bypass_filter=False,
             )
 
             if not hasattr(response, "body_iterator"):
@@ -195,6 +195,7 @@ class Pipe:
         top_p: float = 0.9,  # Default fallback top_p
     ) -> str:
         response = await generate_chat_completions(
+            self.__request__,
             {
                 "model": self.__model__,
                 "messages": [{"role": "user", "content": prompt}],
@@ -1224,11 +1225,14 @@ Requirements:
         __event_emitter__=None,
         __task__=None,
         __model__=None,
+        __request__=None
     ) -> str:
         model = self.valves.MODEL
         self.__user__ = User(**__user__)
+        self.__request__ = __request__
         if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
             response = await generate_chat_completions(
+                self.__request__,
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,
             )
