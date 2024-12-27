@@ -12,9 +12,9 @@ from typing import Callable, Awaitable, Any, Optional
 import json
 from dataclasses import dataclass
 from open_webui.models.users import Users
-from open_webui.main import generate_chat_completions
+from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
-
+from open_webui.models.models import Models
 name = "enhancer"
 
 
@@ -126,7 +126,7 @@ Now, enhance the following prompt:
         logger.debug("System Prompt:\n\n", system_prompt)
 
         # Determine the model to use
-        model_to_use = self.valves.model_id if self.valves.model_id else body["model"]
+        model_to_use = self.valves.model_id if self.valves.model_id else (body["model"])
 
         # Construct payload for LLM request
         payload = {
@@ -143,7 +143,7 @@ Now, enhance the following prompt:
 
         try:
             logger.debug(f"""API CALL:\n Request: {self.__request__}\n Form_data: {payload}\n User: {self.__user__}\n""")
-            response = await generate_chat_completions(self.__request__,payload,user=self.__user__)
+            response = await generate_chat_completion(self.__request__,payload,user=self.__user__,bypass_filter=True)
             enhanced_prompt = response["choices"][0]["message"]["content"]
             logger.debug(f"enhanced_prompt")
             # Update the messages with the enhanced prompt
