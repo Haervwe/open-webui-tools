@@ -89,14 +89,36 @@ class Node:
 
     def mermaid(self, offset=0, selected=None):
         padding = " " * offset
-        content_preview = (
-            self.content[:25].replace("\n", " ") if self.content else "root"
-        )
-        msg = f"{padding}{self.id}({self.id}:{self.visits} - {content_preview})\n"
+        
+        # Sanitize content for Mermaid compatibility
+        def sanitize_content(text):
+            if not text:
+                return "root"
+            # Remove problematic characters and limit length
+            sanitized = text[:25].replace("\n", " ")
+            # Replace special characters that could break Mermaid syntax
+            sanitized = re.sub(r'[(){}<>:"[\]]', '', sanitized)
+            # Replace multiple spaces with single space
+            sanitized = re.sub(r'\s+', ' ', sanitized)
+            # Ensure the text is not empty after sanitization
+            return sanitized.strip() or "node"
 
+        # Create node content
+        content_preview = sanitize_content(self.content)
+        
+        # Create node ID and label
+        node_label = f"{self.id}:{self.visits} - {content_preview}"
+        # Escape any remaining special characters in the label
+        node_label = node_label.replace('"', '&quot;')
+        
+        # Generate node definition
+        msg = f"{padding}{self.id}[\"{node_label}\"]\n"
+
+        # Add styling if node is selected
         if selected == self.id:
-            msg += f"{padding}style {self.id} stroke:#0ff\n"
+            msg += f"{padding}style {self.id} stroke:#0ff,stroke-width:4px\n"
 
+        # Generate children connections
         for child in self.children:
             msg += child.mermaid(offset + 4, selected)
             msg += f"{padding}{self.id} --> {child.id}\n"
