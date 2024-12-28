@@ -90,10 +90,10 @@ class Pipe:
 
     class Valves(BaseModel):
         MODEL: str = Field(
-            default=None, description="Model to use (model id from ollama)"
+            default="", description="Model to use (model id from ollama)"
         )
         ACTION_MODEL: str = Field(
-            default=None, description="Model to use (model id from ollama)"
+            default="", description="Model to use (model id from ollama)"
         )
         ACTION_PROMPT_REQUIREMENTS_TEMPLATE: str = Field(
             default="""Requirements:
@@ -408,7 +408,7 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                         temperature=0.9,
                         top_k=70,
                         top_p=0.95,
-                        model=self.valves.ACTION_MODEL,
+                        model=self.valves.ACTION_MODEL if (self.valves.ACTION_MODEL != "") else self.valves.MODEL,
                     ):
                         complete_response += chunk
                         await self.emit_message(chunk)
