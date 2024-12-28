@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/open-webui
-version: 0.8
+version: 0.8.1
 """
 
 import logging
