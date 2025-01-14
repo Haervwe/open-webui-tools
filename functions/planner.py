@@ -13,8 +13,9 @@ from typing import List, Dict, Optional, AsyncGenerator, Callable, Awaitable, Un
 from pydantic import BaseModel, Field
 from datetime import datetime
 from open_webui.constants import TASKS
-from open_webui.main import generate_chat_completions
+from open_webui.utils.chat import generate_chat_completion
 from dataclasses import dataclass
+from fastapi import Request
 import re
 import difflib
 
@@ -151,7 +152,7 @@ class Pipe:
                 "top_k": top_k,
                 "top_p": top_p,
             }
-            response = await generate_chat_completions(
+            response = await generate_chat_completion(
                 self.__request__,
                 form_data,
                 user=self.__user__,
@@ -168,8 +169,13 @@ class Pipe:
             raise RuntimeError(f"Streaming completion failed: {e}")
 
     def get_chunk_content(self, chunk):
-        # Directly process the chunk since it's already a string
-        chunk_str = chunk
+        # Convert bytes to string if needed
+        if isinstance(chunk, bytes):
+            chunk_str = chunk.decode("utf-8")
+        else:
+            chunk_str = chunk
+
+        # Remove the data: prefix if present
         if chunk_str.startswith("data: "):
             chunk_str = chunk_str[6:]
 
@@ -194,7 +200,7 @@ class Pipe:
         top_k: int = 50,  # Default fallback top_k
         top_p: float = 0.9,  # Default fallback top_p
     ) -> str:
-        response = await generate_chat_completions(
+        response = await generate_chat_completion(
             self.__request__,
             {
                 "model": self.__model__,
@@ -408,7 +414,11 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                         temperature=0.9,
                         top_k=70,
                         top_p=0.95,
-                        model=self.valves.ACTION_MODEL if (self.valves.ACTION_MODEL != "") else self.valves.MODEL,
+                        model=(
+                            self.valves.ACTION_MODEL
+                            if (self.valves.ACTION_MODEL != "")
+                            else self.valves.MODEL
+                        ),
                     ):
                         complete_response += chunk
                         await self.emit_message(chunk)
@@ -1231,7 +1241,7 @@ Requirements:
         self.__user__ = User(**__user__)
         self.__request__ = __request__
         if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
-            response = await generate_chat_completions(
+            response = await generate_chat_completion(
                 self.__request__,
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,
@@ -1252,9 +1262,7 @@ Requirements:
         results = await self.execute_plan(plan)
 
         await self.emit_status("info", "Creating final result...", False)
-        final_result = await self.synthesize_results(
-            plan, results
-        ) 
+        final_result = await self.synthesize_results(plan, results)
         await self.emit_replace("")
         await self.emit_replace_mermaid(plan)
         await self.emit_message(final_result)
