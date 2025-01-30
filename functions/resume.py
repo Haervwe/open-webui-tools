@@ -555,10 +555,7 @@ class Pipe:
         self.__user__ = User(**__user__)
         self.__model__ = self.valves.Model
         self.__request__ = __request__
-        if __task__ in (
-            TASKS.TITLE_GENERATION,
-            TASKS.TAGS_GENERATION,
-        ):
+        if __task__ != TASKS.DEFAULT:
             try:
                 response = await generate_chat_completions(
                     request=self.__request__,

@@ -120,6 +120,34 @@ class Pipe:
             },
         )
 
+    async def search_local_playlists(self, query: str) -> Optional[List[Dict]]:
+        """Search for playlists in the local Mopidy library."""
+        logger.debug(f"Searching local playlists for query: {query}")
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "core.playlists.as_list",
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.valves.Mopidy_URL, json=payload
+                ) as response:
+                    result = await response.json()
+                    playlists = result.get("result", [])
+                    # Filter playlists based on the query
+                    matching_playlists = [
+                        pl for pl in playlists if query.lower() in pl["name"].lower()
+                    ]
+                    if matching_playlists:
+                        logger.debug(f"Found matching playlists: {matching_playlists}")
+                        return matching_playlists
+            logger.debug("No matching playlists found.")
+            return None
+        except Exception as e:
+            logger.error(f"Error searching local playlists: {e}")
+            return None
+
     async def search_local(self, query: str) -> Optional[List[Dict]]:
         """Search for songs in the local Mopidy library excluding TuneIn radio stations."""
         logger.debug(f"Searching local library for query: {query}")
@@ -173,6 +201,65 @@ class Pipe:
         except Exception as e:
             logger.error(f"Error checking Iris installation: {e}")
             return False
+
+    async def select_best_playlist(
+        self, playlists: List[Dict], query: str
+    ) -> Optional[Dict]:
+        """Use LLM to select the best matching playlist."""
+        logger.debug(f"Selecting best playlist for query: {query}")
+        playlist_names = [pl["name"] for pl in playlists]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an AI assistant that selects the best matching playlist name from a given list, "
+                    "based on the user's query. Respond with only the exact playlist name from the list, and no additional text."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"User query: '{query}'.\n"
+                    f"Playlists: {playlist_names}.\n"
+                    f"Select the best matching playlist name from the list and respond with only that name."
+                ),
+            },
+        ]
+        try:
+            response = await generate_chat_completions(
+                self.__request__,
+                {
+                    "model": self.valves.Model or self.__model__,
+                    "messages": messages,
+                    "temperature": self.valves.Temperature,
+                    "stream": False,
+                },
+                user=self.__user__,
+            )
+            content = response["choices"][0]["message"]["content"].strip()
+            logger.debug(f"LLM selected playlist: {content}")
+            # Clean the response
+            cleaned_content = content.replace('"', "").replace("'", "").strip().lower()
+            selected_playlist = None
+            for pl in playlists:
+                if pl["name"].lower() == cleaned_content:
+                    selected_playlist = pl
+                    break
+            if not selected_playlist:
+                # Try partial match
+                for pl in playlists:
+                    if pl["name"].lower() in cleaned_content:
+                        selected_playlist = pl
+                        break
+            if selected_playlist:
+                logger.debug(f"Found matching playlist: {selected_playlist['name']}")
+                return selected_playlist
+            else:
+                logger.debug("LLM selection did not match any playlist names.")
+                return None
+        except Exception as e:
+            logger.error(f"Error selecting best playlist: {e}")
+            return None
 
     async def generate_player_html(self) -> str:
         """Generate HTML code for the music player UI with all logic included in the output."""
@@ -287,6 +374,81 @@ class Pipe:
         except Exception as e:
             logger.error(f"Error searching YouTube API: {e}")
             logger.error(traceback.format_exc())
+            return None
+
+    async def search_youtube_playlists(self, query: str) -> Optional[List[Dict]]:
+        """Search YouTube for playlists."""
+        logger.debug(f"Searching YouTube for playlists with query: {query}")
+        try:
+            if not self.valves.YouTube_API_Key:
+                logger.error("YouTube API Key not provided.")
+                return None
+
+            api_url = "https://www.googleapis.com/youtube/v3/search"
+            params = {
+                "part": "snippet",
+                "q": query,
+                "maxResults": self.valves.Max_Search_Results,
+                "key": self.valves.YouTube_API_Key,
+                "type": "playlist",
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(api_url, params=params) as resp:
+                    data = await resp.json()
+                    if resp.status != 200:
+                        logger.error(f"YouTube API error: {data}")
+                        return None
+                    items = data.get("items", [])
+                    playlists = []
+                    for item in items:
+                        snippet = item.get("snippet", {})
+                        playlist_info = {
+                            "id": item["id"]["playlistId"],
+                            "name": snippet.get("title", ""),
+                            "description": snippet.get("description", ""),
+                        }
+                        playlists.append(playlist_info)
+                    if playlists:
+                        logger.debug(f"Found YouTube playlists: {playlists}")
+                        return playlists
+            logger.debug("No YouTube playlists found.")
+            return None
+        except Exception as e:
+            logger.error(f"Error searching YouTube playlists: {e}")
+            logger.error(traceback.format_exc())
+            return None
+
+    async def get_playlist_tracks(self, uri: str) -> Optional[List[Dict]]:
+        """Get tracks from the specified playlist URI."""
+        logger.debug(f"Fetching tracks from playlist URI: {uri}")
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "core.playlists.get_items",
+                "params": {"uri": uri},
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.valves.Mopidy_URL, json=payload
+                ) as response:
+                    result = await response.json()
+                    tracks = result.get("result", [])
+                    if tracks:
+                        track_info_list = []
+                        for item in tracks:
+                            track_info = {
+                                "uri": item.get("uri"),
+                                "name": item.get("name", ""),
+                                "artists": [],  # Artist info might not be available here
+                            }
+                            track_info_list.append(track_info)
+                        logger.debug(f"Tracks in playlist: {track_info_list}")
+                        return track_info_list
+            logger.debug("No tracks found in playlist.")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting playlist tracks: {e}")
             return None
 
     async def get_playlist_videos(self, playlist_id: str) -> List[Dict]:
@@ -561,29 +723,43 @@ class Pipe:
                 await self.emit_status("error", "No playlist specified", True)
                 return
 
-            # First, try to find the playlist in local library
+            # Search for playlists in the local library
             await self.emit_status(
                 "info", f"Searching for playlist '{query}' in local library...", False
             )
-            tracks = await self.search_local(query)
-            if tracks:
-                # Playlist found locally
-                play_success = await self.play_uris(tracks)
-                if play_success:
-                    await self.emit_message(
-                        f"Now playing '{track['name']}' by {track['artists'][0]} from YouTube."
-                    )
-                    # Generate and emit HTML code
-                    html_code = await self.generate_player_html()
-                    # Wrap HTML code in a code block with language specifier
-                    html_code_block = (
-                        f"""\n ```html \n{html_code}""" if html_code else ""
-                    )
-                    await self.emit_message(html_code_block)
-                    await self.emit_status("success", "Playback started", True)
+            playlists = await self.search_local_playlists(query)
+            if playlists:
+                # Use LLM to select the best matching playlist
+                best_playlist = await self.select_best_playlist(playlists, query)
+                if best_playlist:
+                    # Get tracks from the selected playlist
+                    tracks = await self.get_playlist_tracks(best_playlist["uri"])
+                    if tracks:
+                        play_success = await self.play_uris(tracks)
+                        if play_success:
+                            await self.emit_message(
+                                f"Now playing playlist '{best_playlist['name']}' from local library."
+                            )
+                            # Generate and emit HTML code
+                            html_code = await self.generate_player_html()
+                            html_code_block = (
+                                f"""\n```html\n{html_code}\n```""" if html_code else ""
+                            )
+                            await self.emit_message(html_code_block)
+                            await self.emit_status("success", "Playback started", True)
+                        else:
+                            await self.emit_message("Failed to play playlist.")
+                            await self.emit_status("error", "Playback failed", True)
+                    else:
+                        await self.emit_message(
+                            f"No tracks found in playlist '{best_playlist['name']}'."
+                        )
+                        await self.emit_status("error", "No tracks in playlist", True)
                 else:
-                    await self.emit_message("Failed to play playlist.")
-                    await self.emit_status("error", "Playback failed", True)
+                    await self.emit_message(
+                        "Could not determine the best playlist to play."
+                    )
+                    await self.emit_status("error", "Playlist selection failed", True)
                 return
 
             # If not found locally, search YouTube for a playlist
@@ -592,24 +768,38 @@ class Pipe:
                 f"Not found locally. Searching YouTube for playlist '{query}'...",
                 False,
             )
-            tracks = await self.search_youtube(query, playlist=True)
-            if tracks:
-                # Playlist found on YouTube, tracks contain all videos in the playlist
-                play_success = await self.play_uris(tracks)
-                if play_success:
-                    await self.emit_message(f"Now playing YouTube playlist '{query}'.")
-                    # Generate HTML code for the player UI
-                    html_code = await self.generate_player_html()
-                    # Wrap HTML code in a code block with language specifier
-                    html_code_block = (
-                        f"""\n ```html \n{html_code}""" if html_code else ""
-                    )
-                    # Emit the HTML code
-                    await self.emit_message(html_code_block)
-                    await self.emit_status("success", "Playback started", True)
+            playlists = await self.search_youtube_playlists(query)
+            if playlists:
+                # Use LLM to select the best matching playlist
+                best_playlist = await self.select_best_playlist(playlists, query)
+                if best_playlist:
+                    # Get tracks from the selected YouTube playlist
+                    tracks = await self.get_playlist_videos(best_playlist["id"])
+                    if tracks:
+                        play_success = await self.play_uris(tracks)
+                        if play_success:
+                            await self.emit_message(
+                                f"Now playing YouTube playlist '{best_playlist['name']}'."
+                            )
+                            html_code = await self.generate_player_html()
+                            html_code_block = (
+                                f"""\n```html\n{html_code}\n```""" if html_code else ""
+                            )
+                            await self.emit_message(html_code_block)
+                            await self.emit_status("success", "Playback started", True)
+                        else:
+                            await self.emit_message("Failed to play YouTube playlist.")
+                            await self.emit_status("error", "Playback failed", True)
+                    else:
+                        await self.emit_message(
+                            f"No tracks found in YouTube playlist '{best_playlist['name']}'."
+                        )
+                        await self.emit_status("error", "No tracks in playlist", True)
                 else:
-                    await self.emit_message("Failed to play YouTube playlist.")
-                    await self.emit_status("error", "Playback failed", True)
+                    await self.emit_message(
+                        "Could not determine the best playlist to play."
+                    )
+                    await self.emit_status("error", "Playlist selection failed", True)
             else:
                 await self.emit_message(f"No matching playlist found for '{query}'.")
                 await self.emit_status("error", "No playlist found", True)
@@ -756,10 +946,14 @@ class Pipe:
         self.__user__ = User(**__user__)
         self.__model__ = self.valves.Model or __model__
         self.__request__ = __request__
-        if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
+        if __task__ != TASKS.DEFAULT:
             response = await generate_chat_completions(
                 self.__request__,
-                {"model": model, "messages": body.get("messages"), "stream": False},
+                {
+                    "model": self.__model__,
+                    "messages": body.get("messages"),
+                    "stream": False,
+                },
                 user=self.__user__,
             )
             return f"{name}: {response['choices'][0]['message']['content']}"

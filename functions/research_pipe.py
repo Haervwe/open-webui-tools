@@ -622,7 +622,7 @@ class Pipe:
         logger.debug(f"User: {__user__}")
         self.__user__ = User(**__user__)
         self.__request__=__request__
-        if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
+        if __task__ != TASKS.DEFAULT:
             logger.debug(f"Model {TASKS}")
             response = await generate_chat_completions(
                 self.__request__,

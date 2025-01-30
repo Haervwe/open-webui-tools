@@ -217,7 +217,7 @@ class Pipe:
         self.__user__ = User(**__user__)
         self.__model__ = __model__  # Store the default model
         self.__request__ = __request__
-        if __task__ == TASKS.TITLE_GENERATION or __task__ == TASKS.TAGS_GENERATION:
+        if __task__ != TASKS.DEFAULT:
             model = (
                 self.valves.Participant1Model or self.__model__
             )  # Use Participant 1 or default
