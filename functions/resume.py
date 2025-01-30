@@ -2,7 +2,7 @@
 title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
-version: 0.4.0
+version: 0.4.1
 requirements: aiofiles
 important note: this script requires a database for resumes it automatically downloads it from my github but if u have trouble : , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
             and either you put it as is on /app/backend/data/UpdatedResumeDataSet.csv or change the  dataset_path in Valves.

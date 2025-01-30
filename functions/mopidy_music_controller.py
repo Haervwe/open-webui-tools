@@ -2,8 +2,10 @@
 title: Mopidy_Music_Controller
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.5
-description: A pipe to control Mopidy music server to play songs from local library or YouTube, manage playlists, and handle various music commands.
+version: 0.3.6
+description: A pipe to control Mopidy music server to play songs from local library or YouTube, manage playlists, and handle various music commands 
+needs a Local and/or a Youtube API endpoint configured in mopidy.
+mopidy repo: https://github.com/mopidy
 """
 
 import logging
