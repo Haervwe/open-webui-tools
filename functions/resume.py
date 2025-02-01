@@ -2,7 +2,7 @@
 title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
-version: 0.4.1
+version: 0.4.2
 requirements: aiofiles
 important note: this script requires a database for resumes it automatically downloads it from my github but if u have trouble : , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
             and either you put it as is on /app/backend/data/UpdatedResumeDataSet.csv or change the  dataset_path in Valves.
@@ -555,7 +555,7 @@ class Pipe:
         self.__user__ = User(**__user__)
         self.__model__ = self.valves.Model
         self.__request__ = __request__
-        if __task__ != TASKS.DEFAULT:
+        if __task__ and __task__ != TASKS.DEFAULT:
             try:
                 response = await generate_chat_completions(
                     request=self.__request__,

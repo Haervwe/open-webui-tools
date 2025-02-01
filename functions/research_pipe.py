@@ -5,7 +5,7 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.4.1
+version: 0.4.2
 """
 
 import logging
@@ -622,7 +622,7 @@ class Pipe:
         logger.debug(f"User: {__user__}")
         self.__user__ = User(**__user__)
         self.__request__=__request__
-        if __task__ != TASKS.DEFAULT:
+        if __task__ and __task__ != TASKS.DEFAULT:
             logger.debug(f"Model {TASKS}")
             response = await generate_chat_completions(
                 self.__request__,

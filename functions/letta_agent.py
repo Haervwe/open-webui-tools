@@ -2,7 +2,7 @@
 title: Letta_Agent_Connector
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.0
+version: 0.1.1
 description: A pipe to connect with Letta agents, enabling seamless integration of autonomous agents into Open WebUI conversations. Supports task-specific processing and maintains conversation context while communicating with the agent API.
 """
 
@@ -196,7 +196,7 @@ class Pipe:
         self.__request__ = __request__
 
         # Handle task-specific processing
-        if __task__ != TASKS.DEFAULT:
+        if __task__ and __task__ != TASKS.DEFAULT:
             try:
                 task_model = self.valves.Task_Model or self.__model__
                 response = await generate_chat_completions(

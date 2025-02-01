@@ -2,7 +2,7 @@
 title: Multi Model Conversations
 author: Haervwe
 author_url: https://github.com/Haervwe
-version: 0.6.1
+version: 0.6.2
 """
 
 import logging
@@ -217,7 +217,7 @@ class Pipe:
         self.__user__ = User(**__user__)
         self.__model__ = __model__  # Store the default model
         self.__request__ = __request__
-        if __task__ != TASKS.DEFAULT:
+        if __task__ and __task__ != TASKS.DEFAULT:
             model = (
                 self.valves.Participant1Model or self.__model__
             )  # Use Participant 1 or default

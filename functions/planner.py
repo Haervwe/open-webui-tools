@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/open-webui
-version: 0.8.2
+version: 0.8.3
 """
 
 import logging
@@ -1240,8 +1240,8 @@ Requirements:
         model = self.valves.MODEL
         self.__user__ = User(**__user__)
         self.__request__ = __request__
-        if __task__ != TASKS.DEFAULT:
-            response = await generate_chat_completions(
+        if __task__ and __task__ != TASKS.DEFAULT:
+            response = await generate_chat_completion(
                 self.__request__,
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,
