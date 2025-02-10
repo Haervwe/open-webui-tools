@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from typing import Callable, Awaitable, Any, Optional
 import json
 from dataclasses import dataclass
-from open_webui.models.users import Users
+from fastapi import Request
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
 from open_webui.models.models import Models
@@ -35,13 +35,25 @@ def setup_logger():
 
 logger = setup_logger()
 
-
 @dataclass
 class User:
     id: str
     email: str
     name: str
     role: str
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        return cls(
+            id=data.get('id', ''),
+            email=data.get('email', ''),
+            name=data.get('name', ''),
+            role=data.get('role', '')
+        )
+
+    @property
+    def info(self):
+        return {"id": self.id, "email": self.email, "name": self.name, "role": self.role}
 
 class Filter:
     class Valves(BaseModel):
@@ -77,6 +89,10 @@ Now, enhance the following prompt:
 
     def __init__(self):
         self.valves = self.Valves()
+        self.__current_event_emitter__ = None
+        self.__user__ = None
+        self.__model__ = None
+        self.__request__ = None
 
     async def inlet(
         self,
@@ -84,12 +100,23 @@ Now, enhance the following prompt:
         __event_emitter__: Callable[[Any], Awaitable[None]],
         __user__: Optional[dict] = None,
         __model__: Optional[dict] = None,
-        __request__ =None
+        __request__: Optional[Request] = None
     ) -> dict:
+        self.__current_event_emitter__ = __event_emitter__
+        self.__request__ = __request__
+        self.__model__ = __model__
+        
+        # Convert user dict to User object if needed
+        if __user__:
+            if not isinstance(__user__, User):
+                self.__user__ = User.from_dict(__user__)
+            else:
+                self.__user__ = __user__
+        else:
+            self.__user__ = None
+
         messages = body["messages"]
         user_message = get_last_user_message(messages)
-        self.__request__=__request__
-        self.__user__ = User(**__user__)
 
         if self.valves.show_status:
             await __event_emitter__(
@@ -123,7 +150,7 @@ Now, enhance the following prompt:
 
         # Log the system prompt before sending to LLM
 
-        logger.debug("System Prompt:\n\n", system_prompt)
+        logger.debug("System Prompt: %s", system_prompt)  # Fixed string formatting
 
         # Determine the model to use
         model_to_use = self.valves.model_id if self.valves.model_id else (body["model"])
@@ -142,16 +169,28 @@ Now, enhance the following prompt:
         }
 
         try:
-            logger.debug(f"""API CALL:\n Request: {self.__request__}\n Form_data: {payload}\n User: {self.__user__}\n""")
-            response = await generate_chat_completion(self.__request__,payload,user=self.__user__,bypass_filter=True)
+            # Use the User object directly, as done in other scripts
+            logger.debug(
+                "API CALL:\n Request: %s\n Form_data: %s\n User: %s",
+                str(self.__request__),
+                json.dumps(payload),
+                self.__user__
+            )
+            
+            response = await generate_chat_completion(
+                self.__request__,
+                payload,
+                user=self.__user__,
+                bypass_filter=True
+            )
+            
             enhanced_prompt = response["choices"][0]["message"]["content"]
-            logger.debug(f"enhanced_prompt")
+            logger.debug("Enhanced prompt: %s", enhanced_prompt)
+            
             # Update the messages with the enhanced prompt
             messages[-1]["content"] = enhanced_prompt
-            logger.debug(f"""After:{body["messages"]}""")
             body["messages"] = messages
-            logger.debug(f"""Before:{body["messages"]}""")
-            logger.debug("Enhanced prompt:\n\n", enhanced_prompt)
+
             if self.valves.show_status:
                 await __event_emitter__(
                     {
@@ -173,14 +212,26 @@ Now, enhance the following prompt:
                     }
                 )
 
-        except Exception as e:
-            logger.error(f"Error enhancing prompt: {e}")
+        except ValueError as ve:
+            logger.error("Value Error: %s", str(ve))
             if self.valves.show_status:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": "Error enhancing prompt.",
+                            "description": f"Error: {str(ve)}",
+                            "done": True,
+                        },
+                    }
+                )
+        except Exception as e:
+            logger.error("Unexpected error: %s", str(e))
+            if self.valves.show_status:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "An unexpected error occurred.",
                             "done": True,
                         },
                     }
