@@ -2,7 +2,7 @@
 title: Letta_Agent_Connector
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.2
+version: 0.2.0
 description: A pipe to connect with Letta agents, enabling seamless integration of autonomous agents into Open WebUI conversations. Supports task-specific processing and maintains conversation context while communicating with the agent API.
 """
 
@@ -20,6 +20,7 @@ import asyncio
 
 name = "Letta Agent"
 
+
 def setup_logger():
     logger = logging.getLogger(name)
     if not logger.handlers:
@@ -34,7 +35,9 @@ def setup_logger():
         logger.propagate = False
     return logger
 
+
 logger = setup_logger()
+
 
 @dataclass
 class User:
@@ -42,6 +45,7 @@ class User:
     email: str
     name: str
     role: str
+
 
 class Pipe:
     __current_event_emitter__: Callable[[dict], Awaitable[None]]
@@ -52,19 +56,18 @@ class Pipe:
     class Valves(BaseModel):
         Agent_ID: str = Field(
             default="Demether",
-            description="The ID of the Letta agent to communicate with"
+            description="The ID of the Letta agent to communicate with",
         )
         API_URL: str = Field(
             default="http://localhost:8283",
-            description="Base URL for the Letta agent API"
+            description="Base URL for the Letta agent API",
         )
         API_Token: str = Field(
-            default="",
-            description="Bearer token for API authentication"
+            default="", description="Bearer token for API authentication"
         )
         Task_Model: str = Field(
             default="",
-            description="Model to use for title/tags generation tasks. If empty, uses the default model."
+            description="Model to use for title/tags generation tasks. If empty, uses the default model.",
         )
 
     def __init__(self):
@@ -89,79 +92,137 @@ class Pipe:
                     "level": level,
                     "description": message,
                     "done": done,
-                }
+                },
             }
         )
 
-    async def format_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    async def format_messages(
+        self, messages: List[Dict[str, str]]
+    ) -> List[Dict[str, str]]:
         """Format messages according to the Letta API specification."""
         formatted_messages = []
         for msg in messages:
             # Only include supported roles
             if msg.get("role") not in ["user", "system"]:
                 continue
-                
+
             formatted_msg = {
                 "role": msg.get("role", "user"),
-                "content": msg.get("content", "")
+                "content": msg.get("content", ""),
             }
             formatted_messages.append(formatted_msg)
-        
+
         # Ensure we have at least one message
         if not formatted_messages:
-            formatted_messages.append({
-                "role": "user",
-                "content": "Hello"
-            })
-            
+            formatted_messages.append({"role": "user", "content": "Hello"})
+
         logger.debug(f"Formatted messages: {json.dumps(formatted_messages, indent=2)}")
         return formatted_messages
 
-    def get_letta_response(self, message: Dict[str, str]) -> str:
-        """Send the last user message to the Letta agent and get its response using requests."""
+    def get_letta_response(self, message: Dict[str, str], loop) -> str:
+        """Send the user message and wait for the full response.
+        Aggregate reasoning messages and the final response into one combined output.
+        """
+        import time
+
+        start_time = time.monotonic()
         headers = {
             "Authorization": f"Bearer {self.valves.API_Token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        data = {
-            "messages": [message]
-        }
+        data = {"messages": [message]}
         url = f"{self.valves.API_URL}/v1/agents/{self.valves.Agent_ID}/messages"
+
+        # Make initial request
+        response = requests.post(url, headers=headers, json=data, timeout=300)
+        elapsed = int(time.monotonic() - start_time)
+
+        if response.status_code == 422:
+            logger.error(f"API Validation Error. Response: {response.text}")
+            raise ValueError(f"API Validation Error: {response.text}")
+        response.raise_for_status()
         
-        logger.debug(f"Sending request to {url}")
-        logger.debug(f"Request data: {data}")
+        # Get the response ID from the first message
+        result = response.json()
+        logger.debug(f"Initial API response: {result}")
         
-        try:
-            response = requests.post(url, headers=headers, json=data)
-            if response.status_code == 422:
-                logger.error(f"API Validation Error. Response: {response.text}")
-                raise ValueError(f"API Validation Error: {response.text}")
-            response.raise_for_status()
+        # URL for checking message status
+        status_url = f"{self.valves.API_URL}/v1/agents/{self.valves.Agent_ID}/messages"
+
+        def find_last_user_message_index(messages):
+            """Find the index of the last user message in the list."""
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get('message_type') == 'user_message':
+                    return i
+            return -1
+
+        def process_messages(messages_data, elapsed):
+            final_response = ""
+            reasoning_details = []
+            
+            # Handle both list and dictionary responses
+            messages = messages_data if isinstance(messages_data, list) else messages_data.get("messages", [])
+            
+            # Find last user message and filter subsequent messages
+            last_user_idx = find_last_user_message_index(messages)
+            if last_user_idx >= 0:
+                messages = messages[last_user_idx + 1:]
+            
+            for msg in messages:
+                msg_type = msg.get("message_type")
+                if msg_type == "reasoning_message":
+                    reasoning = msg.get("reasoning", "").strip()
+                    if reasoning:
+                        header = f"Thought for {elapsed} seconds"
+                        details = (
+                            f'<details type="reasoning" done="true" duration="{elapsed}">\n'
+                            f"<summary>{header}</summary>\n"
+                            f"> {reasoning}\n"
+                            "</details>"
+                        )
+                        reasoning_details = [details]  # Only keep the last reasoning
+                elif msg_type == "assistant_message":
+                    content = msg.get("content", "").strip()
+                    if content:
+                        final_response = content
+                elif msg_type == "tool_return_message":
+                    tool_name = msg.get("tool_call_id", "").split('-')[0]
+                    content = msg.get("tool_return", "").strip()
+                    if content:
+                        try:
+                            # Try to parse JSON content
+                            content_json = json.loads(content)
+                            if isinstance(content_json, dict):
+                                content = content_json.get("message", content)
+                        except json.JSONDecodeError:
+                            pass
+                        final_response = f"> {tool_name}: {content}"
+                        
+            return final_response, reasoning_details
+
+        # Process initial response
+        final_response, reasoning_details = process_messages(result if isinstance(result, list) else result.get("messages", []), elapsed)
+        
+        # If we don't have a complete response, poll for updates
+        while not final_response:
+            logger.debug("Waiting for non-empty response from Letta agent...")
+            time.sleep(2)
+            # Get latest status using the same URL but with GET
+            response = requests.get(status_url, headers=headers)
             result = response.json()
-            logger.debug(f"Raw API response: {result}")
+            logger.debug(f"Polling API response: {result}")
             
-            if "messages" in result and result["messages"]:
-                for msg in reversed(result["messages"]):
-                    msg_type = msg.get("message_type")
-                    if msg_type == "assistant_message":
-                        content = msg.get("content", "")
-                        if content:
-                            return content
-                    elif msg_type == "tool_return_message":
-                        content = msg.get("return_value", "")
-                        if content:
-                            return content
-            
-            if "usage" in result:
-                logger.debug(f"Usage statistics: {result['usage']}")
-            
-            raise ValueError("No valid response content found")
-        except requests.RequestException as e:
-            logger.error(f"Error communicating with Letta agent: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            raise
+            final_response, new_reasoning = process_messages(result if isinstance(result, list) else result.get("messages", []), elapsed)
+            reasoning_details.extend(new_reasoning)
+
+        # Combine all messages
+        combined = ""
+        if reasoning_details:
+            combined += "\n".join(reasoning_details) + "\n"
+        if final_response:
+            combined += final_response
+
+        return combined
 
     async def pipe(
         self,
@@ -176,10 +237,13 @@ class Pipe:
         # Store event_emitter in instance variable for future use
         if __event_emitter__:
             self.__current_event_emitter__ = __event_emitter__
-        elif not hasattr(self, '__current_event_emitter__') or not self.__current_event_emitter__:
+        elif (
+            not hasattr(self, "__current_event_emitter__")
+            or not self.__current_event_emitter__
+        ):
             logger.error("Event emitter not provided")
             return ""
-            
+
         self.__user__ = User(**__user__)
         self.__model__ = __model__
         self.__request__ = __request__
@@ -216,7 +280,10 @@ class Pipe:
         await self.emit_status("info", "Sending request to Letta agent...", False)
 
         try:
-            response = await asyncio.to_thread(self.get_letta_response, user_message)
+            loop = asyncio.get_running_loop()
+            response = await asyncio.to_thread(
+                self.get_letta_response, user_message, loop
+            )
             logger.debug(f"Letta agent response: {response}")
             if response:
                 await self.emit_message(str(response))
