@@ -14,6 +14,8 @@ import aiohttp
 import json
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
+import requests
+import asyncio
 
 
 name = "Letta Agent"
@@ -115,59 +117,46 @@ class Pipe:
         logger.debug(f"Formatted messages: {json.dumps(formatted_messages, indent=2)}")
         return formatted_messages
 
-    async def get_letta_response(self, messages: List[Dict[str, str]]) -> str:
-        """Send messages to the Letta agent and get its response."""
+    def get_letta_response(self, message: Dict[str, str]) -> str:
+        """Send the last user message to the Letta agent and get its response using requests."""
         headers = {
             "Authorization": f"Bearer {self.valves.API_Token}",
             "Content-Type": "application/json"
         }
-        
-        formatted_messages = await self.format_messages(messages)
         data = {
-            "messages": formatted_messages,
-            "use_assistant_message": True,
-            "assistant_message_tool_name": "send_message",
-            "assistant_message_tool_kwarg": "message"
+            "messages": [message]
         }
-
         url = f"{self.valves.API_URL}/v1/agents/{self.valves.Agent_ID}/messages"
         
         logger.debug(f"Sending request to {url}")
-        logger.debug(f"Request data: {json.dumps(data, indent=2)}")
+        logger.debug(f"Request data: {data}")
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data) as response:
-                    if response.status == 422:
-                        response_text = await response.text()
-                        logger.error(f"API Validation Error. Response: {response_text}")
-                        raise ValueError(f"API Validation Error: {response_text}")
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    logger.debug(f"Raw API response: {json.dumps(result, indent=2)}")
-                    
-                    # Handle different message types in the response
-                    if "messages" in result and result["messages"]:
-                        for msg in reversed(result["messages"]):
-                            msg_type = msg.get("message_type")
-                            if msg_type == "assistant_message":
-                                content = msg.get("content", "")
-                                if content:
-                                    return content
-                            elif msg_type == "tool_return_message":
-                                content = msg.get("return_value", "")
-                                if content:
-                                    return content
-                    
-                    # Log usage statistics if available
-                    if "usage" in result:
-                        usage = result["usage"]
-                        logger.debug(f"Usage statistics: {usage}")
-                    
-                    raise ValueError("No valid response content found")
-                        
-        except aiohttp.ClientError as e:
+            response = requests.post(url, headers=headers, json=data)
+            if response.status_code == 422:
+                logger.error(f"API Validation Error. Response: {response.text}")
+                raise ValueError(f"API Validation Error: {response.text}")
+            response.raise_for_status()
+            result = response.json()
+            logger.debug(f"Raw API response: {result}")
+            
+            if "messages" in result and result["messages"]:
+                for msg in reversed(result["messages"]):
+                    msg_type = msg.get("message_type")
+                    if msg_type == "assistant_message":
+                        content = msg.get("content", "")
+                        if content:
+                            return content
+                    elif msg_type == "tool_return_message":
+                        content = msg.get("return_value", "")
+                        if content:
+                            return content
+            
+            if "usage" in result:
+                logger.debug(f"Usage statistics: {result['usage']}")
+            
+            raise ValueError("No valid response content found")
+        except requests.RequestException as e:
             logger.error(f"Error communicating with Letta agent: {e}")
             raise
         except Exception as e:
@@ -219,13 +208,17 @@ class Pipe:
             await self.emit_status("error", "No messages provided", True)
             return ""
 
+        # Only send the last user message
+        user_message = messages[-1]
+        if isinstance(user_message, str):
+            user_message = {"role": "user", "content": user_message}
+
         await self.emit_status("info", "Sending request to Letta agent...", False)
 
         try:
-            response = await self.get_letta_response(messages)
+            response = await asyncio.to_thread(self.get_letta_response, user_message)
             logger.debug(f"Letta agent response: {response}")
             if response:
-                # Ensure we're returning content in the expected format
                 await self.emit_message(str(response))
                 await self.emit_status("success", "Letta agent response received", True)
                 return response
