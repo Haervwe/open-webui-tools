@@ -1,18 +1,23 @@
 """
 title: Hugging Face API - Flux Pro Image Generator
 author: Haervwe
-git: https://github.com/Haervwe/open-webui-tools
-version: 0.0.1
+git: https://github.com/Haervwe/open-webui-tools/
+version: 0.1.0
 license: MIT
-description: HuggingFace API implementation for tesxt to image generation
+description: HuggingFace API implementation for text to image generation
 """
 
 import requests
 import base64
+import uuid
+import os
 from typing import Dict, Any
 from pydantic import BaseModel, Field
 import logging
 from requests.exceptions import Timeout, RequestException
+
+# Import CACHE_DIR from your backend configuration so it matches the static files mount.
+from open_webui.config import CACHE_DIR
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,7 +37,7 @@ class Tools:
         )
         HF_API_URL: str = Field(
             default="https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-3.5-large-turbo",
-            description="HuggingFace API URL for accessing the serverless endpoint of an Text to image Model.",
+            description="HuggingFace API URL for accessing the serverless endpoint of a Text to Image model.",
         )
 
     def __init__(self):
@@ -46,11 +51,11 @@ class Tools:
         __event_emitter__=None,
     ) -> str:
         """
-        Creates visually stunning images with text prompts using text to image models, based on a prompt,
-        if the user promt is to general or lacking embelish it to generate a better illustration.
+        Creates visually stunning images with text prompts using text to image models.
+        If the user prompt is too general or lacking, embellish it to generate a better illustration.
 
-        :param prompt: the prompt to generate the image
-        :param image_format: format of the image (default, landscape, portrait)
+        :param prompt: The prompt to generate the image.
+        :param image_format: Format of the image (default, landscape, portrait, etc.)
         """
         print("[DEBUG] Starting create_flux_image function")
 
@@ -112,11 +117,24 @@ class Tools:
                     f"API request failed with status code {response.status_code}: {response.text}"
                 )
 
-            # Store the image content first
+            # Store the image content from the API response
             image_content = response.content
 
-            # Create URL with the stored content
-            image_url = f"data:image/jpeg;base64,{base64.b64encode(image_content).decode('utf-8')}"
+            # Save the image using the same CACHE_DIR as mounted in the backend.
+            # This ensures the image is accessible via the /cache route.
+            directory = os.path.join(CACHE_DIR, "image", "generations")
+            os.makedirs(directory, exist_ok=True)
+
+            # Generate a random filename with a .png extension
+            filename = f"{uuid.uuid4()}.png"
+            save_path = os.path.join(directory, filename)
+
+            with open(save_path, "wb") as image_file:
+                image_file.write(image_content)
+            print(f"[DEBUG] Image saved to {save_path}")
+
+            # Create URL pointing to the saved file
+            image_url = f"/cache/image/generations/{filename}"
 
             # Send the completion status before the image
             await __event_emitter__(
@@ -126,7 +144,7 @@ class Tools:
                 }
             )
 
-            # Send the image in a separate message
+            # Send the image in a separate message using the image URL
             await __event_emitter__(
                 {
                     "type": "message",
@@ -136,7 +154,7 @@ class Tools:
                 }
             )
 
-            return f"Notify the user that the image has been successfully generated for the promt: '{prompt}' "
+            return f"Notify the user that the image has been successfully generated for the prompt: '{prompt}' "
 
         except Timeout as e:
             error_msg = (
