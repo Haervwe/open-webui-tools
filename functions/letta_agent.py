@@ -1,11 +1,3 @@
-"""
-title: Letta_Agent_Connector
-author: Haervwe
-author_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
-description: A pipe to connect with Letta agents, enabling seamless integration of autonomous agents into Open WebUI conversations. Supports task-specific processing and maintains conversation context while communicating with the agent API.
-"""
-
 import logging
 from typing import Dict, List, Callable, Awaitable
 from pydantic import BaseModel, Field
@@ -14,9 +6,8 @@ import aiohttp
 import json
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
-import requests
 import asyncio
-
+import time
 
 name = "Letta Agent"
 
@@ -51,7 +42,7 @@ class Pipe:
     __current_event_emitter__: Callable[[dict], Awaitable[None]]
     __user__: User
     __model__: str
-    __request__: None
+    __request__ = None
 
     class Valves(BaseModel):
         Agent_ID: str = Field(
@@ -119,12 +110,12 @@ class Pipe:
         logger.debug(f"Formatted messages: {json.dumps(formatted_messages, indent=2)}")
         return formatted_messages
 
-    def get_letta_response(self, message: Dict[str, str], loop) -> str:
-        """Send the user message and wait for the full response.
-        Aggregate reasoning messages and the final response into one combined output.
+    async def get_letta_response(self, message: Dict[str, str]) -> str:
         """
-        import time
-
+        Send the user message and wait for the full response.
+        Aggregate reasoning messages and the final response into one combined output.
+        This version uses aiohttp for asynchronous HTTP calls.
+        """
         start_time = time.monotonic()
         headers = {
             "Authorization": f"Bearer {self.valves.API_Token}",
@@ -132,97 +123,103 @@ class Pipe:
         }
         data = {"messages": [message]}
         url = f"{self.valves.API_URL}/v1/agents/{self.valves.Agent_ID}/messages"
+        timeout = aiohttp.ClientTimeout(total=300)
 
-        # Make initial request
-        response = requests.post(url, headers=headers, json=data, timeout=300)
-        elapsed = int(time.monotonic() - start_time)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Make the initial POST request
+            async with session.post(url, headers=headers, json=data) as response:
+                if response.status == 422:
+                    text = await response.text()
+                    logger.error(f"API Validation Error. Response: {text}")
+                    raise ValueError(f"API Validation Error: {text}")
+                response.raise_for_status()
+                result = await response.json()
+                logger.debug(f"Initial API response: {result}")
 
-        if response.status_code == 422:
-            logger.error(f"API Validation Error. Response: {response.text}")
-            raise ValueError(f"API Validation Error: {response.text}")
-        response.raise_for_status()
-        
-        # Get the response ID from the first message
-        result = response.json()
-        logger.debug(f"Initial API response: {result}")
-        
-        # URL for checking message status
-        status_url = f"{self.valves.API_URL}/v1/agents/{self.valves.Agent_ID}/messages"
+            # URL for checking message status
+            status_url = f"{self.valves.API_URL}/v1/agents/{self.valves.Agent_ID}/messages"
 
-        def find_last_user_message_index(messages):
-            """Find the index of the last user message in the list."""
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i].get('message_type') == 'user_message':
-                    return i
-            return -1
+            def find_last_user_message_index(messages):
+                """Find the index of the last user message in the list."""
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("message_type") == "user_message":
+                        return i
+                return -1
 
-        def process_messages(messages_data, elapsed):
-            final_response = ""
-            reasoning_details = []
-            
-            # Handle both list and dictionary responses
-            messages = messages_data if isinstance(messages_data, list) else messages_data.get("messages", [])
-            
-            # Find last user message and filter subsequent messages
-            last_user_idx = find_last_user_message_index(messages)
-            if last_user_idx >= 0:
-                messages = messages[last_user_idx + 1:]
-            
-            for msg in messages:
-                msg_type = msg.get("message_type")
-                if msg_type == "reasoning_message":
-                    reasoning = msg.get("reasoning", "").strip()
-                    if reasoning:
-                        header = f"Thought for {elapsed} seconds"
-                        details = (
-                            f'<details type="reasoning" done="true" duration="{elapsed}">\n'
-                            f"<summary>{header}</summary>\n"
-                            f"> {reasoning}\n"
-                            "</details>"
-                        )
-                        reasoning_details = [details]  # Only keep the last reasoning
-                elif msg_type == "assistant_message":
-                    content = msg.get("content", "").strip()
-                    if content:
-                        final_response = content
-                elif msg_type == "tool_return_message":
-                    tool_name = msg.get("tool_call_id", "").split('-')[0]
-                    content = msg.get("tool_return", "").strip()
-                    if content:
-                        try:
-                            # Try to parse JSON content
-                            content_json = json.loads(content)
-                            if isinstance(content_json, dict):
-                                content = content_json.get("message", content)
-                        except json.JSONDecodeError:
-                            pass
-                        final_response = f"> {tool_name}: {content}"
-                        
-            return final_response, reasoning_details
+            def process_messages(messages_data, elapsed):
+                final_response = ""
+                reasoning_details = []
+                # Handle both list and dictionary responses
+                messages = (
+                    messages_data
+                    if isinstance(messages_data, list)
+                    else messages_data.get("messages", [])
+                )
 
-        # Process initial response
-        final_response, reasoning_details = process_messages(result if isinstance(result, list) else result.get("messages", []), elapsed)
-        
-        # If we don't have a complete response, poll for updates
-        while not final_response:
-            logger.debug("Waiting for non-empty response from Letta agent...")
-            time.sleep(2)
-            # Get latest status using the same URL but with GET
-            response = requests.get(status_url, headers=headers)
-            result = response.json()
-            logger.debug(f"Polling API response: {result}")
-            
-            final_response, new_reasoning = process_messages(result if isinstance(result, list) else result.get("messages", []), elapsed)
-            reasoning_details.extend(new_reasoning)
+                # Find last user message and filter subsequent messages
+                last_user_idx = find_last_user_message_index(messages)
+                if last_user_idx >= 0:
+                    messages = messages[last_user_idx + 1 :]
 
-        # Combine all messages
-        combined = ""
-        if reasoning_details:
-            combined += "\n".join(reasoning_details) + "\n"
-        if final_response:
-            combined += final_response
+                for msg in messages:
+                    msg_type = msg.get("message_type")
+                    if msg_type == "reasoning_message":
+                        reasoning = msg.get("reasoning", "").strip()
+                        if reasoning:
+                            header = f"Thought for {elapsed} seconds"
+                            details = (
+                                f'<details type="reasoning" done="true" duration="{elapsed}">\n'
+                                f"<summary>{header}</summary>\n"
+                                f"> {reasoning}\n"
+                                "</details>"
+                            )
+                            # Only keep the latest reasoning
+                            reasoning_details = [details]
+                    elif msg_type == "assistant_message":
+                        content = msg.get("content", "").strip()
+                        if content:
+                            final_response = content
+                    elif msg_type == "tool_return_message":
+                        tool_name = msg.get("tool_call_id", "").split("-")[0]
+                        content = msg.get("tool_return", "").strip()
+                        if content:
+                            try:
+                                # Try to parse JSON content
+                                content_json = json.loads(content)
+                                if isinstance(content_json, dict):
+                                    content = content_json.get("message", content)
+                            except json.JSONDecodeError:
+                                pass
+                            final_response = f"> {tool_name}: {content}"
 
-        return combined
+                return final_response, reasoning_details
+
+            elapsed = int(time.monotonic() - start_time)
+            final_response, reasoning_details = process_messages(
+                result if isinstance(result, list) else result.get("messages", []), elapsed
+            )
+
+            # Poll for updates until we have a complete response
+            while not final_response:
+                logger.debug("Waiting for non-empty response from Letta agent...")
+                await asyncio.sleep(2)
+                async with session.get(status_url, headers=headers) as response:
+                    result = await response.json()
+                    logger.debug(f"Polling API response: {result}")
+                    final_response, new_reasoning = process_messages(
+                        result if isinstance(result, list) else result.get("messages", []),
+                        elapsed,
+                    )
+                    reasoning_details.extend(new_reasoning)
+
+            # Combine reasoning details and the final response
+            combined = ""
+            if reasoning_details:
+                combined += "\n".join(reasoning_details) + "\n"
+            if final_response:
+                combined += final_response
+
+            return combined
 
     async def pipe(
         self,
@@ -280,10 +277,7 @@ class Pipe:
         await self.emit_status("info", "Sending request to Letta agent...", False)
 
         try:
-            loop = asyncio.get_running_loop()
-            response = await asyncio.to_thread(
-                self.get_letta_response, user_message, loop
-            )
+            response = await self.get_letta_response(user_message)
             logger.debug(f"Letta agent response: {response}")
             if response:
                 await self.emit_message(str(response))
