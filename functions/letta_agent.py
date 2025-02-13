@@ -1,3 +1,12 @@
+
+"""
+title: Letta_Agent_Connector
+author: Haervwe
+author_url: https://github.com/Haervwe/open-webui-tools
+version: 0.2.1
+description: A pipe to connect with Letta agents, enabling seamless integration of autonomous agents into Open WebUI conversations. Supports task-specific processing and maintains conversation context while communicating with the agent API.
+"""
+
 import logging
 from typing import Dict, List, Callable, Awaitable
 from pydantic import BaseModel, Field
@@ -137,7 +146,9 @@ class Pipe:
                 logger.debug(f"Initial API response: {result}")
 
             # URL for checking message status
-            status_url = f"{self.valves.API_URL}/v1/agents/{self.valves.Agent_ID}/messages"
+            status_url = (
+                f"{self.valves.API_URL}/v1/agents/{self.valves.Agent_ID}/messages"
+            )
 
             def find_last_user_message_index(messages):
                 """Find the index of the last user message in the list."""
@@ -196,7 +207,8 @@ class Pipe:
 
             elapsed = int(time.monotonic() - start_time)
             final_response, reasoning_details = process_messages(
-                result if isinstance(result, list) else result.get("messages", []), elapsed
+                result if isinstance(result, list) else result.get("messages", []),
+                elapsed,
             )
 
             # Poll for updates until we have a complete response
@@ -207,7 +219,11 @@ class Pipe:
                     result = await response.json()
                     logger.debug(f"Polling API response: {result}")
                     final_response, new_reasoning = process_messages(
-                        result if isinstance(result, list) else result.get("messages", []),
+                        (
+                            result
+                            if isinstance(result, list)
+                            else result.get("messages", [])
+                        ),
                         elapsed,
                     )
                     reasoning_details.extend(new_reasoning)
