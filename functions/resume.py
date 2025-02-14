@@ -2,16 +2,18 @@
 title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
+funding_url: https://github.com/Haervwe/open-webui-tools
 version: 0.4.2
 requirements: aiofiles
-important note: this script requires a database for resumes it automatically downloads it from my github but if u have trouble : , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
+important note: 1. this script requires the full_document filter added in open web ui to work with attached files, you can find it here : https://openwebui.com/f/haervwe/full_document_filter or in the git hub repo
+2.this script requires a database for resumes it automatically downloads it from my github but if u have trouble : , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
             and either you put it as is on /app/backend/data/UpdatedResumeDataSet.csv or change the  dataset_path in Valves.
             if websearch is setted you must provide (for now the api key for this rapidapi endpoint https://rapidapi.com/Pat92/api/jobs-api14)
 
 Call for Help: this script is made for testing purpuses in the context of a larger project aimed to create a set of LLM assisntants 
 for helping in job search and career advice based on ground truth examples and proffesional experice, all open sourced, so
 every feature you might think is useful, every bug or output , model that worked the best for you , any information really you wanna share will be greatly appeciated!
-you can contact me through  github
+you can contact me through  github.
 """
 
 import logging

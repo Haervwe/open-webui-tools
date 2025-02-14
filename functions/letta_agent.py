@@ -3,6 +3,7 @@
 title: Letta_Agent_Connector
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
+funding_url: https://github.com/Haervwe/open-webui-tools
 version: 0.2.1
 description: A pipe to connect with Letta agents, enabling seamless integration of autonomous agents into Open WebUI conversations. Supports task-specific processing and maintains conversation context while communicating with the agent API.
 """

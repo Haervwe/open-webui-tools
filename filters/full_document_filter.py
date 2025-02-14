@@ -2,7 +2,7 @@
 title: Full Document Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
-funding_url: https://github.com/open-webui
+funding_url: https://github.com/Haervwe/open-webui-tools
 """
 
 from pydantic import BaseModel, Field
@@ -24,7 +24,7 @@ class Filter:
         )
 
     def __init__(self):
-        self.file_handler = False
+        self.file_handler = True
         self.valves = self.Valves()
 
     def clean_text(self, text: str) -> str:
