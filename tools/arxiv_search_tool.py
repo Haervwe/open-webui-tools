@@ -49,7 +49,7 @@ class Tools:
                 {
                     "type": "status",
                     "data": {
-                        "description": "Searching searchthearxiv.com database...",
+                        "description": "Searching arXiv...",
                         "done": False,
                     },
                 }
@@ -84,7 +84,7 @@ class Tools:
                             "data": {"description": "No papers found", "done": True},
                         }
                     )
-                return f"No papers found on searchthearxiv.com related to '{topic}'"
+                return f"No papers found on arXiv related to '{topic}'"
 
             results = ""
 
