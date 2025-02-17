@@ -1,12 +1,12 @@
 """
 title: searchthearxiv.com Tool
-description: Tool to search searchthearxiv.org for relevant papers on a topic
-author: Tan Yong Sheng
-website: https://tanyongsheng.com
+description: Tool to perform semantic search for relevant journals on arXiv via searchthearxiv.com
+author: Haervwe, Tan Yong Sheng
+author_urls:
+  - https://github.com/Haervwe/
+  - https://github.com/tan-yong-sheng/
+version: 0.1.3
 """
-
-# Adapted from the arXiv Search Tool by Tan Yong Sheng 
-# Source: https://github.com/Haervwe/open-webui-tools/
 
 import requests
 from typing import Any, Optional, Callable, Awaitable
