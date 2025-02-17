@@ -1,15 +1,19 @@
 """
-title: arXiv Search Tool
-description: Tool to search arXiv.org for relevant papers on a topic
-author: Haervwe
-git: https://github.com/Haervwe/open-webui-tools  
-version: 0.1.3
+title: searchthearxiv.com Tool
+description: Tool to perform semantic search for relevant journals on arXiv via searchthearxiv.com
+author: Haervwe, Tan Yong Sheng
+author_urls:
+  - https://github.com/Haervwe/
+  - https://github.com/tan-yong-sheng/
+funding_url: https://github.com/Haervwe/open-webui-tools
+version: 0.2
 """
 
+# Adapted from the arXiv Search Tool by Tan Yong Sheng
+# Source: https://github.com/Haervwe/open-webui-tools/
+
 import requests
-import xml.etree.ElementTree as ET
-from datetime import datetime
-from typing import Dict, Any, Optional, Callable, Awaitable
+from typing import Any, Optional, Callable, Awaitable
 from pydantic import BaseModel
 import urllib.parse
 
@@ -21,7 +25,7 @@ class Tools:
         pass
 
     def __init__(self):
-        self.base_url = "http://export.arxiv.org/api/query"
+        self.base_url = "https://searchthearxiv.com/search"
         self.max_results = 5
 
     async def search_papers(
@@ -31,21 +35,21 @@ class Tools:
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> str:
         """
-        Search arXiv.org for papers on a given topic and return formatted results.
+        Search searchthearxiv.com for papers on a given topic and return formatted results.
 
         Args:
             topic: Topic to search for (e.g., "quantum computing", "transformer models")
 
         Returns:
             Formatted string containing paper details including titles, authors, dates,
-            URLs and abstracts
+            URLs and abstracts.
         """
         if __event_emitter__:
             await __event_emitter__(
                 {
                     "type": "status",
                     "data": {
-                        "description": "Searching arXiv database...",
+                        "description": "Searching searchthearxiv.com database...",
                         "done": False,
                     },
                 }
@@ -53,24 +57,24 @@ class Tools:
 
         try:
             # Construct search query
-            search_query = f'all:"{topic}" OR abs:"{topic}" OR ti:"{topic}"'
+            search_query = topic
             encoded_query = urllib.parse.quote(search_query)
 
-            params = {
-                "search_query": encoded_query,
-                "start": 0,
-                "max_results": self.max_results,
-                "sortBy": "submittedDate",
-                "sortOrder": "descending",
+            params = {"query": encoded_query}
+            headers = {
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+                "x-requested-with": "XMLHttpRequest",
             }
 
-            # Make request to arXiv API
-            response = requests.get(self.base_url, params=params, timeout=30)
+            # Make request to searchthearxiv.com API
+            response = requests.get(
+                self.base_url, params=params, headers=headers, timeout=30
+            )
             response.raise_for_status()
 
-            # Parse XML response
-            root = ET.fromstring(response.content)
-            entries = root.findall("{http://www.w3.org/2005/Atom}entry")
+            # Parse JSON response
+            root = response.json()
+            entries = root.get("papers", [])
 
             if not entries:
                 if __event_emitter__:
@@ -80,48 +84,34 @@ class Tools:
                             "data": {"description": "No papers found", "done": True},
                         }
                     )
-                return f"No papers found on arXiv related to '{topic}'"
+                return f"No papers found on searchthearxiv.com related to '{topic}'"
 
-            # Format results
-            results = (
-                f"Found {len(entries)} recent papers on arXiv about '{topic}':\n\n"
-            )
+            results = ""
 
+            # Loop over each paper entry. We use enumerate starting at 1 so that the first paper (i==1)
+            # corresponds to source_id 0 (which is auto-added) and subsequent papers get inline tags.
             for i, entry in enumerate(entries, 1):
                 # Extract paper details with fallbacks
-                title = entry.find("{http://www.w3.org/2005/Atom}title")
-                title_text = (
-                    title.text.strip() if title is not None else "Unknown Title"
+                title = entry.get("title")
+                title_text = title.strip() if title else "Unknown Title"
+
+                authors_str = entry.get("authors", "Unknown Authors")
+
+                summary = entry.get("abstract")
+                summary_text = summary.strip() if summary else "No summary available"
+
+                link = entry.get("id")
+                link_text = (
+                    f"https://arxiv.org/abs/{link}" if link else "No link available"
+                )
+                pdf_link = (
+                    f"https://arxiv.org/pdf/{link}" if link else "No link available"
                 )
 
-                authors = entry.findall("{http://www.w3.org/2005/Atom}author")
-                author_names = []
-                for author in authors:
-                    name = author.find("{http://www.w3.org/2005/Atom}name")
-                    if name is not None and name.text:
-                        author_names.append(name.text)
-                authors_str = (
-                    ", ".join(author_names) if author_names else "Unknown Authors"
-                )
-
-                summary = entry.find("{http://www.w3.org/2005/Atom}summary")
-                summary_text = (
-                    summary.text.strip()
-                    if summary is not None
-                    else "No summary available"
-                )
-
-                link = entry.find("{http://www.w3.org/2005/Atom}id")
-                link_text = link.text if link is not None else "No link available"
-
-                published = entry.find("{http://www.w3.org/2005/Atom}published")
-                if published is not None and published.text:
-                    try:
-                        pub_date = datetime.strptime(
-                            published.text, "%Y-%m-%dT%H:%M:%SZ"
-                        ).strftime("%Y-%m-%d")
-                    except ValueError:
-                        pub_date = "Unknown Date"
+                year = entry.get("year")
+                month = entry.get("month")
+                if year and month:
+                    pub_date = f"{month}-{int(year)}"
                 else:
                     pub_date = "Unknown Date"
 
@@ -130,7 +120,23 @@ class Tools:
                 results += f"   Authors: {authors_str}\n"
                 results += f"   Published: {pub_date}\n"
                 results += f"   URL: {link_text}\n"
+                results += f"   PDF URL: {pdf_link}\n"
+                # Append inline citation tag only for papers after the first one.
+
                 results += f"   Summary: {summary_text}\n\n"
+
+                # Emit citation data as provided (the inline tags are only added to the text above)
+                if __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "citation",
+                            "data": {
+                                "document": [summary_text],
+                                "metadata": [{"source": pdf_link}],
+                                "source": {"name": title_text},
+                            },
+                        }
+                    )
 
             if __event_emitter__:
                 await __event_emitter__(
