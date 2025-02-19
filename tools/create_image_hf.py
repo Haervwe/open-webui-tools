@@ -2,19 +2,19 @@
 title: Hugging Face API - Flux Pro Image Generator
 author: Haervwe
 git: https://github.com/Haervwe/open-webui-tools/
-version: 0.1.0
+version: 0.2.0
 license: MIT
 description: HuggingFace API implementation for text to image generation
 """
 
-import requests
+import aiohttp
 import base64
 import uuid
 import os
 from typing import Dict, Any
 from pydantic import BaseModel, Field
 import logging
-from requests.exceptions import Timeout, RequestException
+from aiohttp import ClientTimeout
 
 # Import CACHE_DIR from your backend configuration so it matches the static files mount.
 from open_webui.config import CACHE_DIR
@@ -104,28 +104,24 @@ class Tools:
                 "parameters": {"width": width, "height": height},
             }
 
-            response = requests.post(
-                self.valves.HF_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=(10, 600),
-            )
+            async with aiohttp.ClientSession(
+                timeout=ClientTimeout(total=600)
+            ) as session:
+                async with session.post(
+                    self.valves.HF_API_URL, headers=headers, json=payload
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        print(f"[DEBUG] API request failed: {error_text}")
+                        raise HFException(
+                            f"API request failed with status code {response.status}: {error_text}"
+                        )
 
-            if response.status_code != 200:
-                print(f"[DEBUG] API request failed: {response.text}")
-                raise HFException(
-                    f"API request failed with status code {response.status_code}: {response.text}"
-                )
+                    image_content = await response.read()
 
-            # Store the image content from the API response
-            image_content = response.content
-
-            # Save the image using the same CACHE_DIR as mounted in the backend.
-            # This ensures the image is accessible via the /cache route.
             directory = os.path.join(CACHE_DIR, "image", "generations")
             os.makedirs(directory, exist_ok=True)
 
-            # Generate a random filename with a .png extension
             filename = f"{uuid.uuid4()}.png"
             save_path = os.path.join(directory, filename)
 
@@ -133,10 +129,8 @@ class Tools:
                 image_file.write(image_content)
             print(f"[DEBUG] Image saved to {save_path}")
 
-            # Create URL pointing to the saved file
             image_url = f"/cache/image/generations/{filename}"
 
-            # Send the completion status before the image
             await __event_emitter__(
                 {
                     "type": "status",
@@ -144,7 +138,6 @@ class Tools:
                 }
             )
 
-            # Send the image in a separate message using the image URL
             await __event_emitter__(
                 {
                     "type": "message",
@@ -156,19 +149,7 @@ class Tools:
 
             return f"Notify the user that the image has been successfully generated for the prompt: '{prompt}' "
 
-        except Timeout as e:
-            error_msg = (
-                "Request timed out while generating the image. Please try again later."
-            )
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {"description": error_msg, "done": True},
-                }
-            )
-            return error_msg
-
-        except RequestException as e:
+        except aiohttp.ClientError as e:
             error_msg = f"Network error occurred: {str(e)}"
             await __event_emitter__(
                 {
