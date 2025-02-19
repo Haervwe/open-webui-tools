@@ -6,13 +6,11 @@ author_urls:
   - https://github.com/Haervwe/
   - https://github.com/tan-yong-sheng/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2
+version: 0.2.1
 """
 
-# Adapted from the arXiv Search Tool by Tan Yong Sheng
-# Source: https://github.com/Haervwe/open-webui-tools/
-
-import requests
+import aiohttp
+import asyncio
 from typing import Any, Optional, Callable, Awaitable
 from pydantic import BaseModel
 import urllib.parse
@@ -59,23 +57,24 @@ class Tools:
             # Construct search query
             search_query = topic
             encoded_query = urllib.parse.quote(search_query)
-
             params = {"query": encoded_query}
+
             headers = {
-                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/132.0.0.0 Safari/537.36",
                 "x-requested-with": "XMLHttpRequest",
             }
 
-            # Make request to searchthearxiv.com API
-            response = requests.get(
-                self.base_url, params=params, headers=headers, timeout=30
-            )
-            response.raise_for_status()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.base_url, params=params, headers=headers, timeout=30
+                ) as response:
+                    response.raise_for_status()
+                    # Use content_type=None to bypass MIME type checking.
+                    root = await response.json(content_type=None)
 
-            # Parse JSON response
-            root = response.json()
             entries = root.get("papers", [])
-
             if not entries:
                 if __event_emitter__:
                     await __event_emitter__(
@@ -87,9 +86,7 @@ class Tools:
                 return f"No papers found on arXiv related to '{topic}'"
 
             results = ""
-
-            # Loop over each paper entry. We use enumerate starting at 1 so that the first paper (i==1)
-            # corresponds to source_id 0 (which is auto-added) and subsequent papers get inline tags.
+            # Loop over each paper entry.
             for i, entry in enumerate(entries, 1):
                 # Extract paper details with fallbacks
                 title = entry.get("title")
@@ -110,10 +107,7 @@ class Tools:
 
                 year = entry.get("year")
                 month = entry.get("month")
-                if year and month:
-                    pub_date = f"{month}-{int(year)}"
-                else:
-                    pub_date = "Unknown Date"
+                pub_date = f"{month}-{int(year)}" if year and month else "Unknown Date"
 
                 # Format paper entry
                 results += f"{i}. {title_text}\n"
@@ -121,11 +115,9 @@ class Tools:
                 results += f"   Published: {pub_date}\n"
                 results += f"   URL: {link_text}\n"
                 results += f"   PDF URL: {pdf_link}\n"
-                # Append inline citation tag only for papers after the first one.
-
                 results += f"   Summary: {summary_text}\n\n"
 
-                # Emit citation data as provided (the inline tags are only added to the text above)
+                # Emit citation data as provided.
                 if __event_emitter__:
                     await __event_emitter__(
                         {
@@ -148,7 +140,7 @@ class Tools:
 
             return results
 
-        except requests.RequestException as e:
+        except aiohttp.ClientError as e:
             error_msg = f"Error searching arXiv: {str(e)}"
             if __event_emitter__:
                 await __event_emitter__(
