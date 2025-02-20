@@ -60,6 +60,10 @@ class Pipe:
             default="",
             description="Name of the agent",
         )
+        Timeout: int = Field(
+            default=400,
+            description="Timeout to wait for Letta agent response in seconds"
+        )
 
     def __init__(self):
         self.type = "manifold"
