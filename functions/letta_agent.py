@@ -2,7 +2,7 @@
 title: Letta_Agent_Connector
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.3
+version: 0.2.4
 description: A pipe to connect with Letta agents, enabling seamless integration of autonomous agents into Open WebUI conversations. Supports task-specific processing and maintains conversation context while communicating with the agent API.
 """
 
@@ -62,7 +62,7 @@ class Pipe:
         )
         Timeout: int = Field(
             default=400,
-            description="Timeout to wait for Letta agent response in seconds"
+            description="Timeout to wait for Letta agent response in seconds",
         )
 
     def __init__(self):
@@ -133,7 +133,7 @@ class Pipe:
         }
         data = {"messages": [message]}
         url = f"{self.valves.API_URL}/v1/agents/{self.valves.Agent_ID}/messages"
-        timeout = aiohttp.ClientTimeout(total=300)
+        timeout = aiohttp.ClientTimeout(total=self.valves.Timeout)
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             # Make the initial POST request
