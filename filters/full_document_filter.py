@@ -3,6 +3,7 @@ title: Full Document Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
+version: 0.2.0
 """
 
 from pydantic import BaseModel, Field

@@ -3,7 +3,7 @@ title: Multi Model Conversations
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.6.2
+version: 0.6.3
 """
 
 import logging
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from dataclasses import dataclass
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
+from open_webui.models.users import User
 
 name = "Conversation"
 
@@ -34,14 +35,6 @@ def setup_logger():
 
 
 logger = setup_logger()
-
-
-@dataclass
-class User:
-    id: str
-    email: str
-    name: str
-    role: str
 
 
 class Pipe:

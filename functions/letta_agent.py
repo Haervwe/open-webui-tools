@@ -1,10 +1,8 @@
-
 """
 title: Letta_Agent_Connector
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.1
+version: 0.2.3
 description: A pipe to connect with Letta agents, enabling seamless integration of autonomous agents into Open WebUI conversations. Supports task-specific processing and maintains conversation context while communicating with the agent API.
 """
 
@@ -16,6 +14,7 @@ import aiohttp
 import json
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
+from open_webui.models.users import User
 import asyncio
 import time
 
@@ -40,20 +39,7 @@ def setup_logger():
 logger = setup_logger()
 
 
-@dataclass
-class User:
-    id: str
-    email: str
-    name: str
-    role: str
-
-
 class Pipe:
-    __current_event_emitter__: Callable[[dict], Awaitable[None]]
-    __user__: User
-    __model__: str
-    __request__ = None
-
     class Valves(BaseModel):
         Agent_ID: str = Field(
             default="Demether",
@@ -70,6 +56,10 @@ class Pipe:
             default="",
             description="Model to use for title/tags generation tasks. If empty, uses the default model.",
         )
+        Custom_Name: str = Field(
+            default="",
+            description="Name of the agent",
+        )
 
     def __init__(self):
         self.type = "manifold"
@@ -77,7 +67,13 @@ class Pipe:
         self.valves = self.Valves()
 
     def pipes(self) -> List[Dict[str, str]]:
-        return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
+        pipe_name = self.valves.Custom_Name if self.valves.Custom_Name != "" else name
+        return [
+            {
+                "id": f"{name}-pipe",
+                "name": f"{pipe_name} Pipe",
+            }
+        ]
 
     async def emit_message(self, message: str):
         await self.__current_event_emitter__(
@@ -257,7 +253,7 @@ class Pipe:
         ):
             logger.error("Event emitter not provided")
             return ""
-
+        print(__user__)
         self.__user__ = User(**__user__)
         self.__model__ = __model__
         self.__request__ = __request__
@@ -265,7 +261,9 @@ class Pipe:
         # Handle task-specific processing
         if __task__ and __task__ != TASKS.DEFAULT:
             try:
-                task_model = self.valves.Task_Model or self.__model__
+                task_model = (
+                    self.valves.Task_Model if self.valves.Task_Model else self.__model__
+                )
                 response = await generate_chat_completions(
                     self.__request__,
                     {
@@ -291,14 +289,14 @@ class Pipe:
         if isinstance(user_message, str):
             user_message = {"role": "user", "content": user_message}
 
-        await self.emit_status("info", "Sending request to Letta agent...", False)
+        await self.emit_status("info", "Demether is thinking...", False)
 
         try:
             response = await self.get_letta_response(user_message)
             logger.debug(f"Letta agent response: {response}")
             if response:
                 await self.emit_message(str(response))
-                await self.emit_status("success", "Letta agent response received", True)
+                await self.emit_status("success", "", True)
                 return response
             else:
                 await self.emit_status("error", "Empty response from Letta agent", True)

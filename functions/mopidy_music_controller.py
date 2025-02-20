@@ -3,7 +3,7 @@ title: Mopidy_Music_Controller
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.8
+version: 0.3.9
 description: A pipe to control Mopidy music server to play songs from local library or YouTube, manage playlists, and handle various music commands 
 needs a Local and/or a Youtube API endpoint configured in mopidy.
 mopidy repo: https://github.com/mopidy
@@ -20,6 +20,7 @@ import re
 import traceback
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
+from open_webui.models.users import User
 
 name = "MopidyController"
 
@@ -42,12 +43,6 @@ def setup_logger():
 logger = setup_logger()
 
 
-@dataclass
-class User:
-    id: str
-    email: str
-    name: str
-    role: str
 
 
 EventEmitter = Callable[[dict], Awaitable[None]]

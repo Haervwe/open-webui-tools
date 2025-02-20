@@ -3,7 +3,7 @@ title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.2
+version: 0.4.3
 requirements: aiofiles
 important note: 1. this script requires the full_document filter added in open web ui to work with attached files, you can find it here : https://openwebui.com/f/haervwe/full_document_filter or in the git hub repo
 2.this script requires a database for resumes it automatically downloads it from my github but if u have trouble : , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
@@ -29,7 +29,7 @@ import aiofiles
 import aiohttp
 import os
 import re
-
+from open_webui.models.users import User
 
 name = "Resume"
 
@@ -51,13 +51,6 @@ def setup_logger():
 
 logger = setup_logger()
 
-
-@dataclass
-class User:
-    id: str
-    email: str
-    name: str
-    role: str
 
 
 class Pipe:

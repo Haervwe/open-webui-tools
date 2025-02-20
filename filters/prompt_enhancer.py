@@ -3,7 +3,7 @@ title: Prompt Enhancer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4
+version: 0.5
 """
 
 import logging
@@ -15,6 +15,7 @@ from fastapi import Request
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
 from open_webui.models.models import Models
+from open_webui.models.users import User
 name = "enhancer"
 
 
@@ -35,25 +36,7 @@ def setup_logger():
 
 logger = setup_logger()
 
-@dataclass
-class User:
-    id: str
-    email: str
-    name: str
-    role: str
 
-    @classmethod
-    def from_dict(cls, data: dict):
-        return cls(
-            id=data.get('id', ''),
-            email=data.get('email', ''),
-            name=data.get('name', ''),
-            role=data.get('role', '')
-        )
-
-    @property
-    def info(self):
-        return {"id": self.id, "email": self.email, "name": self.name, "role": self.role}
 
 class Filter:
     class Valves(BaseModel):

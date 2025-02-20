@@ -6,7 +6,7 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.4.2
+version: 0.4.3
 """
 
 import logging
@@ -23,17 +23,13 @@ from bs4 import BeautifulSoup
 from dataclasses import dataclass
 import re
 from open_webui.main import generate_chat_completions
+from open_webui.models.users import User
 
 
 name = "Research Pipe"
 
 
-@dataclass
-class User:
-    id: str
-    email: str
-    name: str
-    role: str
+
 
 
 def setup_logger():

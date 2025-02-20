@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.8.3
+version: 0.8.4
 """
 
 import logging
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from open_webui.constants import TASKS
 from open_webui.utils.chat import generate_chat_completion
+from open_webui.models.users import User
 from dataclasses import dataclass
 from fastapi import Request
 import re
@@ -23,12 +24,6 @@ import difflib
 name = "Planner"
 
 
-@dataclass
-class User:
-    id: str
-    email: str
-    name: str
-    role: str
 
 
 def setup_logger():
