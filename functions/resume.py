@@ -3,7 +3,7 @@ title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.3
+version: 0.4.4
 requirements: aiofiles
 important note: 1. this script requires the full_document filter added in open web ui to work with attached files, you can find it here : https://openwebui.com/f/haervwe/full_document_filter or in the git hub repo
 2.this script requires a database for resumes it automatically downloads it from my github but if u have trouble : , you can download the one im using on https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset?resource=download 
@@ -50,7 +50,6 @@ def setup_logger():
 
 
 logger = setup_logger()
-
 
 
 class Pipe:
@@ -534,18 +533,6 @@ class Pipe:
         __model__=None,
         __request__=None,
     ) -> str:
-        """
-        Analyzes a resume and provides feedback, tags, first impression, adversarial analysis,
-        potential interview questions, and career advice.
-
-        :param body: The input data for the pipe.
-        :param __user__: The user object containing information about the user.
-        :param __event_emitter__: The event emitter object to emit messages and status updates.
-        :param __task__: The task identifier for the current operation (e.g., TITLE_GENERATION, TAGS_GENERATION).
-        :param __model__: The model to use for generating completions.
-
-        Returns: None
-        """
         self.__current_event_emitter__ = __event_emitter__
         self.__user__ = User(**__user__)
         self.__model__ = self.valves.Model
@@ -567,7 +554,7 @@ class Pipe:
                 await self.emit_status(
                     "error", f"Failed to generate {__task__}: {e}", True
                 )
-                return ""
+                return
 
         dataset_path = self.valves.Dataset_path
         dataset_url = self.valves.Dataset_url
@@ -584,7 +571,7 @@ class Pipe:
                 await self.emit_status(
                     "error", f"Failed to generate career advice: {e}", True
                 )
-            return ""
+            return
 
         await self.emit_status("info", "Processing resume...", False)
         try:
@@ -596,7 +583,7 @@ class Pipe:
                 await self.emit_status(
                     "error", f"Dataset is missing required columns: {missing}", True
                 )
-                return ""
+                return
             valid_tags = df["Category"].unique().tolist()
         except FileNotFoundError:
             logger.error(f"Dataset not found: {dataset_path}")
@@ -611,7 +598,7 @@ class Pipe:
             await self.emit_status(
                 "error", f"Unexpected error loading dataset: {e}", True
             )
-            return ""
+            return
 
         try:
             tags = await self.generate_tags(user_message, valid_tags)
@@ -620,7 +607,7 @@ class Pipe:
         except Exception as e:
             logger.error(f"Error during tag generation or first impression: {e}")
             await self.emit_status("error", f"Failed during analysis: {e}", True)
-            return ""
+            return
 
         await self.emit_status("info", "Performing adversarial analysis...", False)
         try:
@@ -632,7 +619,7 @@ class Pipe:
             await self.emit_status(
                 "error", f"Failed during adversarial analysis: {e}", True
             )
-            return ""
+            return
 
         relevant_jobs = []
         if self.valves.web_search:
@@ -666,4 +653,4 @@ class Pipe:
             )
 
         await self.emit_status("success", "Resume analysis complete.", True)
-        return ""
+        return
