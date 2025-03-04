@@ -92,6 +92,83 @@ Analyze resumes and provide tags, first impressions, adversarial analysis, poten
 - **Interview Questions:** Suggests insightful questions tailored to the candidate's experience and the target role.
 - **Career Advisor Response:** Offers personalized career advice based on the resume analysis and conversation history.
 
+### 5. Mopidy Music Controller
+
+Control your Mopidy music server to play songs from the local library or YouTube, manage playlists, and handle various music commands.
+
+**Features:**
+- **Music Playback** Play songs from local library or YouTube
+- **Manage playlists** Can reatrieve or create playlist from local or YouTube
+- **Quick chat Commands** Handle various music commands (play, pause, resume, skip, etc.)
+
+### 6. Letta Agent Pipe
+
+Connect with Letta agents, enabling seamless integration of autonomous agents into Open WebUI conversations. Supports task-specific processing and maintains conversation context while communicating with the agent API.
+
+**Features:**
+- Communicate with Letta agents
+- Task-specific processing
+- Maintain conversation context
+
+**Requirements:**
+- Letta instance and a configured Letta agent (https://www.letta.com/)
+
+**Settings:**
+- **Agent_ID:** The ID of the Letta agent to communicate with (default: `Demether`).
+- **API_URL:** Base URL for the Letta agent API (default: `http://localhost:8283`).
+- **API_Token:** Bearer token for API authentication.
+- **Task_Model:** Model to use for title/tags generation tasks. If empty, uses the default model.
+- **Custom_Name:** Name of the agent.
+- **Timeout:** Timeout to wait for Letta agent response in seconds (default: 400).
+
+### 7. MCP Pipe
+
+Integrate the Model Context Protocol (MCP) into Open WebUI, enabling seamless connections between AI assistants and various data sources, tools, and development environments. MCP is a universal, open standard that replaces fragmented integrations with a single protocol for connecting AI systems with data sources.
+
+**Features:**
+- Connect to multiple MCP servers simultaneously
+- Access tools and prompts from connected servers
+- Process queries using context-aware tools
+- Support for data repositories, business tools, and development environments
+- Automatic tool and prompt discovery
+- Stream responses from tools
+- Maintain conversation context across different data sources
+
+**Requirements:**
+- MCP configuration file (`config.json`) placed in the `/data/` folder inside the Open WebUI installation
+- Python MCP servers (for this implementation, if you need npx support check out the MCP pipeline in this repo)
+
+**Note:** For a more comprehensive implementation that includes NPX server support and advanced features, check out the [MCP Pipeline Documentation](Pipelines/MCP_Pipeline/README_MCP_Pipeline.md).
+
+**Configuration:**
+1. Create the MCP configuration file `config.json` inside the `/data/` folder:
+    ```json
+    {
+        "mcpServers": {
+            "time_server": {
+                "command": "python",
+                "args": ["-m", "mcp_server_time", "--local-timezone=America/New_York"],
+                "description": "Provides Time and Timezone conversion tools."
+            },
+            "tavily_server": {
+                "command": "python",
+                "args": ["-m", "mcp_server_tavily", "--api-key=tvly-xxx"],
+                "description": "Provides web search capabilities tools."
+            }
+        }
+    }
+    ```
+
+**Settings:**
+- **MODEL:** Default "Qwen2_5_16k:latest" - The LLM model to use
+- **OPENAI_API_KEY:** Your OpenAI API key for API access
+- **OPENAI_API_BASE:** Default "http://0.0.0.0:11434/v1" - Base URL for API requests
+- **TEMPERATURE:** Default 0.5 - Controls randomness in responses (0.0-1.0)
+- **MAX_TOKENS:** Default 1500 - Maximum tokens to generate
+- **TOP_P:** Default 0.8 - Top-p sampling parameter
+- **PRESENCE_PENALTY:** Default 0.8 - Penalty for repeating topics
+- **FREQUENCY_PENALTY:** Default 0.8 - Penalty for repeating tokens
+
 ## Filters Included
 
 ### 1. Prompt Enhancer Filter
@@ -205,6 +282,41 @@ Required configuration in Open WebUI:
 * **API Key** (Required): Obtain a Hugging Face API key from your HuggingFace account and set it in the tool's configuration in Open WebUI
 *  **API URL** (Optional): Uses Stability AI's SD 3.5 Turbo model as Default,Can be customized to use other HF text-to-image model endpoints such as flux
   
+### Mopidy Music Controller
+
+**Requirements:**
+- YouTube API Key
+- Mopidy server installed and configured for local and YouTube playback (https://mopidy.com/)
+
+**Valves:**
+* **Model:** The model ID from your LLM provider connected to Open WebUI.
+* **Mopidy_URL:** URL for the Mopidy JSON-RPC API endpoint (default: `http://localhost:6680/mopidy/rpc`).
+* **YouTube_API_Key:** YouTube Data API key for search.
+* **Temperature:** Model temperature (default: 0.7).
+* **Max_Search_Results:** Maximum number of search results to return (default: 5).
+* **Use_Iris:** Toggle to use Iris interface or custom HTML UI (default: True).
+* **system_prompt:** System prompt for request analysis.
+
+### Letta Agent Pipe
+
+* **Agent_ID:** The ID of the Letta agent to communicate with , Not the Name the ID(is a long string of numbers and letters beneath the name in ADER).
+* **API_URL:** Base URL for the Letta agent API (default: `http://localhost:8283`).
+* **API_Token:** Bearer token for API authentication.
+* **Task_Model:** Model to use for title/tags generation tasks. If empty, uses the default model.
+* **Custom_Name:** Name of the agent to be displayed.
+* **Timeout:** Timeout to wait for Letta agent response in seconds (default: 400).
+
+### MCP Pipe
+
+* **MODEL:** Default "Qwen2_5_16k:latest" - The LLM model to use
+* **OPENAI_API_KEY:** Your OpenAI API key for API access
+* **OPENAI_API_BASE:** Default "http://0.0.0.0:11434/v1" - Base URL for API requests
+* **TEMPERATURE:** Default 0.5 - Controls randomness in responses (0.0-1.0)
+* **MAX_TOKENS:** Default 1500 - Maximum tokens to generate
+* **TOP_P:** Default 0.8 - Top-p sampling parameter
+* **PRESENCE_PENALTY:** Default 0.8 - Penalty for repeating topics
+* **FREQUENCY_PENALTY:** Default 0.8 - Penalty for repeating tokens
+
 ### Prompt Enhancer Filter
 
 * **User Customizable Template:**  Allows you to tailor the instructions given to the prompt-enhancing LLM.
@@ -213,7 +325,6 @@ Required configuration in Open WebUI:
 * **Model ID:** Select the specific model to use for prompt enhancement.
 
   
-
 ## Usage for Pipes
 
 ### Planner Agent
@@ -257,6 +368,9 @@ Select the pipe with the corresponding model, it show as this:
 
 ### Resume Analyzer Pipe
 
+**Requirements:**
+1. This script requires the full_document filter added in open web ui to work with attached files, you can find it here : https://openwebui.com/f/haervwe/full_document_filter
+
 **Usage:**
 1. Select the Resume Analyzer Pipe in the Open WebUI interface.
 2. Configure the valves with the desired model, dataset path (optional), and other settings.
@@ -276,6 +390,58 @@ Analyze this resume:
 
 
 The Resume Analyzer Pipe offers a comprehensive analysis of resumes, providing valuable insights and actionable feedback to help candidates improve their job prospects.
+
+### Mopidy Music Controller
+
+1. Select the Mopidy Music Controller Pipe in the Open WebUI interface.
+2. Configure the valves with the desired settings.
+3. Send a music-related command to start the process.
+4. Use quick text commands for faster response: 
+            "stop": "pause",
+            "halt": "pause",
+            "play": "play",
+            "start": "play",
+            "resume": "resume",
+            "continue": "resume",
+            "next": "skip",
+            "skip": "skip",
+            "pause": "pause",
+5. you can also interact with an artifact showing IRIS in the chat.
+
+**Example Usage:**
+```python
+# Example usage in your prompt
+Play the song "Imagine" by John Lennon
+```
+![Mopidy Image](img/Mopidy.png)
+
+
+
+### Letta Agent Pipe
+
+1. Select the Letta Agent Pipe in the Open WebUI interface.
+2. Configure the valves with the desired settings.
+3. Send a message to start the interaction with the Letta agent.
+
+**Example Usage:**
+```python
+# Example usage in your prompt
+Chat with the built in Long Term memory Letta MemGPT agent.
+```
+![Letta Image](img/Letta.png)
+
+
+### MCP Pipe
+
+1. Select the MCP Pipe in the Open WebUI interface.
+2. Configure the valves with the desired settings.
+3. Send a query to start using the MCP tools and prompts.
+
+**Example Usage:**
+```python
+# Example usage in your prompt
+Use the time_server to get the current time in New York.
+```
 
 ## Usage for tools
 

@@ -1,0 +1,28 @@
+{
+    "mcpServers": {
+      "time_server": {
+        "command": "python",
+        "args": ["-m", "mcp_server_time" , "--local-timezone=America/New_York"],
+        "description":"Provides Time and Timezone conversion tools."
+      },
+      "tavily_server": { 
+        "command": "python",
+        "args": ["-m", "mcp_server_tavily", "--api-key=tvly-xxx"],
+        "description":"Provides web search capabilites tools."
+      },
+      "puppeteer": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+        "description":"Provides tools for using puppeteer in a web browser"
+      },
+      "postgres": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-postgres",
+          "postgresql://postgres:URL"
+        ],
+        "description":"Provides tools for querying Postgress databases"
+      }
+    }
+  }
