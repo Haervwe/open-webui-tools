@@ -1,5 +1,5 @@
 """
-title: arXiv Research MCTS Pipe
+title: MCP Pipe
 description: Funtion Pipe made to use python mcp servers on open-webui.
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
