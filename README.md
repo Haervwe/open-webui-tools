@@ -110,16 +110,6 @@ Connect with Letta agents, enabling seamless integration of autonomous agents in
 - Task-specific processing
 - Maintain conversation context
 
-**Requirements:**
-- Letta instance and a configured Letta agent (https://www.letta.com/)
-
-**Settings:**
-- **Agent_ID:** The ID of the Letta agent to communicate with (default: `Demether`).
-- **API_URL:** Base URL for the Letta agent API (default: `http://localhost:8283`).
-- **API_Token:** Bearer token for API authentication.
-- **Task_Model:** Model to use for title/tags generation tasks. If empty, uses the default model.
-- **Custom_Name:** Name of the agent.
-- **Timeout:** Timeout to wait for Letta agent response in seconds (default: 400).
 
 ### 7. MCP Pipe
 
@@ -134,40 +124,6 @@ Integrate the Model Context Protocol (MCP) into Open WebUI, enabling seamless co
 - Stream responses from tools
 - Maintain conversation context across different data sources
 
-**Requirements:**
-- MCP configuration file (`config.json`) placed in the `/data/` folder inside the Open WebUI installation
-- Python MCP servers (for this implementation, if you need npx support check out the MCP pipeline in this repo)
-
-**Note:** For a more comprehensive implementation that includes NPX server support and advanced features, check out the [MCP Pipeline Documentation](Pipelines/MCP_Pipeline/README_MCP_Pipeline.md).
-
-**Configuration:**
-1. Create the MCP configuration file `config.json` inside the `/data/` folder:
-    ```json
-    {
-        "mcpServers": {
-            "time_server": {
-                "command": "python",
-                "args": ["-m", "mcp_server_time", "--local-timezone=America/New_York"],
-                "description": "Provides Time and Timezone conversion tools."
-            },
-            "tavily_server": {
-                "command": "python",
-                "args": ["-m", "mcp_server_tavily", "--api-key=tvly-xxx"],
-                "description": "Provides web search capabilities tools."
-            }
-        }
-    }
-    ```
-
-**Settings:**
-- **MODEL:** Default "Qwen2_5_16k:latest" - The LLM model to use
-- **OPENAI_API_KEY:** Your OpenAI API key for API access
-- **OPENAI_API_BASE:** Default "http://0.0.0.0:11434/v1" - Base URL for API requests
-- **TEMPERATURE:** Default 0.5 - Controls randomness in responses (0.0-1.0)
-- **MAX_TOKENS:** Default 1500 - Maximum tokens to generate
-- **TOP_P:** Default 0.8 - Top-p sampling parameter
-- **PRESENCE_PENALTY:** Default 0.8 - Penalty for repeating topics
-- **FREQUENCY_PENALTY:** Default 0.8 - Penalty for repeating tokens
 
 ## Filters Included
 
@@ -299,6 +255,10 @@ Required configuration in Open WebUI:
 
 ### Letta Agent Pipe
 
+**Requirements:**
+- Letta instance and a configured Letta agent (https://www.letta.com/)
+
+**Valves:**
 * **Agent_ID:** The ID of the Letta agent to communicate with , Not the Name the ID(is a long string of numbers and letters beneath the name in ADER).
 * **API_URL:** Base URL for the Letta agent API (default: `http://localhost:8283`).
 * **API_Token:** Bearer token for API authentication.
@@ -308,6 +268,35 @@ Required configuration in Open WebUI:
 
 ### MCP Pipe
 
+**Requirements:**
+- MCP configuration file (`config.json`) placed in the `/data/` folder inside the Open WebUI installation
+- Python MCP servers (for this implementation, if you need npx support check out the MCP pipeline in this repo)
+
+**Note:** For a more comprehensive implementation that includes NPX server support and advanced features, check out the [MCP Pipeline Documentation](Pipelines/MCP_Pipeline/README_MCP_Pipeline.md).
+
+**Configuration:**
+
+**Config File:**
+1. Create the MCP configuration file `config.json` inside the `/data/` folder:
+    ```json
+    {
+        "mcpServers": {
+            "time_server": {
+                "command": "python",
+                "args": ["-m", "mcp_server_time", "--local-timezone=America/New_York"],
+                "description": "Provides Time and Timezone conversion tools."
+            },
+            "tavily_server": {
+                "command": "python",
+                "args": ["-m", "mcp_server_tavily", "--api-key=tvly-xxx"],
+                "description": "Provides web search capabilities tools."
+            }
+        }
+    }
+    ```
+2. 1f you add another python server make sure to pip install them in the open webui environment and config.json file.
+
+**Valves:**
 * **MODEL:** Default "Qwen2_5_16k:latest" - The LLM model to use
 * **OPENAI_API_KEY:** Your OpenAI API key for API access
 * **OPENAI_API_BASE:** Default "http://0.0.0.0:11434/v1" - Base URL for API requests
