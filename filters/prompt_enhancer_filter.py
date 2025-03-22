@@ -3,7 +3,7 @@ title: Prompt Enhancer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5
+version: 0.5.1
 """
 
 import logging
