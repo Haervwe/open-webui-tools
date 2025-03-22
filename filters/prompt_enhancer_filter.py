@@ -88,15 +88,8 @@ Now, enhance the following prompt:
         self.__current_event_emitter__ = __event_emitter__
         self.__request__ = __request__
         self.__model__ = __model__
-        
-        # Convert user dict to User object if needed
-        if __user__:
-            if not isinstance(__user__, User):
-                self.__user__ = User.from_dict(__user__)
-            else:
-                self.__user__ = __user__
-        else:
-            self.__user__ = None
+        self.__user__ = User(**__user__) if isinstance(__user__, dict) else __user__
+       
 
         messages = body["messages"]
         user_message = get_last_user_message(messages)
@@ -185,9 +178,7 @@ Now, enhance the following prompt:
                     }
                 )
             if self.valves.show_enhanced_prompt:
-                enhanced_prompt_message = (
-                    f"### Enhanced Prompt:\n{enhanced_prompt}\n\n---\n\n"
-                )
+                enhanced_prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
                 await __event_emitter__(
                     {
                         "type": "message",
@@ -221,3 +212,4 @@ Now, enhance the following prompt:
                 )
 
         return body
+    
