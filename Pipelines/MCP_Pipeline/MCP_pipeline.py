@@ -16,7 +16,6 @@ import uuid
 import time
 import requests
 
-# Name of the pipeline - used for logging and identification
 name = "MCP Pipeline"
 
 
@@ -93,7 +92,7 @@ class MCPClient:
         self.is_initialized = False
 
     async def initialize_servers(self):
-        """
+         """
         Initialize connections to all configured MCP servers.
         
         Process:
@@ -106,147 +105,147 @@ class MCPClient:
         Raises:
             Exception: If server initialization fails
         """
-        if self.is_initialized:
-            logger.warning("MCPClient already initialized, skipping initialization.")
-            return
-        
-        try:
-            with open(self.mcp_config_path, "r") as f:
-                mcp_config = json.load(f)
+         if self.is_initialized:
+             logger.warning("MCPClient already initialized, skipping initialization.")
+             return
+         
+         try:
+             with open(self.mcp_config_path, "r") as f:
+                 mcp_config = json.load(f)
 
-            mcp_servers = mcp_config.get("mcpServers", {})
-            logger.info(f"Found {len(mcp_servers)} MCP servers in config")
+             mcp_servers = mcp_config.get("mcpServers", {})
+             logger.info(f"Found {len(mcp_servers)} MCP servers in config")
 
-            for server_name, server_config in mcp_servers.items():
-                logger.info(f"Connecting to server: {server_name}")
-                command = server_config.get("command")
-                args = parse_server_args(server_config.get("args", []))
-                env = server_config.get("env")
+             for server_name, server_config in mcp_servers.items():
+                 logger.info(f"Connecting to server: {server_name}")
+                 command = server_config.get("command")
+                 args = parse_server_args(server_config.get("args", []))
+                 env = server_config.get("env")
 
-                server_params = StdioServerParameters(
-                    command=command, args=args, env=env
-                )
+                 server_params = StdioServerParameters(
+                     command=command, args=args, env=env
+                 )
 
-                try:
-                    stdio_transport = await self.exit_stack.enter_async_context(
-                        stdio_client(server_params)
-                    )
-                    stdio, write = stdio_transport
+                 try:
+                     stdio_transport = await self.exit_stack.enter_async_context(
+                         stdio_client(server_params)
+                     )
+                     stdio, write = stdio_transport
 
-                    session = await self.exit_stack.enter_async_context(
-                        Cls(stdio, write)
-                    )
-                    await session.initialize()
+                     session = await self.exit_stack.enter_async_context(
+                         Cls(stdio, write)
+                     )
+                     await session.initialize()
 
-                    # Store session and aggregate tools
-                    self.sessions[server_name] = session
-                    tools_response = await session.list_tools()
-                    for tool in tools_response.tools:
-                        self.available_tools.append(
-                            {
-                                "id": tool.name,
-                                "description": tool.description,
-                                "input_schema": tool.inputSchema,
-                                "server": server_name,  # Add server information
-                            }
-                        )
+                     # Store session and aggregate tools
+                     self.sessions[server_name] = session
+                     tools_response = await session.list_tools()
+                     for tool in tools_response.tools:
+                         self.available_tools.append(
+                             {
+                                 "id": tool.name,
+                                 "description": tool.description,
+                                 "input_schema": tool.inputSchema,
+                                 "server": server_name,  # Add server information
+                             }
+                         )
 
-                    tool_names = [
-                        tool["id"]
-                        for tool in self.available_tools
-                        if tool["server"] == server_name
-                    ]
-                    logger.info(f"Connected to {server_name} with tools: {tool_names}")
+                     tool_names = [
+                         tool["id"]
+                         for tool in self.available_tools
+                         if tool["server"] == server_name
+                     ]
+                     logger.info(f"Connected to {server_name} with tools: {tool_names}")
 
 
-                    # Add prompts handling similar to tools
-                    try:
-                        prompts_response = await session.list_prompts()
-                        for prompt in prompts_response.prompts:
-                            # Convert PromptArgument objects to dict for JSON serialization
-                            serialized_arguments = []
-                            if hasattr(prompt, "arguments") and prompt.arguments:
-                                for arg in prompt.arguments:
-                                    serialized_arguments.append(
-                                        {
-                                            "name": arg.name,
-                                            "description": (
-                                                arg.description
-                                                if hasattr(arg, "description")
-                                                else None
-                                            ),
-                                            "required": (
-                                                arg.required
-                                                if hasattr(arg, "required")
-                                                else False
-                                            ),
-                                        }
-                                    )
+                     # Add prompts handling similar to tools
+                     try:
+                         prompts_response = await session.list_prompts()
+                         for prompt in prompts_response.prompts:
+                             # Convert PromptArgument objects to dict for JSON serialization
+                             serialized_arguments = []
+                             if hasattr(prompt, "arguments") and prompt.arguments:
+                                 for arg in prompt.arguments:
+                                     serialized_arguments.append(
+                                         {
+                                             "name": arg.name,
+                                             "description": (
+                                                 arg.description
+                                                 if hasattr(arg, "description")
+                                                 else None
+                                             ),
+                                             "required": (
+                                                 arg.required
+                                                 if hasattr(arg, "required")
+                                                 else False
+                                             ),
+                                         }
+                                     )
 
-                            self.available_prompts.append(
-                                {
-                                    "name": prompt.name,
-                                    "description": prompt.description,
-                                    "arguments": serialized_arguments,
-                                    "server": server_name,
-                                }
-                            )
-                        prompt_names = [
-                            prompt["name"]
-                            for prompt in self.available_prompts
-                            if prompt["server"] == server_name
-                        ]
-                        logger.info(f"Added prompts from {server_name}: {prompt_names}")
-                    except Exception as e:
-                        logger.warning(
-                            f"Server {server_name} doesn't support prompts: {str(e)}"
-                        )
+                             self.available_prompts.append(
+                                 {
+                                     "name": prompt.name,
+                                     "description": prompt.description,
+                                     "arguments": serialized_arguments,
+                                     "server": server_name,
+                                 }
+                             )
+                         prompt_names = [
+                             prompt["name"]
+                             for prompt in self.available_prompts
+                             if prompt["server"] == server_name
+                         ]
+                         logger.info(f"Added prompts from {server_name}: {prompt_names}")
+                     except Exception as e:
+                         logger.warning(
+                             f"Server {server_name} doesn't support prompts: {str(e)}"
+                         )
 
-                    # Add resources handling similar to tools
-                    try:
-                        resources_response = await session.list_resources()
-                        for resource in resources_response.resources:
-                            self.available_resources.append(
-                                {
-                                    "uri": resource.uri,
-                                    "name": resource.name,
-                                    "description": resource.description,
-                                    "mimeType": resource.mimeType,
-                                    "server": server_name,  # Add server information
-                                }
-                            )
-                        resource_names = [
-                            resource["name"]
-                            for resource in self.available_resources
-                            if resource["server"] == server_name
-                        ]
-                        logger.info(f"Added resources from {server_name}: {resource_names}")
+                     # Add resources handling similar to tools
+                     try:
+                         resources_response = await session.list_resources()
+                         for resource in resources_response.resources:
+                             self.available_resources.append(
+                                 {
+                                     "uri": resource.uri,
+                                     "name": resource.name,
+                                     "description": resource.description,
+                                     "mimeType": resource.mimeType,
+                                     "server": server_name,  # Add server information
+                                 }
+                             )
+                         resource_names = [
+                             resource["name"]
+                             for resource in self.available_resources
+                             if resource["server"] == server_name
+                         ]
+                         logger.info(f"Added resources from {server_name}: {resource_names}")
 
-                        # Log the contents of the first resource
-                        server_resources = [
-                            resource for resource in self.available_resources
-                            if resource["server"] == server_name
-                        ]
-                        if server_resources:
-                            first_resource_uri = server_resources[0]["uri"]
-                            logger.info(f"Content of the first resource ({first_resource_uri}) from server {server_name}:")
-                            resource_content = await session.read_resource(first_resource_uri)
-                            logger.info(f"{resource_content}")
+                         # Log the contents of the first resource
+                         server_resources = [
+                             resource for resource in self.available_resources
+                             if resource["server"] == server_name
+                         ]
+                         if server_resources:
+                             first_resource_uri = server_resources[0]["uri"]
+                             logger.info(f"Content of the first resource ({first_resource_uri}) from server {server_name}:")
+                             resource_content = await session.read_resource(first_resource_uri)
+                             logger.info(f"{resource_content}")
 
-                    except Exception as e:
-                        logger.warning(
-                            f"Server {server_name} doesn't support resources: {str(e)}"
-                        )
-                
+                     except Exception as e:
+                         logger.warning(
+                             f"Server {server_name} doesn't support resources: {str(e)}"
+                         )
+                    
 
-                except Exception as e:
-                    logger.error(f"Failed to connect to server {server_name}: {str(e)}")
-            self.is_initialized = True
+                 except Exception as e:
+                     logger.error(f"Failed to connect to server {server_name}: {str(e)}")
+             self.is_initialized = True
 
-        except Exception as e:
+         except Exception as e:
             error_msg = f"Failed to connect to MCP servers: {str(e)}"
             logger.exception(error_msg)
-        raise
+            raise
 
     async def call_tool(self, tool_name: str, tool_args: Dict) -> str:
         """
@@ -392,15 +391,7 @@ class MCPClient:
       """Clean up resources, closing all sessions"""
       logger.debug("Starting cleanup of all MCP sessions")
       try:
-        """
-        for server_name, session in self.sessions.items():
-            try:
-                logger.debug(f"Closing session for server: {server_name}")
-                await session.exit_stack.aclose()
-            except Exception as e:
-                logger.exception(f"Error during {server_name} cleanup: {str(e)}")
-        """
-    
+             
         await self.exit_stack.aclose()
         self.sessions.clear()
         logger.info("All MCP sessions cleaned up successfully")
@@ -423,15 +414,6 @@ class Pipeline:
     - LLM integration: Interface with language models via API
     """
     class Valves(BaseModel):
-        """
-        Configuration parameters for the pipeline.
-        
-        Key configurations:
-        - Model settings (model name, API details)
-        - Generation parameters (temperature, tokens, penalties)
-        - System prompts (main, orchestrator, tool agent)
-        - Debug options
-        """
         MODEL: str = Field(default="Qwen2_5_16k:latest", description="Model to use")
         SYSTEM_PROMPT: str = Field(
             default="""You are an AI assistant designed to answer user queries accurately and efficiently. You have access to the following tools:
@@ -521,7 +503,6 @@ Do not fabricate tool names or parameters. Only use the exact tools and paramete
             desc = server_config.get("description", "No description available")
             server_descriptions.append({"name": server_name, "description": desc})
 
-        #tool definition to pass to the LLM for model selection
         select_server_tool = {
             "type": "function",
             "function": {
@@ -831,6 +812,7 @@ Do not fabricate tool names or parameters. Only use the exact tools and paramete
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Union[str, Generator, Iterator]:
+        
         """
         Main entry point for processing queries through the MCP pipeline.
         
@@ -937,4 +919,3 @@ Do not fabricate tool names or parameters. Only use the exact tools and paramete
         else:
             # If we're already in an event loop, create and await the task
             return loop.run_until_complete(_async_pipe())
-

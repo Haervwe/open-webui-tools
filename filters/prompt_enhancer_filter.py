@@ -3,7 +3,7 @@ title: Prompt Enhancer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.1
+version: 0.5.2
 """
 
 import logging
@@ -16,6 +16,7 @@ from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
 from open_webui.models.models import Models
 from open_webui.models.users import User
+
 name = "enhancer"
 
 
@@ -36,6 +37,22 @@ def setup_logger():
 
 logger = setup_logger()
 
+def setup_logger():
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        handler.set_name(name)
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.propagate = False
+    return logger
+
+
+logger = setup_logger()
 
 
 class Filter:
@@ -83,13 +100,52 @@ Now, enhance the following prompt:
         __event_emitter__: Callable[[Any], Awaitable[None]],
         __user__: Optional[dict] = None,
         __model__: Optional[dict] = None,
-        __request__: Optional[Request] = None
+        __request__: Optional[Request] = None,
     ) -> dict:
         self.__current_event_emitter__ = __event_emitter__
         self.__request__ = __request__
         self.__model__ = __model__
         self.__user__ = User(**__user__) if isinstance(__user__, dict) else __user__
-       
+
+        # Fetch available models and log their relevant details
+        available_models = await get_models(self.__request__, self.__user__)
+        logger.debug("Available Models (truncated image data):")
+        for model in available_models:
+            truncated_model = model.model_dump()  # Convert to dict for modification
+            if "meta" in truncated_model:
+                if isinstance(truncated_model["meta"], dict):
+                    if "profile_image_url" in truncated_model["meta"]:
+                        truncated_model["meta"]["profile_image_url"] = (
+                            truncated_model["meta"]["profile_image_url"][:50] + "..."
+                            if isinstance(
+                                truncated_model["meta"]["profile_image_url"], str
+                            )
+                            else None
+                        )
+                    if "profile_image_url" in truncated_model["user"]:
+                        truncated_model["user"]["profile_image_url"] = (
+                            truncated_model["user"]["profile_image_url"][:50] + "..."
+                            if isinstance(
+                                truncated_model["user"]["profile_image_url"], str
+                            )
+                            else None
+                        )
+                else:
+                    logger.warning(
+                        f"Unexpected type for model.meta: {type(truncated_model['meta'])}"
+                    )
+            else:
+                logger.warning("Model missing 'meta' key: %s", model)
+
+            # Truncate files information
+            if "knowledge" in truncated_model and isinstance(
+                truncated_model["knowledge"], list
+            ):
+                for knowledge_item in truncated_model["knowledge"]:
+                    if isinstance(knowledge_item, dict) and "files" in knowledge_item:
+                        knowledge_item["files"] = "List of files (truncated)"
+
+            logger.debug(json.dumps(truncated_model, indent=2))
 
         messages = body["messages"]
         user_message = get_last_user_message(messages)
@@ -129,7 +185,28 @@ Now, enhance the following prompt:
         logger.debug("System Prompt: %s", system_prompt)  # Fixed string formatting
 
         # Determine the model to use
-        model_to_use = self.valves.model_id if self.valves.model_id else (body["model"])
+        # model_to_use = self.valves.model_id if self.valves.model_id else (body["model"])
+        model_to_use = None
+        if self.valves.model_id:
+            model_to_use = self.valves.model_id
+        else:
+            model_to_use = body["model"]
+
+        # Check if the selected model has "-pipe" or "pipe" in its name.
+        is_pipeline_model = False
+        if "-pipe" in model_to_use.lower() or "pipe" in model_to_use.lower():
+            is_pipeline_model = True
+            logger.warning(
+                f"Selected model '{model_to_use}' appears to be a pipeline model.  Consider using the base model."
+            )
+
+        # If a pipeline model is *explicitly* chosen, use it. Otherwise, fall back to the main model.
+        if not self.valves.model_id and is_pipeline_model:
+            logger.warning(
+                f"Pipeline model '{model_to_use}' selected without explicit model_id.  Using main model instead."
+            )
+            model_to_use = body["model"]  # Fallback to main model
+            is_pipeline_model = False
 
         # Construct payload for LLM request
         payload = {
@@ -150,19 +227,16 @@ Now, enhance the following prompt:
                 "API CALL:\n Request: %s\n Form_data: %s\n User: %s",
                 str(self.__request__),
                 json.dumps(payload),
-                self.__user__
+                self.__user__,
             )
-            
+
             response = await generate_chat_completion(
-                self.__request__,
-                payload,
-                user=self.__user__,
-                bypass_filter=True
+                self.__request__, payload, user=self.__user__, bypass_filter=True
             )
-            
+
             enhanced_prompt = response["choices"][0]["message"]["content"]
             logger.debug("Enhanced prompt: %s", enhanced_prompt)
-            
+
             # Update the messages with the enhanced prompt
             messages[-1]["content"] = enhanced_prompt
             body["messages"] = messages
@@ -182,7 +256,9 @@ Now, enhance the following prompt:
                 await __event_emitter__(
                     {
                         "type": "message",
-                        "data": {"content": enhanced_prompt_message, },
+                        "data": {
+                            "content": enhanced_prompt_message,
+                        },
                     }
                 )
 
@@ -212,4 +288,18 @@ Now, enhance the following prompt:
                 )
 
         return body
-    
+
+    async def outlet(
+        self,
+        body: dict,
+        __event_emitter__: Callable[[Any], Awaitable[None]],
+        __user__: Optional[dict] = None,
+        __model__: Optional[dict] = None,
+        __request__: Optional[Request] = None,
+    ) -> dict:
+        self.__current_event_emitter__ = __event_emitter__
+        self.__request__ = __request__
+        self.__model__ = __model__
+        self.__user__ = User(**__user__) if isinstance(__user__, dict) else __user__
+        print(body)
+        return body

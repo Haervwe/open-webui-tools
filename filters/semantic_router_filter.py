@@ -425,6 +425,16 @@ class Filter:
             result = await self._get_model_recommendation(
                 body, available_models, user_message
             )
+            
+            if self.valves.show_reasoning:
+                reasoning_message = f"<details>\n<summary>Model Selection</summary>\nSelected Model: {result['selected_model_id']}\n\nReasoning: {result['reasoning']}\n\n---\n\n</details>"
+                await __event_emitter__(
+                    {
+                        "type": "message",
+                        "data": {"content": reasoning_message},
+                    }
+                )
+
             selected_model = next(
                 (m for m in available_models if m["id"] == result["selected_model_id"]),
                 None,
