@@ -4,6 +4,7 @@ author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
 version: 0.5.2
+important note: if you are going to sue this filter with custom pipes, do not use the show enhanced prompt valve setting 
 """
 
 import logging
