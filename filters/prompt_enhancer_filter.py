@@ -16,6 +16,7 @@ from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
 from open_webui.models.models import Models
 from open_webui.models.users import User
+from open_webui.routers.models import get_models
 
 name = "enhancer"
 
