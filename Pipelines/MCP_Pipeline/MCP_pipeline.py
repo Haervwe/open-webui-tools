@@ -911,11 +911,5 @@ Do not fabricate tool names or parameters. Only use the exact tools and paramete
             # If no running loop exists, create and manage a new one
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(_async_pipe())
-            finally:
-                loop.close()
-                asyncio.set_event_loop(None)
-        else:
-            # If we're already in an event loop, create and await the task
             return loop.run_until_complete(_async_pipe())
+        
