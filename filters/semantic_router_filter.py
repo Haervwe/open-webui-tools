@@ -1,3 +1,15 @@
+"""
+title: Semantic Router Filter
+author: Haervwe
+author_url: https://github.com/Haervwe
+funding_url: https://github.com/Haervwe/open-webui-tools
+version: 0.2.1
+description: Filter that acts a model router, using model descriptions 
+(make sure to set them in the models you want to be presented to the router) 
+and the prompt, selecting the best model base, 
+pipe or preset for the task completion
+"""
+
 import logging
 import json
 from typing import Callable, Awaitable, Any, Optional, List
@@ -10,7 +22,7 @@ from open_webui.utils.chat import (
 )
 from open_webui.utils.misc import get_last_user_message
 from open_webui.models.users import User
-from open_webui.routers.models import get_models
+from open_webui.routers.models import get_models, get_base_models
 from open_webui.utils.payload import apply_model_system_prompt_to_body
 from open_webui.routers.files import Files
 
@@ -410,7 +422,10 @@ class Filter:
             )
 
         try:
-            models = await get_models(self.__request__, self.__user__)
+            models = await get_models(
+                self.__request__, self.__user__
+            ) + await get_base_models(self.__user__)
+            logger.debug(models)
             if not models:
                 logger.warning("No models returned from get_models()")
                 return body
@@ -425,7 +440,7 @@ class Filter:
             result = await self._get_model_recommendation(
                 body, available_models, user_message
             )
-            
+
             if self.valves.show_reasoning:
                 reasoning_message = f"<details>\n<summary>Model Selection</summary>\nSelected Model: {result['selected_model_id']}\n\nReasoning: {result['reasoning']}\n\n---\n\n</details>"
                 await __event_emitter__(
@@ -537,48 +552,4 @@ class Filter:
                         },
                     }
                 )
-            return body
-
-    async def outlet(
-        self,
-        body: dict,
-        __request__: Optional[Request] = None,
-        __user__: Optional[dict] = None,
-        __model__: Optional[dict] = None,
-        __id__: Optional[str] = None,
-        __event_emitter__: Callable[[Any], Awaitable[None]] = None,
-    ) -> dict:
-        """Processes the outlet, applying filters from the selected model."""
-        print(body)
-        if not __model__:
-            # If __model__ is not provided, there's nothing to do.
-            logger.warning("No __model__ provided to outlet. Returning body as is.")
-            return body
-
-        try:
-
-            filter_functions = [
-                Functions.get_function_by_id(filter_id)
-                for filter_id in get_sorted_filter_ids(__model__)
-                if filter_id != __id__
-            ]
-            extra_params = {
-                "__event_emitter__": __event_emitter__,
-                "__user__": __user__,
-                "__model__": __model__,
-                "__request__": __request__,
-                "__id__": __id__,
-            }
-
-            result, _ = await process_filter_functions(
-                request=__request__,
-                filter_functions=filter_functions,
-                filter_type="outlet",  # Call outlet filters.
-                form_data=body,
-                extra_params=extra_params,
-            )
-
-            return result
-        except Exception as e:
-            logger.exception(f"Error in outlet processing: {e}")
             return body

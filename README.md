@@ -137,7 +137,26 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
 * **Customizable Template:**  Control the behavior of the prompt enhancer with a customizable template.
 * **Improved Response Quality:**  Get more relevant and insightful responses from the main LLM.
 
+### 2. Clean Thinking Tags Filter
 
+This filter checks if an assistant's message ends with an unclosed or incomplete "thinking" tag (such as a reasoning block that was not finished). If so, it extracts the unfinished thought and presents it as a user-visible message, ensuring that incomplete reasoning is not hidden or lost.
+
+**Features:**
+
+* **Detects Unclosed Reasoning Tags:** Finds assistant messages with incomplete <details type="reasoning" done="false"> blocks.
+* **Extracts and Cleans Content:** Moves unfinished thoughts to the main message content for clarity.
+* **Prevents Lost Reasoning:** Ensures users see all assistant reasoning, even if the tag was not closed properly.
+
+### 3. Semantic Router Filter
+
+This filter acts as a model router. It analyzes the user's message and available models (using their descriptions), then automatically selects the most appropriate model, pipe, or preset for the task. It is especially useful in multi-model environments where different models are specialized for different tasks.
+
+**Features:**
+
+* **Automatic Model Selection:** Routes requests to the best model or pipeline based on user intent and model descriptions.
+* **Supports Vision Routing:** Can route image queries to a vision model if configured.
+* **Excludes Banned Models:** Allows configuration to avoid certain models.
+* **Shows Reasoning (Optional):** Can display the reasoning behind model selection in the chat for transparency.
 
 
 ## Installation
@@ -153,7 +172,7 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
     * Save the tool.
 
 
-* **For Function Pipes (Planner Agent, arXiv Research MCTS Pipe, Multi Model Conversations) and Filters (Prompt Enhancer):**
+* **For Function Pipes (Planner Agent, arXiv Research MCTS Pipe, Multi Model Conversations) and Filters (Prompt Enhancer, Clean Thinking Tags, Semantic Router):**
     * Locate the desired function pipe or filter on the hub page.
     * Click the "Get" button. This will, again, redirect you to your Open WebUI instance with the installation code.
     * (Optional) Review the code, provide a different name and description,
@@ -170,7 +189,7 @@ This filter uses an LLM to automatically improve the quality of your prompts bef
     * Provide a name and description , and save the tool.
 
 
-* **For Function Pipes (Planner Agent, arXiv Research MCTS Pipe, Multi Model Conversations) and Filters (Prompt Enhancer):**
+* **For Function Pipes (Planner Agent, arXiv Research MCTS Pipe, Multi Model Conversations) and Filters (Prompt Enhancer, Clean Thinking Tags, Semantic Router):**
     * Navigate to the "Workspace" tab, then the "Functions" section.
     * Click the "+" button.
     * Copy and paste the code from the corresponding `.py` file.
@@ -466,11 +485,15 @@ Create a landscape image of "a futuristic cityscape"
 
 ### Prompt Enhancer Filter
 
-Use the custom Model template in the model selector.  The filter will automatically process each user message before it's sent to the main LLM.  Configure the valves to customize the enhancement process.
+Use the custom Model template in the model selector. The filter will automatically process each user message before it's sent to the main LLM. Configure the valves to customize the enhancement process.
 
-![Screenshot from 2024-12-01 21-16-01](https://github.com/user-attachments/assets/6c335b42-8fde-4aff-924a-308c4ddf28c0)
+### Clean Thinking Tags Filter
 
+This filter works automatically when enabled. If an assistant's message contains an incomplete reasoning/thinking tag, the unfinished content will be extracted and shown as part of the message, so no reasoning is lost. No configuration is required.
 
+### Semantic Router Filter
+
+When enabled, this filter will analyze each user message and route it to the most appropriate model or pipeline, based on model descriptions and the message content. You can configure banned models, vision model routing, and whether to show the selection reasoning in chat.
 
 ## Error Handling
 
