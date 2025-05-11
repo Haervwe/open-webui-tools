@@ -24,6 +24,18 @@ import difflib
 name = "Planner"
 
 
+def clean_json_response(response_text: str) -> str:
+    """
+    Extracts JSON content from a string, removing any extraneous characters before the first '{'
+    and after the last '}'.
+    """
+    start = response_text.find("{")
+    end = response_text.rfind("}") + 1
+
+    if start == -1 or end == -1:
+        raise ValueError("No valid JSON object found in response.")
+
+    return response_text[start:end]
 
 
 def setup_logger():
@@ -191,22 +203,29 @@ class Pipe:
     async def get_completion(
         self,
         prompt: str,
-        temperature: float = 0.7,  # Default fallback temperature
-        top_k: int = 50,  # Default fallback top_k
-        top_p: float = 0.9,  # Default fallback top_p
+        temperature: float = 0.7,
+        top_k: int = 50,
+        top_p: float = 0.9,
     ) -> str:
-        response = await generate_chat_completion(
-            self.__request__,
-            {
-                "model": self.__model__,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": temperature,
-                "top_k": top_k,
-                "top_p": top_p,
-            },
-            user=self.__user__,
-        )
-        return response["choices"][0]["message"]["content"]
+        logger.debug(f"LLM Query Prompt: {prompt}")
+        try:
+            response = await generate_chat_completion(
+                self.__request__,
+                {
+                    "model": self.__model__,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": temperature,
+                    "top_k": top_k,
+                    "top_p": top_p,
+                },
+                user=self.__user__,
+            )
+            response_content = response["choices"][0]["message"]["content"]
+            logger.debug(f"LLM Response: {response_content}")
+            return response_content
+        except Exception as e:
+            logger.error(f"LLM Call Error: {e}")
+            raise
 
     async def generate_mermaid(self, plan: Plan) -> str:
         """Generate Mermaid diagram representing the current plan state"""
@@ -286,7 +305,8 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 result = await self.get_completion(
                     prompt, temperature=0.8, top_k=60, top_p=0.95
                 )
-                plan_dict = json.loads(result)
+                clean_result = clean_json_response(result)
+                plan_dict = json.loads(clean_result)
                 return Plan(**plan_dict)
             except Exception as e:
                 logger.error(
@@ -636,7 +656,8 @@ Return ONLY the JSON object. Do not include explanations or additional text.
                 try:
                     # Extract and parse the JSON string
                     analysis_json = json_match.group(1)
-                    analysis_data = json.loads(analysis_json)
+                    clean_analysis_json = clean_json_response(analysis_json)
+                    analysis_data = json.loads(clean_analysis_json)
 
                     # Ensure list fields are indeed lists
                     for field in ["issues", "suggestions"]:
@@ -1230,7 +1251,7 @@ Requirements:
         __event_emitter__=None,
         __task__=None,
         __model__=None,
-        __request__=None
+        __request__=None,
     ) -> str:
         model = self.valves.MODEL
         self.__user__ = User(**__user__)
