@@ -9,9 +9,9 @@ description: Filter that acts a model router, using model descriptions
 and the prompt, selecting the best model base, 
 pipe or preset for the task completion
 """
-
 import logging
 import json
+import re
 from typing import Callable, Awaitable, Any, Optional, List
 from pydantic import BaseModel, Field
 from fastapi import Request
@@ -51,6 +51,12 @@ def get_model_attr(model, attr, default=None):
     )
 
 
+def clean_thinking_tags(message: str) -> str:
+    message = re.sub(r"<think>.*?</think>", "", message, flags=re.DOTALL)
+    message = re.sub(r"<thinking>.*?</thinking>", "", message, flags=re.DOTALL)
+    return message
+
+
 class Filter:
     class Valves(BaseModel):
         vision_model_id: str = Field("", description="Model ID for image queries")
@@ -63,6 +69,9 @@ class Filter:
                 'Return ONLY a JSON object with: {"selected_model_id": "id of selected model", "reasoning": "explanation"}'
             ),
             description="System prompt for router",
+        )
+        disable_qwen_thinking: bool = Field(
+            default=True, description="toggle to add /no_think to qwen 3 models"
         )
         show_reasoning: bool = Field(False, description="Show reasoning in chat")
         status: bool = Field(True, description="Show status updates")
@@ -105,6 +114,11 @@ class Filter:
         return available
 
     async def _get_model_recommendation(self, body, available_models, user_message):
+        system_prompt = (
+            (self.valves.system_prompt + " /no_think")
+            if self.valves.disable_qwen_thinking
+            else self.valves.system_prompt
+        )
         models_data = available_models.copy() + [
             {
                 "id": body["model"],
@@ -118,7 +132,7 @@ class Filter:
                 [
                     {
                         "role": "system",
-                        "content": self.valves.system_prompt
+                        "content": system_prompt
                         + f"\nAvailable models:\n{json.dumps(models_data, indent=2)}\n",
                     }
                 ]
@@ -135,7 +149,7 @@ class Filter:
                 [
                     {
                         "role": "system",
-                        "content": self.valves.system_prompt
+                        "content": system_prompt
                         + f"\nAvailable models:\n{json.dumps(models_data, indent=2)}\n",
                     }
                 ]
@@ -162,7 +176,9 @@ class Filter:
         response = await generate_chat_completion(
             self.__request__, payload, user=self.__user__, bypass_filter=True
         )
-        return json.loads(response["choices"][0]["message"]["content"])
+        result = clean_thinking_tags(response["choices"][0]["message"]["content"])
+        print(result)
+        return json.loads(result)
 
     def _process_files_for_model(self, files_data):
         collections = {}
