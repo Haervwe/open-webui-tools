@@ -17,13 +17,10 @@ from pydantic import BaseModel, Field
 from fastapi import Request
 from open_webui.utils.chat import (
     generate_chat_completion,
-    get_sorted_filter_ids,
-    process_filter_functions,
 )
 from open_webui.utils.misc import get_last_user_message
 from open_webui.models.users import User
 from open_webui.routers.models import get_models, get_base_models
-from open_webui.utils.payload import apply_model_system_prompt_to_body
 from open_webui.routers.files import Files
 
 name = "semantic_router"

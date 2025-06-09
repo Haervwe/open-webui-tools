@@ -6,7 +6,7 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.4.3
+version: 0.4.4
 """
 
 import logging
@@ -540,37 +540,27 @@ class Pipe:
         Provide a single numeric score between 1 and 10, inclusive. 
         Do not include any explanation or additional text in your response—just the number.
         """
-
+        score = 0.0
         try:
-            # Get the result from the LLM
             result = await self.get_completion(prompt)
-
-            # Extract the first valid number using regex
             match = re.search(r"\b(10|\d(\.\d+)?)\b", result.strip())
             if match:
                 score = float(match.group())
-
-                # Ensure the score is within the valid range
                 if 1.0 <= score <= 10.0:
                     return score
                 else:
                     logger.debug(f"Score out of range: {score}. Result was: {result}")
                     return 0.0
             else:
-                # No valid number found in the response
                 logger.debug(f"No valid number in response: {result}")
-                return 0.0
-
+                return score 
         except Exception as e:
-            # Catch unexpected exceptions for robustness
+
             logger.debug(f"Error during evaluation: {e}")
-            return 0.0
-        finally:  # This will always run, even if there's an exception.
-            logger.debug(f"Evaluation complete. Score: {score}")
-            return 0.0
+            return score
 
     def get_chunk_content(self, chunk):
-        # Directly process the chunk since it's already a string
+
         chunk_str = chunk
         if chunk_str.startswith("data: "):
             chunk_str = chunk_str[6:]
