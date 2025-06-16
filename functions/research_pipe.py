@@ -150,7 +150,7 @@ class MCTS:
             self.pipe.valves.DINAMYC_TEMPERATURE_DECAY,
         )
         for i in range(self.breadth):
-            await self.pipe.emit_replace(self.mermaid())
+            await self.pipe.emit_replace(self.mermaid(node))
             improvement = await self.pipe.get_improvement(node.content, self.topic)
             await self.pipe.emit_message(
                 f"\nResearch direction {i+1}: {improvement}\n\n"
@@ -174,7 +174,7 @@ class MCTS:
             )
             node.add_child(child)
 
-            await self.pipe.emit_replace(self.mermaid())
+            await self.pipe.emit_replace(self.mermaid(node))
 
         return random.choice(node.children)
 
