@@ -6,7 +6,7 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.4.4
+version: 0.4.5
 """
 
 import logging
@@ -301,35 +301,66 @@ class Pipe:
         return body.get("messages")[-1].get("content").strip()
 
     async def search_arxiv(self, query: str) -> List[Dict]:
-        """Gather research from arXiv"""
+        """Robust arXiv search using searchthearxiv.com with fallback and improved parsing."""
         await self.emit_status("tool", f"Fetching arXiv papers for: {query}...", False)
         try:
-            arxiv_url = "http://export.arxiv.org/api/query"
-            params = {
-                "search_query": f"{query}",
-                "max_results": self.valves.ARXIV_MAX_RESULTS,
-                "sortBy": "relevance",
+            base_url = "https://searchthearxiv.com/search"
+            params = {"query": query}
+            headers = {
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/132.0.0.0 Safari/537.36",
+                "x-requested-with": "XMLHttpRequest",
             }
             async with aiohttp.ClientSession() as session:
-                async with session.get(arxiv_url, params=params) as response:
-                    logger.debug(f"arXiv API response status: {response.status}")
-                    if response.status == 200:
-                        data = await response.text()
-                        soup = BeautifulSoup(data, "xml")
-                        entries = soup.find_all("entry")
-                        return [
-                            {
-                                "title": entry.find("title").text,
-                                "url": entry.find("link")["href"],
-                                "content": entry.find("summary").text,
-                            }
-                            for entry in entries
-                        ]
+                async with session.get(
+                    base_url, params=params, headers=headers, timeout=30
+                ) as response:
+                    response.raise_for_status()
+                    root = await response.json(content_type=None)
 
+            entries = root.get("papers", [])
+            if not entries:
+                await self.emit_status(
+                    "tool", f"No papers found on arXiv related to '{query}'", True
+                )
+                return []
+
+            results = []
+            for entry in entries[:self.valves.ARXIV_MAX_RESULTS]:
+                title = entry.get("title", "Unknown Title").strip()
+                authors = entry.get("authors", "Unknown Authors")
+                summary = entry.get("abstract", "No summary available").strip()
+                arxiv_id = entry.get("id")
+                url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "No link available"
+                pdf_url = f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else "No link available"
+                year = entry.get("year")
+                month = entry.get("month")
+                pub_date = f"{month}-{int(year)}" if year and month else "Unknown Date"
+
+                results.append({
+                    "title": title,
+                    "authors": authors,
+                    "summary": summary,
+                    "url": url,
+                    "pdf_url": pdf_url,
+                    "pub_date": pub_date,
+                    "content": summary,  # for compatibility with synthesis
+                })
+
+            await self.emit_status(
+                "tool", f"arXiv papers found: {len(results)}", True
+            )
+            return results
+
+        except aiohttp.ClientError as e:
+            error_msg = f"Error searching arXiv: {str(e)}"
+            await self.emit_status("tool", error_msg, True)
+            return []
         except Exception as e:
-            logger.error(f"arXiv search error: {e}")
-        return []
-
+            error_msg = f"Unexpected error during arXiv search: {str(e)}"
+            await self.emit_status("tool", error_msg, True)
+            return []
     async def search_web(self, query: str) -> List[Dict]:
         """Simplified web search using Tavily API"""
         if not self.valves.TAVILY_API_KEY:
@@ -410,30 +441,17 @@ class Pipe:
         """
         web_query = await self.get_completion(prompt_web)
 
-        # Prompt for arXiv API query enhancement
+        # NEW: Simpler, high-recall arXiv prompt
         prompt_arxiv = f"""
-        Format an optimized query for the arXiv API based on the following input:
-        - Use arXiv's query syntax (AND, OR, NOT) and search fields (ti, au, abs, cat)
-        - Select appropriate categories from the provided list
-        - The input may be an initial vague request or an essay with proposed improvements
-        - Only output the formatted arXiv API query, without explanations or titles
+        Given the following research topic, generate a concise arXiv search query that maximizes the chance of finding relevant papers.
+        - Prefer a short list of keywords or phrases.
+        - Avoid using too many AND/OR/NOT connectors.
+        - Use fields like ti: (title), abs: (abstract), or cat: (category) only if clearly relevant.
+        - If unsure, just use the main topic as a keyword.
 
-        Initial query: "{query}"
+        Topic: "{query}"
 
-        arXiv categories:
-        - cs.AI: Artificial Intelligence
-        - cs.LG: Machine Learning 
-        - cs.CV: Computer Vision
-        - cs.CL: Computation and Language (NLP)
-        - cs.RO: Robotics
-        - stat.ML: Machine Learning (Statistics)
-        - math.OC: Optimization and Control
-        - physics: Physics
-        - q-bio: Quantitative Biology
-        - q-fin: Quantitative Finance
-        - econ: Economics
-
-        Enhanced arXiv search query (API format):
+        Output ONLY the arXiv search query, no explanations or formatting.
         """
         arxiv_query = await self.get_completion(prompt_arxiv)
 
