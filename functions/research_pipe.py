@@ -650,7 +650,7 @@ class Pipe:
 
         best_content = initial_content
         best_score = -float("inf")
-
+        best_child = None
         for i in range(self.valves.TREE_DEPTH):
             await self.progress(f"Research iteration {i+1}/{self.valves.TREE_DEPTH}...")
 
@@ -662,8 +662,8 @@ class Pipe:
             if score > best_score:
                 best_score = score
                 best_content = child.content
-
-        await self.emit_replace(mcts.mermaid())
+                best_child = child
+        await self.emit_replace(mcts.mermaid(best_child))
         await self.emit_message(best_content)
         await self.done()
         return ""
