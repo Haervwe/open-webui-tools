@@ -11,25 +11,19 @@ version: 0.4.5
 
 import logging
 import random
+import re
 import math
 import json
 import aiohttp
-import asyncio
-from typing import List, Dict, Union, Optional, AsyncGenerator, Callable, Awaitable
-from dataclasses import dataclass
+from typing import List, Dict, AsyncGenerator, Callable, Awaitable
 from pydantic import BaseModel, Field
 from open_webui.constants import TASKS
-from bs4 import BeautifulSoup
-from dataclasses import dataclass
-import re
+
 from open_webui.main import generate_chat_completions
 from open_webui.models.users import User
 
 
 name = "Research Pipe"
-
-
-
 
 
 def setup_logger():

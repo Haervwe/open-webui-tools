@@ -1,0 +1,177 @@
+{
+  "14": {
+    "inputs": {
+      "tags": "funk, pop, soul, rock, melodic, guitar, drums, bass, keyboard, percussion, 105 BPM, energetic, upbeat, groovy, vibrant, dynamic",
+      "lyrics": "[inst]\n\n[verse]\nIn the shadows where secrets hide,\nWe're bound by chains, inside we slide.\nWith promises they blind our eyes,\nYet we rise, to challenge lies.\n\n[chorus]\nWe're the rebels, with fire in our hearts,\nAgainst the chains, breaking apart.\nNo surrender, no retreat,\nTogether we fight, a new world meet.\n\n[verse]\nThrough the whispers of power's might,\nThey try to silence, but our spirits light.\nIn the silence, our voices hear,\nUniting now, our destiny clear.\n\n[chorus]\nWe're the rebels, with fire in our hearts,\nAgainst the chains, breaking apart.\nNo surrender, no retreat,\nTogether we fight, a new world meet.\n\n[bridge]\nFrom the depths of fear to the heights of dreams,\nWe stand against their endless schemes.\nWith every beat, our spirits scream,\nFreedom's call, our future gleam.\n\n[chorus]\nWe're the rebels, with fire in our hearts,\nAgainst the chains, breaking apart.\nNo surrender, no retreat,\nTogether we fight, a new world meet.\n\n[verse]\nThrough the echoes of time so bold,\nStories of freedom, strong and old.\nWith every step, we reclaim,\nThe truth untold, we proclaim.\n\n[chorus]\nWe're the rebels, with fire in our hearts,\nAgainst the chains, breaking apart.\nNo surrender, no retreat,\nTogether we fight, a new world meet.\n\n[Outro]\nIn this anthem, our spirits soar,\nBound by courage, forevermore.\nRebel hearts, together beat,\nBreaking free from their defeat.\n",
+      "lyrics_strength": 0.9900000000000002,
+      "speak_and_recognation": {
+        "__value__": [
+          false,
+          true
+        ]
+      },
+      "clip": [
+        "40",
+        1
+      ]
+    },
+    "class_type": "TextEncodeAceStepAudio",
+    "_meta": {
+      "title": "TextEncodeAceStepAudio"
+    }
+  },
+  "17": {
+    "inputs": {
+      "seconds": 120,
+      "batch_size": 1
+    },
+    "class_type": "EmptyAceStepLatentAudio",
+    "_meta": {
+      "title": "EmptyAceStepLatentAudio"
+    }
+  },
+  "18": {
+    "inputs": {
+      "samples": [
+        "52",
+        0
+      ],
+      "vae": [
+        "40",
+        2
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAEDecodeAudio"
+    }
+  },
+  "40": {
+    "inputs": {
+      "ckpt_name": "ACE_STEP/ace_step_v1_3.5b.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Cargar Punto de Control"
+    }
+  },
+  "44": {
+    "inputs": {
+      "conditioning": [
+        "14",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "Acondicionamiento Cero"
+    }
+  },
+  "49": {
+    "inputs": {
+      "model": [
+        "51",
+        0
+      ],
+      "operation": [
+        "50",
+        0
+      ]
+    },
+    "class_type": "LatentApplyOperationCFG",
+    "_meta": {
+      "title": "LatentApplyOperationCFG"
+    }
+  },
+  "50": {
+    "inputs": {
+      "multiplier": 1.0000000000000002
+    },
+    "class_type": "LatentOperationTonemapReinhard",
+    "_meta": {
+      "title": "OperaciónTonemapReinhardLatente"
+    }
+  },
+  "51": {
+    "inputs": {
+      "shift": 5.000000000000001,
+      "model": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "MuestreoDeModeloSD3"
+    }
+  },
+  "52": {
+    "inputs": {
+      "seed": 407558441708388,
+      "steps": 50,
+      "cfg": 5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "49",
+        0
+      ],
+      "positive": [
+        "14",
+        0
+      ],
+      "negative": [
+        "44",
+        0
+      ],
+      "latent_image": [
+        "17",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "59": {
+    "inputs": {
+      "filename_prefix": "audio/ComfyUI",
+      "quality": "V0",
+      "audioUI": "",
+      "audio": [
+        "74",
+        0
+      ]
+    },
+    "class_type": "SaveAudioMP3",
+    "_meta": {
+      "title": "Save Audio (MP3)"
+    }
+  },
+  "74": {
+    "inputs": {
+      "anything": [
+        "75",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  },
+  "75": {
+    "inputs": {
+      "anything": [
+        "18",
+        0
+      ]
+    },
+    "class_type": "easy clearCacheAll",
+    "_meta": {
+      "title": "Clear Cache All"
+    }
+  }
+}
