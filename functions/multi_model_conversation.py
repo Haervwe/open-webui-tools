@@ -3,7 +3,7 @@ title: Multi Model Conversations
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.6.3
+version: 0.7.0
 """
 
 import logging
@@ -111,13 +111,9 @@ class Pipe:
             default="You are a group chat manager. Your role is to decide who should speak next in a multi-participant conversation. You will be given the conversation history and a list of participant aliases. Choose the alias of the participant who is most likely to provide a relevant and engaging response to the latest message. Consider the context of the conversation, the personalities of the participants, and avoid repeatedly selecting the same participant.",
             description="System message for the Manager",
         )
-        ManagerAvoidRepeatPrompt: str = Field(
-            default="Do not select the same participant as the last response.",
-            description="Instruction to avoid repeating the same participant",
-        )
         ManagerSelectionPrompt: str = Field(
-            default="Conversation History:\n{history}\n\nParticipants:\n{participants}\n\nCurrent User Message:\n{current_message}\n\nChoose the most appropriate participant to respond next. Provide only the alias of the chosen participant.",
-            description="Template for the Manager's selection prompt",
+            default="Conversation History:\n{history}\n\nThe last speaker was '{last_speaker}'. Based on the flow of the conversation, who should speak next? Choose exactly one from the following list of participants: {participant_list}\n\nRespond with ONLY the alias of your choice, and nothing else.",
+            description="Template for the Manager's selection prompt. Use {history}, {last_speaker}, and {participant_list}.",
         )
         Temperature: float = Field(default=1, description="Models temperature")
         Top_k: int = Field(default=50, description="Models top_k")
@@ -135,8 +131,6 @@ class Pipe:
         self,
         messages,
         model: str,
-        top_k: int = 50,
-        top_p: float = 0.9,
     ):
         try:
             form_data = {
@@ -209,12 +203,10 @@ class Pipe:
     ) -> str:
         self.__current_event_emitter__ = __event_emitter__
         self.__user__ = User(**__user__)
-        self.__model__ = __model__  # Store the default model
+        self.__model__ = __model__
         self.__request__ = __request__
         if __task__ and __task__ != TASKS.DEFAULT:
-            model = (
-                self.valves.Participant1Model or self.__model__
-            )  # Use Participant 1 or default
+            model = self.valves.Participant1Model or self.__model__
             response = await generate_chat_completions(
                 self.__request__,
                 {"model": model, "messages": body.get("messages"), "stream": False},
@@ -223,65 +215,45 @@ class Pipe:
             return f"{name}: {response['choices'][0]['message']['content']}"
 
         user_message = body.get("messages", [])[-1].get("content", "").strip()
-        # Fetch valve configurations
         num_participants = self.valves.NUM_PARTICIPANTS
-        rounds_per_user_message = self.valves.ROUNDS_PER_CONVERSATION
         participants = []
         for i in range(1, num_participants + 1):
-            model_field = f"Participant{i}Model"
-            system_field = f"Participant{i}SystemMessage"
-            alias_field = f"Participant{i}Alias"
-            model = getattr(self.valves, model_field, "")
-            alias = getattr(self.valves, alias_field, "")
-            system_message = getattr(self.valves, system_field, "")
+            model = getattr(self.valves, f"Participant{i}Model", "")
+            alias = getattr(self.valves, f"Participant{i}Alias", "") or model
+            system_message = getattr(self.valves, f"Participant{i}SystemMessage", "")
             if not model:
-                logger.warning(f"No model set for Participant {i}")
+                logger.warning(f"No model set for Participant {i}, skipping.")
                 continue
             participants.append(
-                {
-                    "model": model,
-                    "alias": alias if alias else model,
-                    "system_message": system_message,
-                }
+                {"model": model, "alias": alias, "system_message": system_message}
             )
+
         if not participants:
-            await self.emit_status("error", "No participants configured", True)
-            return "No participants configured."
+            await self.emit_status("error", "No valid participants configured.", True)
+            return "Error: No participants configured. Please set at least one participant's model in the valves."
 
         self.conversation_history.append({"role": "user", "content": user_message})
-
-        selected_participants = (
-            set()
-        )  # Keep track of selected participants in this round
-
         last_speaker = None
-        selected_participants = set()  # Reset selected participants each round
 
         for round_num in range(self.valves.ROUNDS_PER_CONVERSATION):
-            selected_participants = set()  # to ensure we dont repeat in the same round
             if self.valves.UseGroupChatManager:
-                # Group Chat Manager Logic
-                manager_prompt = self.valves.ManagerSelectionPrompt.format(
-                    history="\n".join(
-                        f"{msg['role']}: {msg['content']}"
-                        for msg in self.conversation_history
-                    ),
-                    participants="\n".join(p["alias"] for p in participants),
-                    current_message=(
-                        user_message if round_num == 0 else ""
-                    ),  # Only include user message on first round.  Ensures last message is from an agent.
+                participant_aliases = [p["alias"] for p in participants]
+                history_str = "\n".join(
+                    f"{msg['role']}: {msg['content']}"
+                    for msg in self.conversation_history
                 )
 
-                if last_speaker:
-                    manager_prompt += f"\n{self.valves.ManagerAvoidRepeatPrompt} Last speaker was: {last_speaker}"
+                manager_prompt = self.valves.ManagerSelectionPrompt.format(
+                    history=history_str,
+                    last_speaker=last_speaker or "None",
+                    participant_list=", ".join(participant_aliases),
+                )
 
                 manager_messages = [
                     {"role": "system", "content": self.valves.ManagerSystemMessage},
-                    *self.conversation_history,
                     {"role": "user", "content": manager_prompt},
                 ]
 
-                # get the manager response
                 manager_response = await generate_chat_completions(
                     self.__request__,
                     {
@@ -291,7 +263,6 @@ class Pipe:
                     },
                     user=self.__user__,
                 )
-                # process it
                 selected_alias = manager_response["choices"][0]["message"][
                     "content"
                 ].strip()
@@ -299,100 +270,71 @@ class Pipe:
                 selected_participant = next(
                     (p for p in participants if p["alias"] == selected_alias), None
                 )
-                # if valid  and not repeated proceed
-                if (selected_participant and selected_alias not in selected_participants) and selected_participant != last_speaker:
-                    selected_participants.add(selected_alias)
-                    last_speaker = selected_participant["alias"]
-                    selected_participants.add(selected_alias)  # Mark as used
-                    logger.debug(f"GroupChatManager selection: {selected_participant}")
-                    # Proceed with the selected participant's response
-                    model = selected_participant["model"]
-                    alias = selected_participant["alias"]
-                    system_message = selected_participant["system_message"]
-                    messages = [
-                        {"role": "system", "content": system_message},
-                        *self.conversation_history,
-                        {
-                            "role": "user",
-                            "content": f"{self.valves.AllParticipantsApendedMessage} {alias}",
-                        },
-                    ]
-                    await self.emit_status(
-                        "info",
-                        f"Getting response from: {f'{alias}/{model}' if alias else model}...",
-                        False,
-                    )
-                    try:
-                        await self.emit_model_title(
-                            alias
-                        )  # Emit title before streaming
-                        full_response = ""
-                        async for chunk in self.get_streaming_completion(
-                            messages, model=model
-                        ):
-                            full_response += chunk
-                            await self.emit_message(
-                                chunk
-                            )  # Stream the response without modification
-                        cleaned_response = full_response.strip()
-                        self.conversation_history.append(
-                            {"role": "assistant", "content": cleaned_response}
-                        )
-                        logger.debug(f"History:{self.conversation_history}")
-                    except Exception as e:
-                        await self.emit_status(
-                            "error",
-                            f"Error getting response from {model}: {e}",
-                            True,
-                        )
-                        logger.error(f"Error with {model}: {e}")
 
-                else:
-                    await self.emit_status(
-                        "error", f"Invalid participant selected: {selected_alias}", True
-                    )
-                    return f"Invalid participant selected: {selected_alias}"
-            else:
-                for participant in participants:
-                    model = participant["model"]
-                    alias = participant["alias"]
-                    system_message = participant["system_message"]
-                    messages = [
-                        {"role": "system", "content": system_message},
-                        *self.conversation_history,
-                        {
-                            "role": "user",
-                            "content": f"{self.valves.AllParticipantsApendedMessage} {alias}",
-                        },
-                    ]
+                if not selected_participant or selected_alias == last_speaker:
                     await self.emit_status(
                         "info",
-                        f"Getting response from: {f'{alias}/{model}' if alias else model}...",
+                        f"Manager selection '{selected_alias}' was invalid or repeated. Using fallback.",
                         False,
                     )
-                    try:
-                        await self.emit_model_title(
-                            alias
-                        )  # Emit title before streaming
-                        full_response = ""
-                        async for chunk in self.get_streaming_completion(
-                            messages, model=model
-                        ):
-                            full_response += chunk
-                            await self.emit_message(
-                                chunk
-                            )  # Stream the response without modification
-                        cleaned_response = full_response.strip()
-                        self.conversation_history.append(
-                            {"role": "assistant", "content": cleaned_response}
-                        )
-                        logger.debug(f"History:{self.conversation_history}")
-                    except Exception as e:
-                        await self.emit_status(
-                            "error",
-                            f"Error getting response from {model}: {e}",
-                            True,
-                        )
-                        logger.error(f"Error with {model}: {e}")
-        await self.emit_status("success", "Conversation completed", True)
+                    
+                    last_speaker_index = next(
+                        (
+                            i
+                            for i, p in enumerate(participants)
+                            if p["alias"] == last_speaker
+                        ),
+                        -1,
+                    )
+                    # Pick the next participant in order, wrapping around
+                    fallback_index = (last_speaker_index + 1) % len(participants)
+                    selected_participant = participants[fallback_index]
+                    logger.warning(
+                        f"Manager failed. Fallback selected: {selected_participant['alias']}"
+                    )
+
+                # A single participant turn
+                participants_to_run = [selected_participant]
+                last_speaker = selected_participant["alias"]
+            else:
+                participants_to_run = participants
+
+            for participant in participants_to_run:
+                model = participant["model"]
+                alias = participant["alias"]
+                system_message = participant["system_message"]
+
+                messages = [
+                    {"role": "system", "content": system_message},
+                    *self.conversation_history,
+                    {
+                        "role": "user",
+                        "content": f"{self.valves.AllParticipantsApendedMessage} {alias}",
+                    },
+                ]
+
+                await self.emit_status(
+                    "info", f"Getting response from: {alias} ({model})...", False
+                )
+                try:
+                    await self.emit_model_title(alias)
+                    full_response = ""
+                    async for chunk in self.get_streaming_completion(
+                        messages, model=model
+                    ):
+                        full_response += chunk
+                        await self.emit_message(chunk)
+
+                    cleaned_response = full_response.strip()
+                    self.conversation_history.append(
+                        {"role": "assistant", "content": cleaned_response}
+                    )
+                    logger.debug(f"History updated with response from {alias}")
+
+                except Exception as e:
+                    error_message = f"Error getting response from {model}: {e}"
+                    await self.emit_status("error", error_message, True)
+                    logger.error(f"Error with {model}: {e}", exc_info=True)
+
+        await self.emit_status("success", "Conversation round completed.", True)
         return ""
