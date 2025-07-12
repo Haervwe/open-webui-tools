@@ -1,13 +1,5 @@
-"""
-title: Prompt Enhancer
-author: Haervwe
-author_url: https://github.com/Haervwe
-funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.2
-important note: if you are going to sue this filter with custom pipes, do not use the show enhanced prompt valve setting 
-"""
-
 import logging
+import re
 from pydantic import BaseModel, Field
 from typing import Callable, Awaitable, Any, Optional
 import json
@@ -18,6 +10,7 @@ from open_webui.utils.misc import get_last_user_message
 from open_webui.models.models import Models
 from open_webui.models.users import User
 from open_webui.routers.models import get_models
+from open_webui.constants import TASKS
 
 name = "enhancer"
 
@@ -39,22 +32,17 @@ def setup_logger():
 
 logger = setup_logger()
 
-def setup_logger():
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        logger.setLevel(logging.DEBUG)
-        handler = logging.StreamHandler()
-        handler.set_name(name)
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        logger.propagate = False
-    return logger
 
+def remove_tagged_content(text: str) -> str:
 
-logger = setup_logger()
+    pattern = re.compile(
+        r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>"
+        r"|"
+        r"\|begin_of_thought\|.*?\|end_of_thought\|",
+        re.DOTALL,
+    )
+
+    return re.sub(pattern, "", text).strip()
 
 
 class Filter:
@@ -102,13 +90,15 @@ Now, enhance the following prompt:
         __event_emitter__: Callable[[Any], Awaitable[None]],
         __user__: Optional[dict] = None,
         __model__: Optional[dict] = None,
+        __task__=None,
         __request__: Optional[Request] = None,
     ) -> dict:
         self.__current_event_emitter__ = __event_emitter__
         self.__request__ = __request__
         self.__model__ = __model__
         self.__user__ = User(**__user__) if isinstance(__user__, dict) else __user__
-
+        if __task__ and __task__ != TASKS.DEFAULT:
+            return body
         # Fetch available models and log their relevant details
         available_models = await get_models(self.__request__, self.__user__)
         logger.debug("Available Models (truncated image data):")
@@ -236,7 +226,8 @@ Now, enhance the following prompt:
                 self.__request__, payload, user=self.__user__, bypass_filter=True
             )
 
-            enhanced_prompt = response["choices"][0]["message"]["content"]
+            message = response["choices"][0]["message"]["content"]
+            enhanced_prompt = remove_tagged_content(message)
             logger.debug("Enhanced prompt: %s", enhanced_prompt)
 
             # Update the messages with the enhanced prompt
