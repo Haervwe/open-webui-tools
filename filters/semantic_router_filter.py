@@ -4,11 +4,12 @@ author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
 version: 0.2.2
-description: Filter that acts a model router, using model descriptions 
-(make sure to set them in the models you want to be presented to the router) 
-and the prompt, selecting the best model base, 
+description: Filter that acts a model router, using model descriptions
+(make sure to set them in the models you want to be presented to the router)
+and the prompt, selecting the best model base,
 pipe or preset for the task completion
 """
+
 import logging
 import json
 import re
@@ -49,9 +50,14 @@ def get_model_attr(model, attr, default=None):
 
 
 def clean_thinking_tags(message: str) -> str:
-    message = re.sub(r"<think>.*?</think>", "", message, flags=re.DOTALL)
-    message = re.sub(r"<thinking>.*?</thinking>", "", message, flags=re.DOTALL)
-    return message
+    pattern = re.compile(
+        r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>"
+        r"|"
+        r"\|begin_of_thought\|.*?\|end_of_thought\|",
+        re.DOTALL,
+    )
+
+    return re.sub(pattern, "", message).strip()
 
 
 class Filter:
