@@ -11,7 +11,7 @@ Transform your Open WebUI instance into a powerful AI workstation with this comp
 
 ## ✨ What's Inside
 
-This repository contains **16+ specialized tools and functions** designed to enhance your Open WebUI experience:
+This repository contains **14+ specialized tools and functions** designed to enhance your Open WebUI experience:
 
 ### 🛠️ **Tools**
 - **arXiv Search** - Academic paper discovery (no API key required!)
