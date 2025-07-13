@@ -11,15 +11,14 @@ Transform your Open WebUI instance into a powerful AI workstation with this comp
 
 ## ✨ What's Inside
 
-This repository contains **16+ specialized tools and functions** designed to enhance your Open WebUI experience:
+This repository contains **14+ specialized tools and functions** designed to enhance your Open WebUI experience:
 
 ### 🛠️ **Tools**
 - **arXiv Search** - Academic paper discovery (no API key required!)
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI ACE Step Audio** - Advanced music generation
 - **Flux Kontext ComfyUI** - Professional image editing
-- **Wiki Search** - Wikipedia integration
-- **Philosopher API** - Philosophical discussions
+  
 
 ### 🔄 **Function Pipes**
 - **Planner Agent** - Autonomous task execution
@@ -57,11 +56,11 @@ This repository contains **16+ specialized tools and functions** designed to enh
 - **🎵 Creative Tools**: Music generation and image editing capabilities
 - **🔍 Smart Routing**: Intelligent model selection and conversation management
 - **📄 Document Processing**: Full document analysis and resume processing
-- **🌐 Web Integration**: Wikipedia search and web scraping capabilities
+
 
 ## 📋 Prerequisites
 
-- **Open WebUI**: Version 0.5.0+ recommended
+- **Open WebUI**: Version 0.6.0+ recommended
 - **Python**: 3.8 or higher
 - **Optional Dependencies**:
   - ComfyUI (for image/music generation tools)
