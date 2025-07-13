@@ -1,5 +1,5 @@
 """
-title: ComfyUI Universal Pipe (Race Condition Fix)
+title: ComfyUI i2i Universal Pipe
 author: Gemini & [Your Name]
 author_url: https://google.com
 funding_url: https://github.com/open-webui
