@@ -56,7 +56,7 @@ This repository contains **16+ specialized tools and functions** designed to enh
 - **🎵 Creative Tools**: Music generation and image editing capabilities
 - **🔍 Smart Routing**: Intelligent model selection and conversation management
 - **📄 Document Processing**: Full document analysis and resume processing
-- **🌐 Web Integration**: Wikipedia search and web scraping capabilities
+
 
 ## 📋 Prerequisites
 
