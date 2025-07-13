@@ -18,8 +18,7 @@ This repository contains **16+ specialized tools and functions** designed to enh
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI ACE Step Audio** - Advanced music generation
 - **Flux Kontext ComfyUI** - Professional image editing
-- **Wiki Search** - Wikipedia integration
-- **Philosopher API** - Philosophical discussions
+  
 
 ### 🔄 **Function Pipes**
 - **Planner Agent** - Autonomous task execution
@@ -61,7 +60,7 @@ This repository contains **16+ specialized tools and functions** designed to enh
 
 ## 📋 Prerequisites
 
-- **Open WebUI**: Version 0.5.0+ recommended
+- **Open WebUI**: Version 0.6.0+ recommended
 - **Python**: 3.8 or higher
 - **Optional Dependencies**:
   - ComfyUI (for image/music generation tools)
