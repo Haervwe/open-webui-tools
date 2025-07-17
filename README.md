@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/haervwe-open-webui-tools-badge.png)](https://mseep.ai/app/haervwe-open-webui-tools)
+
 # Open WebUI Tools Collection
 
 A collection of tools for Open WebUI that provides structured planning and execution capability, arXiv paper search capabilities, Hugging Face text-to-image generation functionality, prompt enhancement, and multi-model conversations. Perfect for enhancing your LLM interactions with academic research, image generation, and advanced conversation management!
