@@ -9,16 +9,13 @@ version: 0.8.5
 import logging
 import json
 import asyncio
-from typing import List, Dict, Optional, AsyncGenerator, Callable, Awaitable, Union
+from typing import List, Any, Optional, Callable, Awaitable, Union
 from pydantic import BaseModel, Field
 from datetime import datetime
 from open_webui.constants import TASKS
-from open_webui.utils.chat import generate_chat_completion
+from open_webui.utils.chat import generate_chat_completion # type: ignore
 from open_webui.models.users import User
-from dataclasses import dataclass
-from fastapi import Request
 import re
-import difflib
 
 # Constants and Setup
 name = "Planner"
@@ -62,9 +59,9 @@ class Action(BaseModel):
     id: str
     type: str
     description: str
-    params: Dict = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
     dependencies: List[str] = Field(default_factory=list)
-    output: Optional[Dict] = None
+    output: Optional[dict[str, Any]] = None
     status: str = "pending"  # pending, in_progress, completed, failed
     start_time: Optional[str] = None
     end_time: Optional[str] = None
@@ -75,9 +72,9 @@ class Plan(BaseModel):
 
     goal: str
     actions: List[Action]
-    metadata: Dict = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     final_output: Optional[str] = None
-    execution_summary: Optional[Dict] = None
+    execution_summary: Optional[dict[str, Any]] = None
 
 
 class ReflectionResult(BaseModel):
@@ -87,12 +84,12 @@ class ReflectionResult(BaseModel):
     confidence_score: float
     issues: Union[str, List[str]] = Field(default_factory=list)
     suggestions: Union[str, List[str]] = Field(default_factory=list)
-    required_corrections: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
+    required_corrections: dict[str, Union[str, List[str]]] = Field(default_factory=dict)
     output_quality_score: float
 
 
 class Pipe:
-    __current_event_emitter__: Callable[[dict], Awaitable[None]]
+    __current_event_emitter__: Callable[[dict[str, Any]], Awaitable[None]]
     __user__: User
     __model__: str
 
@@ -143,7 +140,7 @@ class Pipe:
 
     async def get_streaming_completion(
         self,
-        messages,
+        messages: list[dict[str, Any]],
         temperature: float = 0.7,  # Default fallback temperature
         top_k: int = 50,  # Default fallback top_k
         top_p: float = 0.9,  # Default fallback top_p
@@ -151,7 +148,7 @@ class Pipe:
     ):
         model = model if model else self.valves.MODEL
         try:
-            form_data = {
+            form_data: dict[str, Any] = {
                 "model": model,
                 "messages": messages,
                 "stream": True,
@@ -159,7 +156,7 @@ class Pipe:
                 "top_k": top_k,
                 "top_p": top_p,
             }
-            response = await generate_chat_completion(
+            response: dict[str, Any] = await generate_chat_completion(  # type: ignore
                 self.__request__,
                 form_data,
                 user=self.__user__,
@@ -339,7 +336,7 @@ Return ONLY the JSON object. Do not include explanations or additional text.
             Consider how dependencies should be used in this action.
             """
 
-        requirements_prompt += f"""
+        requirements_prompt += """
         Generate concise and clear requirements to ensure this action is performed correctly.
 
         For code actions:
@@ -364,8 +361,8 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         return enhanced_requirements
 
     async def execute_action(
-        self, plan: Plan, action: Action, results: Dict, step_number: int
-    ) -> Dict:
+        self, plan: Plan, action: Action, results: dict[str, Any], step_number: int
+    ) -> dict[str, Any]:
         """Execute action with enhanced reflection, always returning best output"""
         action.start_time = datetime.now().strftime("%H:%M:%S")
         action.status = "in_progress"
@@ -394,7 +391,7 @@ Return ONLY the JSON object. Do not include explanations or additional text.
         best_reflection = None
         best_quality_score = -1
 
-        while attempts_remaining >= 0:  # Changed to include the initial attempt
+        while attempts_remaining >= 0:
             try:
                 current_attempt = self.valves.MAX_RETRIES - attempts_remaining
                 if current_attempt == 0:
@@ -751,8 +748,8 @@ Return ONLY the JSON object. Do not include explanations or additional text.
             )
 
     async def consolidate_branch_with_llm(
-        self, plan: Plan, action_id: str, completed_results: Dict
-    ) -> Dict:
+        self, plan: Plan, action_id: str, completed_results: dict[str, Any]
+    ) -> dict[str, Any]:
         """
         Consolidate a branch using the LLM, ensuring code is merged and narrative is preserved.
         Uses consolidated outputs from previous steps when available.
@@ -877,7 +874,7 @@ Requirements:
 
         return {"result": consolidated_output}
 
-    async def execute_plan(self, plan: Plan) -> Dict:
+    async def execute_plan(self, plan: Plan) -> dict[str, Any]:
         """
         Execute the complete plan with dependency-based context and LLM-driven consolidation.
         """
@@ -910,16 +907,12 @@ Requirements:
                 if dependency not in all_dependencies:
                     pruned_dependencies.append(dependency)
                 else:
-                    # Recursively check if the dependency has any dependencies that are also
-                    # dependencies of the current action.
                     redundant_dependencies = set(all_dependencies[dependency]) & set(
                         dependencies
                     )
                     if not redundant_dependencies:
                         pruned_dependencies.append(dependency)
                     else:
-                        # If a redundant dependency is found, prune it and add its pruned
-                        # dependencies to the list.
                         pruned_dependencies.extend(
                             prune_redundant_dependencies(
                                 all_dependencies[dependency],
@@ -1022,7 +1015,7 @@ Requirements:
 
         return completed_results  # Return completed_results
 
-    async def synthesize_results(self, plan: Plan, results: Dict) -> str:
+    async def synthesize_results(self, plan: Plan, results: dict[str, Any]) -> str:
         """
         Synthesize final results with comprehensive context gathering and merging.
         Uses consolidated outputs and handles dependencies effectively.
@@ -1168,8 +1161,8 @@ Requirements:
             return error_message
 
     async def check_output_completeness(
-        self, final_output: Dict, goal: str, dependencies_info: Dict
-    ) -> Dict:
+        self, final_output: dict[str, Any], goal: str, dependencies_info: dict[str, Any]
+    ) -> dict[str, Any]:
         """Check if the final output is complete and incorporates all necessary dependencies"""
 
         check_prompt = f"""
@@ -1246,8 +1239,8 @@ Requirements:
 
     async def pipe(
         self,
-        body: dict,
-        __user__: dict,
+        body: dict[str, Any],
+        __user__: dict[str, Any],
         __event_emitter__=None,
         __task__=None,
         __model__=None,

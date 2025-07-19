@@ -22,7 +22,7 @@ from open_webui.utils.chat import (
 from open_webui.utils.misc import get_last_user_message
 from open_webui.models.users import User
 from open_webui.routers.models import get_models, get_base_models
-from open_webui.routers.files import Files
+from open_webui.models.files import Files
 
 name = "semantic_router"
 
