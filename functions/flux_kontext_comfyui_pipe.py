@@ -1,10 +1,9 @@
 """
-title: ComfyUI i2i Universal Pipe
+title: ComfyUI Universal Pipe (Race Condition Fix)
 author: Gemini & [Your Name]
 author_url: https://google.com
 funding_url: https://github.com/open-webui
-version: 2.6.0
-required_open_webui_version: 0.5.0
+version: 3.0.0
 """
 
 import json
@@ -15,6 +14,8 @@ import random
 from typing import List, Dict, Callable, Optional
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import get_last_user_message_item
+from open_webui.utils.chat import generate_chat_completion
+from open_webui.models.users import User
 import logging
 import requests
 
@@ -22,7 +23,6 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-name = "Flux Kontext"
 
 # --- OLLAMA VRAM Management Functions ---
 def get_loaded_models(api_url: str = "http://localhost:11434") -> list:
@@ -49,7 +49,7 @@ def unload_all_models(api_url: str = "http://localhost:11434"):
         logger.error(f"Error unloading Ollama models: {e}")
 
 
-
+# --- Default Workflow ---
 DEFAULT_WORKFLOW_JSON = json.dumps(
     {
         "6": {
@@ -146,6 +146,13 @@ class Pipe:
             default="194",
             description="The ID of the sampler node to apply a random seed to.",
         )
+        enhance_prompt: bool = Field(
+            default=False, description="Use vision model to enhance prompt"
+        )
+        vision_model_id: str = Field(
+            default="", description="Vision model to be used as prompt enhancer"
+        )
+
         unload_ollama_models: bool = Field(
             default=False,
             description="Unload all Ollama models from VRAM before running.",
@@ -161,12 +168,7 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
         self.client_id = str(uuid.uuid4())
-        
-        
-    def pipes(self) -> list[dict[str, str]]:
-        return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
-    
-    
+
     async def emit_status(
         self, event_emitter: Callable, level: str, description: str, done: bool = False
     ):
@@ -271,6 +273,8 @@ class Pipe:
             return None, None
         prompt, image_url = "", None
         content = user_message_item.get("content")
+        print(str(content)[:200])
+        print(str(content)[::200])
         if isinstance(content, list):
             for part in content:
                 if part.get("type") == "text":
@@ -290,18 +294,76 @@ class Pipe:
         )
         return prompt.strip(), base64_image
 
+    async def enhance_prompt(self, prompt, image, user, request, event_emitter):
+        await self.emit_status(event_emitter, "info", f"Enhancing the prompt...")
+        payload = {
+            "model": self.valves.vision_model_id,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You provide a detailed guide on how to modify visually with AI generated tools an image based on prompts. provide only a prompt that enhances the user intent based on the provided image an text",
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Enhance the given user prompt based on the given image: {prompt}, provide only the enhnaced AI image edit prompt with no explanations",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{image}"},
+                        },
+                    ],
+                },
+            ],
+            "stream": False,
+        }
+
+        response = await generate_chat_completion(request, payload, user)
+        await self.emit_status(event_emitter, "info", f"Prompt enhanced")
+        enhanced_prompt = response["choices"][0]["message"]["content"]
+        enhanced_prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
+        await event_emitter(
+            {
+                "type": "message",
+                "data": {
+                    "content": enhanced_prompt_message,
+                },
+            }
+        )
+        return enhanced_prompt
+
     async def pipe(
-        self, body: dict, __user__: dict = None, __event_emitter__: Callable = None
+        self,
+        body: dict,
+        __user__: dict,
+        __event_emitter__: Callable,
+        __request__=None,
     ) -> dict:
+        self.__event_emitter__ = __event_emitter__
+        self.__request__ = __request__
+        self.__user__ = User(**__user__) if isinstance(__user__, dict) else __user__
+        messages = body.get("messages", [])
+        prompt, base64_image = self.parse_input(messages)
+        if self.valves.enhance_prompt:
+            prompt = await self.enhance_prompt(
+                prompt,
+                base64_image,
+                self.__user__,
+                self.__request__,
+                self.__event_emitter__,
+            )
+
         if self.valves.unload_ollama_models:
             await self.emit_status(
-                __event_emitter__, "info", "Unloading Ollama models..."
+                self.__event_emitter__, "info", "Unloading Ollama models..."
             )
             unload_all_models(api_url=self.valves.ollama_url)
-        prompt, base64_image = self.parse_input(body.get("messages", []))
+
         if not base64_image:
             await self.emit_status(
-                __event_emitter__,
+                self.__event_emitter__,
                 "error",
                 "No valid image provided. Please upload an image.",
                 done=True,
@@ -311,7 +373,7 @@ class Pipe:
             workflow = json.loads(self.valves.ComfyUI_Workflow_JSON)
         except json.JSONDecodeError:
             await self.emit_status(
-                __event_emitter__,
+                self.__event_emitter__,
                 "error",
                 "Invalid JSON in the ComfyUI_Workflow_JSON valve.",
                 done=True,
@@ -337,7 +399,7 @@ class Pipe:
                 prompt_id = await self.queue_prompt(session, workflow)
                 if not prompt_id:
                     await self.emit_status(
-                        __event_emitter__,
+                        self.__event_emitter__,
                         "error",
                         "Failed to queue prompt in ComfyUI.",
                         done=True,
@@ -345,12 +407,12 @@ class Pipe:
                     return body
 
                 await self.emit_status(
-                    __event_emitter__,
+                    self.__event_emitter__,
                     "info",
                     f"Workflow queued. Waiting for completion signal...",
                 )
                 job_done = await self.wait_for_job_signal(
-                    ws_api_url, prompt_id, __event_emitter__
+                    ws_api_url, prompt_id, self.__event_emitter__
                 )
 
                 if not job_done:
@@ -358,10 +420,10 @@ class Pipe:
                         "Did not receive a successful execution signal from ComfyUI."
                     )
 
-
+                # --- RETRY LOGIC FOR HISTORY FETCH ---
                 job_data = None
                 for attempt in range(3):
-                    await asyncio.sleep(attempt + 1)
+                    await asyncio.sleep(attempt + 1)  # Wait 1, then 2, then 3 seconds
                     logger.info(
                         f"Fetching history for prompt {prompt_id}, attempt {attempt + 1}..."
                     )
@@ -392,18 +454,19 @@ class Pipe:
                 response_content = (
                     f"Here is the edited image:\n\n![Generated Image]({image_url})"
                 )
-                await __event_emitter__(
+                await self.__event_emitter__(
                     {"type": "message", "data": {"content": response_content}}
                 )
                 await self.emit_status(
-                    __event_emitter__,
+                    self.__event_emitter__,
                     "success",
                     "Image processed successfully!",
                     done=True,
                 )
+                return response_content
             else:
                 await self.emit_status(
-                    __event_emitter__,
+                    self.__event_emitter__,
                     "error",
                     "Execution finished, but no image was found in the output. Please check the workflow.",
                     done=True,
@@ -412,9 +475,9 @@ class Pipe:
         except Exception as e:
             logger.error(f"An unexpected error occurred in pipe: {e}", exc_info=True)
             await self.emit_status(
-                __event_emitter__,
+                self.__event_emitter__,
                 "error",
                 f"An unexpected error occurred: {str(e)}",
                 done=True,
             )
-        return body
+        return

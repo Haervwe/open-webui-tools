@@ -195,6 +195,8 @@ Connects Open WebUI to the Flux Kontext image-to-image editing model via ComfyUI
 - `Prompt_Node_ID` (str): Node ID for the text prompt (default: `"6"`)
 - `Image_Node_ID` (str): Node ID for the input image (default: `"196"`)
 - `Seed_Node_ID` (str): Node ID for the sampler (default: `"194"`)
+- `enhance_prompt` (bool): Use a vision model to enhance the prompt based on the input image (default: `False`).
+- `vision_model_id` (str): The model ID to use for vision-based prompt enhancement (required if `enhance_prompt` is enabled).
 - `unload_ollama_models` (bool): Unload all Ollama models from VRAM before running (default: `False`)
 - `ollama_url` (str): Ollama API URL for unloading models (default: `http://host.docker.internal:11434`)
 - `max_wait_time` (int): Max wait time for generation in seconds (default: `1200`)
@@ -207,12 +209,16 @@ Connects Open WebUI to the Flux Kontext image-to-image editing model via ComfyUI
    - Set the `ComfyUI_Address` to your ComfyUI backend.
    - Paste the workflow JSON into `ComfyUI_Workflow_JSON`.
    - Set the correct node IDs for prompt, image, and sampler.
+
 3. **Edit images:**
    - Provide a prompt and an input image.
+   - *(Optional)* Enable `enhance_prompt` and specify a `vision_model_id` to automatically improve your prompt using a vision-language model and the input image. The enhanced prompt will be used for image editing and shown in the chat.
    - The pipe will return the edited image.
+
 - **Example:**
   ```python
   Edit this image to look like a medieval fantasy king, preserving facial features.
+  # (If enhance_prompt is enabled, the vision model will refine this prompt based on the image)
   ```
 
 ![Flux Kontext Example](img/flux_kontext.png)
