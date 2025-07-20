@@ -197,6 +197,7 @@ Connects Open WebUI to the Flux Kontext image-to-image editing model via ComfyUI
 - `Seed_Node_ID` (str): Node ID for the sampler (default: `"194"`)
 - `enhance_prompt` (bool): Use a vision model to enhance the prompt based on the input image (default: `False`).
 - `vision_model_id` (str): The model ID to use for vision-based prompt enhancement (required if `enhance_prompt` is enabled).
+- `enhancer_system_prompt` (str): System prompt used to guide the vision model when enhancing the prompt. This allows you to customize the instructions given to the vision-language model for prompt engineering. By default, it provides detailed instructions for visual prompt enhancement, but you can modify it to fit your workflow or style.
 - `unload_ollama_models` (bool): Unload all Ollama models from VRAM before running (default: `False`)
 - `ollama_url` (str): Ollama API URL for unloading models (default: `http://host.docker.internal:11434`)
 - `max_wait_time` (int): Max wait time for generation in seconds (default: `1200`)

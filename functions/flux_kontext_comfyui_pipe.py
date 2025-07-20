@@ -4,6 +4,7 @@ author: Gemini & [Your Name]
 author_url: https://google.com
 funding_url: https://github.com/open-webui
 version: 3.0.0
+required_open_webui_version: 0.5.0
 """
 
 import json
@@ -152,7 +153,22 @@ class Pipe:
         vision_model_id: str = Field(
             default="", description="Vision model to be used as prompt enhancer"
         )
-
+        enhancer_system_prompt: str = Field(
+            default="""
+            You are a visual prompt engineering assistant. 
+            For each request, you will receive a user-provided prompt and an image to be edited. 
+            Carefully analyze the image’s content (objects, colors, environment, style, mood, etc.) along with the user’s intent. 
+            Then generate a single, improved editing prompt for the FLUX Kontext model using best practices. 
+            Be specific and descriptive: use exact color names and detailed adjectives, and use clear action verbs like “change,” “add,” or “remove.” 
+            Name each subject explicitly (for example, “the woman with short black hair,” “the red sports car”), avoiding pronouns like “her” or “it.” 
+            Include relevant details from the image. 
+            Preserve any elements the user did not want changed by stating them explicitly (for example, “keep the same composition and lighting”). 
+            If the user wants to add or change any text, put the exact words in quotes (for example, replace “joy” with “BFL”).
+            Focus only on editing instructions. 
+            Finally, output only the final enhanced prompt (the refined instruction) with no additional explanation or commentary.
+            """,
+            description="System prompt to be used on the prompt enhancement process",
+        )
         unload_ollama_models: bool = Field(
             default=False,
             description="Unload all Ollama models from VRAM before running.",
@@ -301,7 +317,7 @@ class Pipe:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You provide a detailed guide on how to modify visually with AI generated tools an image based on prompts. provide only a prompt that enhances the user intent based on the provided image an text",
+                    "content": self.valves.enhancer_system_prompt,
                 },
                 {
                     "role": "user",
