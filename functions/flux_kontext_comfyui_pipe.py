@@ -1,8 +1,8 @@
 """
-title: ComfyUI Universal Pipe (Race Condition Fix)
-author: Gemini & [Your Name]
-author_url: https://google.com
-funding_url: https://github.com/open-webui
+title: ComfyUI Universal Pipe
+author: Haervwe
+author_url: https://github.com/Haervwe/open-webui-tools
+funding_url: https://github.com/Haervwe/open-webui-tools
 version: 3.0.0
 required_open_webui_version: 0.5.0
 """
