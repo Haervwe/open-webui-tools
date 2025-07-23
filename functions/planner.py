@@ -79,7 +79,7 @@ class Action(BaseModel):
     dependencies: List[str] = Field(default_factory=list)
     tool_ids: Optional[list[str]] = None
     output: Optional[Dict[str, str]] = None
-    status: str = "pending"  # pending, in_progress, completed, failed
+    status: str = "pending"  # pending, in_progress, completed, failed, warning
     start_time: Optional[str] = None
     end_time: Optional[str] = None
     model: Optional[str] = None  # NEW: model to use for this action
@@ -292,6 +292,7 @@ class Pipe:
             "in_progress": "⚙️",
             "completed": "✅",
             "failed": "❌",
+            "warning": "⚠️",
         }
 
         def sanitize_action_id(id_str: str) -> str:
@@ -309,6 +310,8 @@ class Pipe:
                 styles.append(f"style {action_id} fill:#fff4cc")
             elif action.status == "completed":
                 styles.append(f"style {action_id} fill:#e6ffe6")
+            elif action.status == "warning":
+                styles.append(f"style {action_id} fill:#fffbe6")
             elif action.status == "failed":
                 styles.append(f"style {action_id} fill:#ffe6e6")
 
@@ -355,6 +358,10 @@ PLANNING PRINCIPLES (Follow these strictly!):
     - **This is a TEMPLATE action, not a generative one.**
     - The `description` for this action MUST be the final document structure, using placeholders in the format `{{action_id}}` where the output of a dependency should go.
     - DO NOT write instructions like "combine the outputs." Write the actual template.
+    - **NEVER generate code (HTML, Python, etc.) directly in the template.** If code is needed, create a separate action to generate it and reference it with `{{action_id}}`.
+    - **Only use simple placeholders like `{{action_id}}`, NOT nested ones like `{{action_id.field}}` or `{{action_id.output.field}}`.**
+    - If a generative step is required to create the final output, create it as a regular action and link it to the final_synthesis.
+    - When outputs can be used AS IS (for example text generation), use them directly in the template with simple placeholders.
     - Its `dependencies` list must contain the IDs of the final content actions.
 
     - **Correct Example for a 2-chapter story with illustrations:**
@@ -365,6 +372,34 @@ PLANNING PRINCIPLES (Follow these strictly!):
         "description": "## Chapter 1\\n\\n{{write_chapter_1}}\\n\\n*Illustration: {{generate_illustration_1}}*\\n\\n---\\n\\n## Chapter 2\\n\\n{{write_chapter_2}}\\n\\n*Illustration: {{generate_illustration_2}}*",
         "dependencies": ["write_chapter_1", "generate_illustration_1", "write_chapter_2", "generate_illustration_2"],
         "model": "" // Model is not needed for a template action
+      }}
+      ```
+
+    - **WRONG Example (DO NOT DO THIS):**
+      ```json
+      {{
+        "id": "final_synthesis",
+        "type": "synthesis",
+        "description": "<html><head><title>{{title}}</title></head><body>{{content}}</body></html>",
+        // This is WRONG because it generates HTML directly in template
+      }}
+      ```
+
+    - **CORRECT Example for HTML output:**
+      ```json
+      {{
+        "id": "create_html_page",
+        "type": "text",
+        "description": "Generate an HTML page that displays the research results, song, and image with proper HTML structure",
+        "dependencies": ["research_action", "song_action", "image_action"],
+        "model": "writer_model"
+      }},
+      {{
+        "id": "final_synthesis",
+        "type": "synthesis",
+        "description": "{{create_html_page}}",
+        "dependencies": ["create_html_page"],
+        "model": ""
       }}
       ```
 
@@ -420,9 +455,55 @@ Return ONLY a JSON object with the exact structure below. Do not add any other t
                 )
 
                 if not any(a.id == "final_synthesis" for a in plan.actions):
-                    raise ValueError(
+                    msg = (
                         "The generated plan is missing the required 'final_synthesis' action."
                     )
+                    messages += [{"role": "assistant", "content":f"previous attempt: {clean_result}"},{"role": "user", "content":f"error:: {msg}"}]
+                    raise ValueError(msg)
+
+                final_synthesis = next((a for a in plan.actions if a.id == "final_synthesis"), None)
+                if final_synthesis:
+                    template = final_synthesis.description
+    
+                    placeholder_pattern = r"\{([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)\}"
+                    all_placeholders = re.findall(placeholder_pattern, template)
+
+                    invalid_placeholders = [p for p in all_placeholders if '.' in p]
+                    if invalid_placeholders:
+                        msg = (
+                            f"Template contains invalid nested placeholders: {invalid_placeholders}. "
+                            f"Use simple {{action_id}} format only, not {{action_id.field}} or {{action_id.output.field}}."
+                        )
+                        messages += [{"role": "assistant", "content":f"previous attempt: {clean_result}"},{"role": "user", "content":f"error:: {msg}"}]
+                        raise ValueError(msg)
+
+                    code_patterns = [
+                        (r'<[a-zA-Z][^>]*>', "HTML tags"),
+                        (r'def\s+\w+\s*\(', "Python function definitions"), 
+                        (r'class\s+\w+\s*[:\(]', "Python class definitions"),
+                        (r'import\s+\w+', "Python imports"),
+                        (r'function\s+\w+\s*\(', "JavaScript functions"),
+                        (r'<!DOCTYPE', "HTML DOCTYPE declarations"),
+                        (r'<\?xml', "XML declarations"),
+                    ]
+                    
+                    for pattern, description in code_patterns:
+                        if re.search(pattern, template):
+                            msg = (
+                                f"Template contains {description}. Templates should not contain code. "
+                                f"Create a separate action to generate code and reference it with {{action_id}}."
+                            )
+                            messages += [{"role": "assistant", "content":f"previous attempt: {clean_result}"},{"role": "user", "content":f"error:: {msg}"}]
+                            raise ValueError(msg)
+                    
+                    simple_placeholders = [p for p in all_placeholders if '.' not in p]
+                    action_ids = {a.id for a in plan.actions}
+                    missing_actions = [p for p in simple_placeholders if p not in action_ids]
+                    if missing_actions:
+                        msg = (f"Template references non-existent actions: {missing_actions}. "
+                               f"All placeholders must reference valid action IDs.")
+                        messages += [{"role": "assistant", "content":f"previous attempt: {clean_result}"},{"role": "user", "content":f"error:: {msg}"}]
+                        raise ValueError(msg)
 
                 return plan
             except Exception as e:
@@ -470,15 +551,15 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
         return enhanced_requirements
 
     async def execute_action(
-        self, plan: Plan, action: Action, results: dict[str, str], step_number: int
-    ) -> dict[str, str]:
+        self, plan: Plan, action: Action, results: dict[str, Any], step_number: int
+    ) -> dict[str, Any]:
 
         action.start_time = datetime.now().strftime("%H:%M:%S")
         action.status = "in_progress"
 
         def gather_all_parent_results(
             action_id: str,
-            results: dict[str, str],
+            results: dict[str, Any],
             plan: Plan,
             visited: set[Any] | None = None,
         ) -> dict[Any, Any]:
@@ -555,7 +636,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
 
                     tools: dict[str, dict[Any, Any]] = get_tools(  # type: ignore
                         self.__request__,
-                        action.tool_ids if action.tool_ids else None,
+                        action.tool_ids or [],
                         self.__user__,
                         extra_params,
                     )
@@ -663,7 +744,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                     False,
                 )
 
-                if current_reflection.quality_score > best_quality_score:
+                if current_reflection.quality_score >= best_quality_score:
                     best_output = current_output
                     best_reflection = current_reflection
                     best_quality_score = current_reflection.quality_score
@@ -698,7 +779,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                     )
                     raise
 
-        if best_output is None:
+        if best_output is None or best_reflection is None:
             action.status = "failed"
             action.end_time = datetime.now().strftime("%H:%M:%S")
             await self.emit_status(
@@ -708,12 +789,18 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
             )
             raise RuntimeError("No valid output produced after all attempts")
 
-        action.status = "completed"
-        action.end_time = datetime.now().strftime("%H:%M:%S")
-        action.output = best_output
+        if not best_reflection.is_successful:
+            action.status = "warning"
+            action.end_time = datetime.now().strftime("%H:%M:%S")
+            action.output = best_output
+
+        else:
+            action.status = "completed"
+            action.end_time = datetime.now().strftime("%H:%M:%S")
+            action.output = best_output
         await self.emit_status(
             "success",
-            f"Action completed with best output (Quality: {best_quality_score:.2f})",
+            f"Action completed with best output (Quality: {best_reflection.quality_score:.2f})",
             True,
         )
         return best_output
@@ -788,7 +875,9 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 ],
             )
         except Exception as e:
-            logger.error(f"An unexpected error occurred during output analysis: {e}")
+            logger.error(
+                f"An unexpected error occurred during output analysis: {e}. Raw response: {analysis_response}"
+            )
             return ReflectionResult(
                 is_successful=False,
                 quality_score=0.0,

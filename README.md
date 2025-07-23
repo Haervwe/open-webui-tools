@@ -229,14 +229,30 @@ Connects Open WebUI to the Flux Kontext image-to-image editing model via ComfyUI
 
 ### Planner Agent v2
 
-### Description
-A generalist agent that autonomously generates and executes a plan to achieve a user-defined goal. It can break down complex tasks into a series of steps, use available tools to execute those steps, and synthesize the results into a final output. This version uses a template-based approach for final synthesis, making it more reliable and predictable.
+Now with tool calling.
+
+This powerful agent allows you to define a goal, and it will autonomously generate and execute a plan to achieve it. The Planner is a generalist agent, capable of handling any text-based task, making it ideal for complex, multi-step requests that would typically require multiple prompts and manual intervention. 
+
+It features advanced capabilities like:
+
+* **Automatic Plan Generation:**  Breaks down your goal into a sequence of actionable steps with defined dependencies.
+* **Adaptive Execution:**  Executes each step, dynamically adjusting to the results of previous actions.
+* **Reflection and Refinement:** Analyzes the output of each step, identifies potential issues, and iteratively refines the output through multiple attempts.
+* **Robust Error Handling:** Includes retries and fallback mechanisms to ensure successful execution even with occasional API errors.
+* **Detailed Execution Summary:** Provides a comprehensive report of the plan execution, including timings and potential issues.
+
+**Features:**
+
+* **General Purpose:** Can handle a wide range of text-based tasks, from creative writing and code generation to research summarization and problem-solving.
+* **Multi-Step Task Management:** Excels at managing complex tasks that require multiple steps and dependencies.
+* **Integration with Native Open WebUI Tools:** Agents can use asigned tools to complete the task.
+* **Context Awareness:**  Maintains context throughout the execution process, ensuring that each step builds upon the previous ones.
+* **Output Optimization:**  Employs a reflection mechanism to analyze and improve the output of each step through multiple iterations.
 
 ### Configuration
 - `MODEL`: The model ID for the main planning LLM.
 - `ACTION_MODEL`: The model ID for executing most actions.
 - `WRITER_MODEL`: The model ID for text-heavy actions like writing documentation.
-- `CONCURRENT_ACTIONS`: The number of actions that can be executed in parallel.
 - `MAX_RETRIES`: The number of times an action can be retried if it fails.
 - `AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT`: Whether to use an LLM to enhance the requirements for each task.
 
