@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.8.5
+version: 2.0.0
 """
 
 import logging
@@ -18,7 +18,7 @@ from open_webui.constants import TASKS
 from open_webui.utils.chat import generate_chat_completion  # type: ignore
 from open_webui.utils.tools import get_tools  # type: ignore
 
-from open_webui.models.users import User, Users
+from open_webui.models.users import User
 from open_webui.models.tools import Tools
 
 import re
