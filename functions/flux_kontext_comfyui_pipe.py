@@ -16,7 +16,8 @@ from typing import List, Dict, Callable, Optional
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import get_last_user_message_item
 from open_webui.utils.chat import generate_chat_completion
-from open_webui.models.users import User
+from open_webui.models.users import User, Users
+
 import logging
 import requests
 
@@ -359,7 +360,7 @@ class Pipe:
     ) -> dict:
         self.__event_emitter__ = __event_emitter__
         self.__request__ = __request__
-        self.__user__ = User(**__user__) if isinstance(__user__, dict) else __user__
+        self.__user__ = Users.get_user_by_id(__user__["id"])
         messages = body.get("messages", [])
         prompt, base64_image = self.parse_input(messages)
         if self.valves.enhance_prompt:
