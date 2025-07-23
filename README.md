@@ -21,7 +21,7 @@ This repository contains **14+ specialized tools and functions** designed to enh
   
 
 ### 🔄 **Function Pipes**
-- **Planner Agent** - Autonomous task execution
+- **Planner Agent v2** - Autonomous task execution with tool support
 - **arXiv Research MCTS** - Advanced research with Monte Carlo Tree Search
 - **Multi Model Conversations** - Multi-agent discussions
 - **Resume Analyzer** - Professional resume analysis
@@ -86,7 +86,7 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 2. [Hugging Face Image Generator](#hugging-face-image-generator)
 3. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
 4. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-5. [Planner Agent](#planner-agent)
+5. [Planner Agent v2](#planner-agent-v2)
 6. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
 7. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
 8. [Resume Analyzer Pipe](#resume-analyzer-pipe)
@@ -227,20 +227,22 @@ Connects Open WebUI to the Flux Kontext image-to-image editing model via ComfyUI
 
 ---
 
-### Planner Agent
+### Planner Agent v2
 
 ### Description
-A generalist agent that autonomously generates and executes a plan to achieve a user-defined goal. Handles complex, multi-step requests.
+A generalist agent that autonomously generates and executes a plan to achieve a user-defined goal. It can break down complex tasks into a series of steps, use available tools to execute those steps, and synthesize the results into a final output. This version uses a template-based approach for final synthesis, making it more reliable and predictable.
 
 ### Configuration
-- `model`: The model id from your LLM provider connected to Open-WebUI
-- `action_model`: The model to be used in the task execution (leave as default to use the same in all the process)
-- `concurrency`: Experimental support for concurrent LLM operations
-- `max_retries`: Number of times the reflection step and subsequent refinement can happen per step
+- `MODEL`: The model ID for the main planning LLM.
+- `ACTION_MODEL`: The model ID for executing most actions.
+- `WRITER_MODEL`: The model ID for text-heavy actions like writing documentation.
+- `CONCURRENT_ACTIONS`: The number of actions that can be executed in parallel.
+- `MAX_RETRIES`: The number of times an action can be retried if it fails.
+- `AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT`: Whether to use an LLM to enhance the requirements for each task.
 
 ### Usage
 - **Example:**
-  ```python
+  ```
   Create a fully-featured Single Page Application (SPA) for Conway's Game of Life, including a responsive UI. No frameworks, only clean HTML, JS, and CSS.
   ```
 
