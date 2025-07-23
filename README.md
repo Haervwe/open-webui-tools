@@ -15,6 +15,7 @@ This repository contains **14+ specialized tools and functions** designed to enh
 
 ### 🛠️ **Tools**
 - **arXiv Search** - Academic paper discovery (no API key required!)
+- **Perplexica Search** - Web search using Perplexica API with citations
 - **Native Image Generator** - Direct Open WebUI image generation with Ollama model management
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI ACE Step Audio** - Advanced music generation
@@ -84,27 +85,28 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 ### Table of Contents
 
 1. [arXiv Search Tool](#arxiv-search-tool)
-2. [Native Image Generator](#native-image-generator)
-3. [Hugging Face Image Generator](#hugging-face-image-generator)
-4. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
-5. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-6. [Planner Agent v2](#planner-agent-v2)
-7. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-8. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-9. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-10. [Mopidy Music Controller](#mopidy-music-controller)
-11. [Letta Agent Pipe](#letta-agent-pipe)
-12. [MCP Pipe](#mcp-pipe)
-13. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-14. [Semantic Router Filter](#semantic-router-filter)
-15. [Full Document Filter](#full-document-filter)
-16. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-17. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-18. [Installation](#installation)
-19. [Contributing](#contributing)
-20. [License](#license)
-21. [Credits](#credits)
-22. [Support](#support)
+2. [Perplexica Search Tool](#perplexica-search-tool)
+3. [Native Image Generator](#native-image-generator)
+4. [Hugging Face Image Generator](#hugging-face-image-generator)
+5. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
+6. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+7. [Planner Agent v2](#planner-agent-v2)
+8. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+9. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+10. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+11. [Mopidy Music Controller](#mopidy-music-controller)
+12. [Letta Agent Pipe](#letta-agent-pipe)
+13. [MCP Pipe](#mcp-pipe)
+14. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+15. [Semantic Router Filter](#semantic-router-filter)
+16. [Full Document Filter](#full-document-filter)
+17. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+18. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+19. [Installation](#installation)
+20. [Contributing](#contributing)
+21. [License](#license)
+22. [Credits](#credits)
+23. [Support](#support)
 
 ---
 
@@ -127,6 +129,38 @@ Search arXiv.org for relevant academic papers on any topic. No API key required!
 
 ![arXiv Search Example](img/arxiv_search.png)
 *Example arXiv search result in Open WebUI*
+
+---
+
+### Perplexica Search Tool
+
+### Description
+Search the web for factual information, current events, or specific topics using the Perplexica API. This tool provides comprehensive search results with citations and sources, making it ideal for research and information gathering. [Perplexica](https://github.com/ItzCrazyKns/Perplexica) is an open-source AI-powered search engine and alternative to Perplexity AI that must be self-hosted locally. It uses advanced language models to provide accurate, contextual answers with proper source attribution.
+
+### Configuration
+- `BASE_URL` (str): Base URL for the Perplexica API (default: `http://host.docker.internal:3001`)
+- `OPTIMIZATION_MODE` (str): Search optimization mode - "speed" or "balanced" (default: `balanced`)
+- `CHAT_MODEL` (str): Default chat model for search processing (default: `llama3.1:latest`)
+- `EMBEDDING_MODEL` (str): Default embedding model for search (default: `bge-m3:latest`)
+- `OLLAMA_BASE_URL` (str): Base URL for Ollama API (default: `http://host.docker.internal:11434`)
+
+**Prerequisites**: You must have [Perplexica](https://github.com/ItzCrazyKns/Perplexica) installed and running locally at the configured URL. Perplexica is a self-hosted open-source search engine that requires Ollama with the specified chat and embedding models. Follow the installation instructions in the Perplexica repository to set up your local instance.
+
+### Usage
+- **Example:**
+  ```python
+  Search for "latest developments in AI safety research 2024"
+  ```
+- Returns comprehensive search results with proper citations
+- Automatically emits citations for source tracking in Open WebUI
+- Provides both summary and individual source links
+
+### Features
+- **Web Search Integration**: Direct access to current web information
+- **Citation Support**: Automatic citation generation for Open WebUI
+- **Model Flexibility**: Configurable chat and embedding models
+- **Real-time Status**: Progress updates during search execution
+- **Source Tracking**: Individual source citations with metadata
 
 ---
 
