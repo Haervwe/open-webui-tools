@@ -18,7 +18,7 @@ from open_webui.constants import TASKS
 from open_webui.utils.chat import generate_chat_completion  # type: ignore
 from open_webui.utils.tools import get_tools  # type: ignore
 
-from open_webui.models.users import User
+from open_webui.models.users import Users, User
 from open_webui.models.tools import Tools
 
 import re
@@ -1077,7 +1077,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         user: dict[str, Any] | None = None,
     ) -> None | str:
         model = self.valves.MODEL
-        self.__user__ = User(**__user__)
+        self.__user__ =  Users.get_user_by_id(__user__["id"])
         self.__request__ = __request__
         self.user = __user__
         if __task__ and __task__ != TASKS.DEFAULT:

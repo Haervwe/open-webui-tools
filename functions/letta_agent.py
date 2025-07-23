@@ -14,7 +14,7 @@ import aiohttp
 import json
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
-from open_webui.models.users import User
+from open_webui.models.users import Users
 import asyncio
 import time
 
@@ -258,7 +258,7 @@ class Pipe:
             logger.error("Event emitter not provided")
             return ""
         print(__user__)
-        self.__user__ = User(**__user__)
+        self.__user__ = Users.get_user_by_id(__user__["id"])
         self.__model__ = __model__
         self.__request__ = __request__
 

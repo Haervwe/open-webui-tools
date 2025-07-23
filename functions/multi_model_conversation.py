@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from dataclasses import dataclass
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
-from open_webui.models.users import User
+from open_webui.models.users import User, Users
 
 name = "Conversation"
 
@@ -202,7 +202,7 @@ class Pipe:
         __request__=None,
     ) -> str:
         self.__current_event_emitter__ = __event_emitter__
-        self.__user__ = User(**__user__)
+        self.__user__ = Users.get_user_by_id(__user__["id"])
         self.__model__ = __model__
         self.__request__ = __request__
         if __task__ and __task__ != TASKS.DEFAULT:

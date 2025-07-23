@@ -20,7 +20,7 @@ from open_webui.utils.chat import (
     generate_chat_completion,
 )
 from open_webui.utils.misc import get_last_user_message
-from open_webui.models.users import User
+from open_webui.models.users import User ,Users
 from open_webui.routers.models import get_models, get_base_models
 from open_webui.models.files import Files
 
@@ -399,7 +399,7 @@ class Filter:
     ) -> dict:
         self.__request__ = __request__
         self.__model__ = __model__
-        self.__user__ = User(**__user__) if isinstance(__user__, dict) else __user__
+        self.__user__ =  Users.get_user_by_id(__user__["id"]) if __user__ else None
 
         original_config = {
             "stream": body.get("stream", False),

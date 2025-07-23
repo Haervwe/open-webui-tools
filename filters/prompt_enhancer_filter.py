@@ -13,12 +13,10 @@ import re
 from pydantic import BaseModel, Field
 from typing import Callable, Awaitable, Any, Optional
 import json
-from dataclasses import dataclass
 from fastapi import Request
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
-from open_webui.models.models import Models
-from open_webui.models.users import User
+from open_webui.models.users import User ,Users
 from open_webui.routers.models import get_models
 from open_webui.constants import TASKS
 
@@ -303,6 +301,6 @@ Now, enhance the following prompt:
         self.__current_event_emitter__ = __event_emitter__
         self.__request__ = __request__
         self.__model__ = __model__
-        self.__user__ = User(**__user__) if isinstance(__user__, dict) else __user__
+        self.__user__ =  Users.get_user_by_id(__user__["id"]) if __user__ else None
         print(body)
         return body

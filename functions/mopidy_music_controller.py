@@ -10,17 +10,15 @@ mopidy repo: https://github.com/mopidy
 """
 
 import logging
-import asyncio
 import json
 from typing import Dict, List, Callable, Awaitable, Optional
 from pydantic import BaseModel, Field
-from dataclasses import dataclass
 import aiohttp
 import re
 import traceback
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
-from open_webui.models.users import User
+from open_webui.models.users import User ,Users
 
 name = "MopidyController"
 
@@ -941,7 +939,7 @@ class Pipe:
     ) -> str:
         """Main pipe function to process music requests."""
         self.__current_event_emitter__ = __event_emitter__
-        self.__user__ = User(**__user__)
+        self.__user__ = Users.get_user_by_id(__user__["id"])
         self.__model__ = self.valves.Model or __model__
         self.__request__ = __request__
         logger.debug(__task__)

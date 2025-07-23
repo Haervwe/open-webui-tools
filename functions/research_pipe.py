@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from open_webui.constants import TASKS
 
 from open_webui.main import generate_chat_completions
-from open_webui.models.users import User
+from open_webui.models.users import User ,Users
 
 
 name = "Research Pipe"
@@ -619,7 +619,7 @@ class Pipe:
         model = self.valves.MODEL
         logger.debug(f"Model {model}")
         logger.debug(f"User: {__user__}")
-        self.__user__ = User(**__user__)
+        self.__user__ = Users.get_user_by_id(__user__["id"])
         self.__request__=__request__
         if __task__ and __task__ != TASKS.DEFAULT:
             logger.debug(f"Model {TASKS}")
