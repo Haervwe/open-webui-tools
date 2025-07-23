@@ -7,7 +7,6 @@ funding_url: https://github.com/Haervwe/open-webui-tools
 version: 0.2.0
 """
 
-
 import json
 from typing import Optional, Dict, Any, Callable, Awaitable
 import aiohttp
@@ -295,7 +294,9 @@ def extract_audio_files(job_data: Dict) -> list:
     return audio_files
 
 
-async def download_audio_to_cache(comfyui_http_url: str, filename: str, subfolder: str = "") -> Optional[str]:
+async def download_audio_to_cache(
+    comfyui_http_url: str, filename: str, subfolder: str = ""
+) -> Optional[str]:
     """
     Download audio file from ComfyUI to OpenWebUI cache directory.
     Returns the local cache URL path if successful, None otherwise.
@@ -304,32 +305,36 @@ async def download_audio_to_cache(comfyui_http_url: str, filename: str, subfolde
         # Create cache directory for audio files (similar to image pattern)
         cache_audio_dir = os.path.join(CACHE_DIR, "audio", "generations")
         os.makedirs(cache_audio_dir, exist_ok=True)
-        
+
         # Generate unique filename to avoid conflicts
         file_extension = os.path.splitext(filename)[1] or ".mp3"
         local_filename = f"{uuid.uuid4()}{file_extension}"
         local_file_path = os.path.join(cache_audio_dir, local_filename)
-        
+
         # Build ComfyUI download URL
         subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
-        comfyui_file_url = f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
-        
+        comfyui_file_url = (
+            f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
+        )
+
         # Download file from ComfyUI
         async with aiohttp.ClientSession() as session:
             async with session.get(comfyui_file_url) as response:
                 if response.status == 200:
                     audio_content = await response.read()
-                    
+
                     # Save to local cache
                     with open(local_file_path, "wb") as audio_file:
                         audio_file.write(audio_content)
-                    
+
                     # Return the cache URL path that OpenWebUI can serve
                     return f"/cache/audio/generations/{local_filename}"
                 else:
-                    print(f"[DEBUG] Failed to download audio from ComfyUI: HTTP {response.status}")
+                    print(
+                        f"[DEBUG] Failed to download audio from ComfyUI: HTTP {response.status}"
+                    )
                     return None
-                    
+
     except Exception as e:
         print(f"[DEBUG] Error downloading audio to cache: {str(e)}")
         return None
@@ -396,6 +401,10 @@ class Tools:
         ollama_url: str = Field(
             default="http://host.docker.internal:11434",
             description="Ollama API URL.",
+        )
+        save_local: bool = Field(
+            default=True,
+            description="Copy the generated song to the Open Webui Storage Backend",
         )
 
     def __init__(self):
@@ -576,54 +585,29 @@ class Tools:
                 audio_file_info = audio_files[0]
                 filename = audio_file_info["filename"]
                 subfolder = audio_file_info.get("subfolder", "")
-                
-                # Download audio file to OpenWebUI cache directory
-                local_audio_url = await download_audio_to_cache(
-                    http_api_url, filename, subfolder
-                )
-                
-                if local_audio_url:
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": "🎉 Song generated and saved locally!",
-                                    "done": True,
-                                },
-                            }
-                        )
-                    
-                    # Send an embedded audio player in the message
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "message",
-                                "data": {
-                                    "content": f"""🎵 **Song Generated Successfully!**
 
-**Tags:** {tags}
-{f"**Lyrics:** {lyrics}" if lyrics else "**Type:** Instrumental"}
+                if self.valves.save_local:
+                    local_audio_url = await download_audio_to_cache(
+                        http_api_url, filename, subfolder
+                    )
+                    if local_audio_url:
+                        if __event_emitter__:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": "🎉 Song generated and saved locally!",
+                                        "done": True,
+                                    },
+                                }
+                            )
 
-<audio controls style="width: 100%; margin: 10px 0;">
-  <source src="{local_audio_url}" type="audio/mpeg">
-  <source src="{local_audio_url}" type="audio/wav">
-  <source src="{local_audio_url}" type="audio/ogg">
-  Your browser does not support the audio element.
-  <a href="{local_audio_url}" download>Download the generated song</a>
-</audio>
-
-[📥 Download Song]({local_audio_url})"""
-                                },
-                            }
-                        )
-                    
-                    return f"Song generated successfully! The audio is embedded above and can be downloaded from: {local_audio_url}"
+                        return f"Song generated successfully! The audio is embedded above and can be downloaded from: {local_audio_url}"
                 else:
                     # Fallback to ComfyUI direct link if download fails
                     subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
                     comfyui_url = f"{http_api_url}/view?filename={filename}&type=output{subfolder_param}"
-                    
+
                     if __event_emitter__:
                         await __event_emitter__(
                             {
@@ -634,7 +618,7 @@ class Tools:
                                 },
                             }
                         )
-                    
+
                     return f"Song generated! Note: Local storage failed, using direct ComfyUI link: {comfyui_url}"
             else:
                 outputs_json = json.dumps(job_data.get("outputs", {}), indent=2)
