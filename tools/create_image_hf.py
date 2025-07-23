@@ -9,10 +9,8 @@ description: HuggingFace API implementation for text to image generation
 """
 
 import aiohttp
-import base64
 import uuid
 import os
-from typing import Dict, Any
 from pydantic import BaseModel, Field
 import logging
 from aiohttp import ClientTimeout
