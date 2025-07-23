@@ -15,6 +15,7 @@ This repository contains **14+ specialized tools and functions** designed to enh
 
 ### 🛠️ **Tools**
 - **arXiv Search** - Academic paper discovery (no API key required!)
+- **Native Image Generator** - Direct Open WebUI image generation with Ollama model management
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI ACE Step Audio** - Advanced music generation
 - **Flux Kontext ComfyUI** - Professional image editing
@@ -83,26 +84,27 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 ### Table of Contents
 
 1. [arXiv Search Tool](#arxiv-search-tool)
-2. [Hugging Face Image Generator](#hugging-face-image-generator)
-3. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
-4. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-5. [Planner Agent v2](#planner-agent-v2)
-6. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-7. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-8. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-9. [Mopidy Music Controller](#mopidy-music-controller)
-10. [Letta Agent Pipe](#letta-agent-pipe)
-11. [MCP Pipe](#mcp-pipe)
-12. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-13. [Semantic Router Filter](#semantic-router-filter)
-14. [Full Document Filter](#full-document-filter)
-15. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-16. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-17. [Installation](#installation)
-18. [Contributing](#contributing)
-19. [License](#license)
-20. [Credits](#credits)
-21. [Support](#support)
+2. [Native Image Generator](#native-image-generator)
+3. [Hugging Face Image Generator](#hugging-face-image-generator)
+4. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
+5. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+6. [Planner Agent v2](#planner-agent-v2)
+7. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+8. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+9. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+10. [Mopidy Music Controller](#mopidy-music-controller)
+11. [Letta Agent Pipe](#letta-agent-pipe)
+12. [MCP Pipe](#mcp-pipe)
+13. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+14. [Semantic Router Filter](#semantic-router-filter)
+15. [Full Document Filter](#full-document-filter)
+16. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+17. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+18. [Installation](#installation)
+19. [Contributing](#contributing)
+20. [License](#license)
+21. [Credits](#credits)
+22. [Support](#support)
 
 ---
 
@@ -125,6 +127,36 @@ Search arXiv.org for relevant academic papers on any topic. No API key required!
 
 ![arXiv Search Example](img/arxiv_search.png)
 *Example arXiv search result in Open WebUI*
+
+---
+
+### Native Image Generator
+
+### Description
+Generate images using Open WebUI's native image generation middleware configured in admin settings. This tool leverages whatever image generation backend you have configured (such as AUTOMATIC1111, ComfyUI, or OpenAI DALL-E) through Open WebUI's built-in image generation system, with optional Ollama model management to free up VRAM when needed.
+
+### Configuration
+- `unload_ollama_models` (bool): Whether to unload all Ollama models from VRAM before generating images (default: `False`)
+- `ollama_url` (str): Ollama API URL for model management (default: `http://host.docker.internal:11434`)
+
+**Prerequisites**: You must have image generation configured in Open WebUI's admin settings under Settings > Images. This tool works with any image generation backend you have set up (AUTOMATIC1111, ComfyUI, OpenAI, etc.).
+
+### Usage
+- **Example:**
+  ```python
+  Generate an image of "a serene mountain landscape at sunset"
+  ```
+- Uses whatever image generation backend is configured in Open WebUI admin settings
+- Automatically manages model resources if Ollama unloading is enabled
+- Returns markdown-formatted image links for immediate display
+
+### Features
+- **Native Integration**: Uses Open WebUI's native image generation middleware without external dependencies
+- **Backend Agnostic**: Works with any image generation backend configured in admin settings (AUTOMATIC1111, ComfyUI, OpenAI, etc.)
+- **Memory Management**: Optional Ollama model unloading to optimize VRAM usage
+- **Flexible Model Support**: You can prompt de agent to change the image generation model, providing the name is given to it.
+- **Real-time Status**: Provides generation progress updates via event emitter
+- **Error Handling**: Comprehensive error reporting and recovery
 
 ---
 
