@@ -471,8 +471,9 @@ class Tools:
         [bridge]
 
         Tool Parameters:
-                param tags: A String, Mainly used to describe music styles, scenes, etc. Similar to prompts we use for other generations, they primarily describe the overall style and requirements of the audio, separated by English commas
-                param lyrics: A string, Mainly used to describe lyrics, supporting lyric structure tags such as [verse], [chorus], and [bridge] to distinguish different parts of the lyrics. You can also input instrument names for purely instrumental music
+                Required param tags: A String, Mainly used to describe music styles, scenes, etc. Similar to prompts we use for other generations, they primarily describe the overall style and requirements of the audio, separated by English commas
+                Required param lyrics: A string, Mainly used to describe lyrics, supporting lyric structure tags such as [verse], [chorus], and [bridge] to distinguish different parts of the lyrics. You can also input instrument names for purely instrumental music
+                If you are asked to create an instrumenta piece use the parameter with "" as input, dont leave any parameter without a value
         """
 
         if self.valves.unload_ollama_models:
