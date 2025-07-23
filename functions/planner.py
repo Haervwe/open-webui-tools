@@ -24,7 +24,6 @@ from open_webui.models.tools import Tools
 import re
 
 
-# Constants and Setup
 name = "Planner_2"
 
 
@@ -260,7 +259,7 @@ class Pipe:
                     },
                 ]
             if model == self.valves.WRITER_MODEL:
-                tools = None
+                tools = {}
             tool_response = await self.get_completion(
                 prompt=messages,
                 temperature=temperature,
