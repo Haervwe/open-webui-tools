@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.0.0
+version: 2.0.1
 """
 
 import logging
@@ -205,25 +205,17 @@ class Pipe:
                     else None
                 ),
             }
-            test = [
-                {"type": "function", "function": tool.get("spec", {})}
-                for tool in tools.values()
-            ]
-            print(f"1 {test}  {form_data}")
             response: dict[str, Any] = await generate_chat_completion(
                 self.__request__,
                 form_data,
                 user=self.__user__,
             )
-            if tools:
-                print(f"2 {test} , {response}")
             response_content = str(response["choices"][0]["message"]["content"])
             tool_calls: list[dict[str, Any]] | None = None
             try:
                 tool_calls = response["choices"][0]["message"].get("tool_calls")
             except Exception:
                 tool_calls = None
-            print(tool_calls)
             if not tool_calls or not isinstance(tool_calls, list):
                 if response_content == "\n":
                     logger.debug(f"No tool calls: {response}")
@@ -455,54 +447,82 @@ Return ONLY a JSON object with the exact structure below. Do not add any other t
                 )
 
                 if not any(a.id == "final_synthesis" for a in plan.actions):
-                    msg = (
-                        "The generated plan is missing the required 'final_synthesis' action."
-                    )
-                    messages += [{"role": "assistant", "content":f"previous attempt: {clean_result}"},{"role": "user", "content":f"error:: {msg}"}]
+                    msg = "The generated plan is missing the required 'final_synthesis' action."
+                    messages += [
+                        {
+                            "role": "assistant",
+                            "content": f"previous attempt: {clean_result}",
+                        },
+                        {"role": "user", "content": f"error:: {msg}"},
+                    ]
                     raise ValueError(msg)
 
-                final_synthesis = next((a for a in plan.actions if a.id == "final_synthesis"), None)
+                final_synthesis = next(
+                    (a for a in plan.actions if a.id == "final_synthesis"), None
+                )
                 if final_synthesis:
                     template = final_synthesis.description
-    
+
                     placeholder_pattern = r"\{([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)\}"
                     all_placeholders = re.findall(placeholder_pattern, template)
 
-                    invalid_placeholders = [p for p in all_placeholders if '.' in p]
+                    invalid_placeholders = [p for p in all_placeholders if "." in p]
                     if invalid_placeholders:
                         msg = (
                             f"Template contains invalid nested placeholders: {invalid_placeholders}. "
                             f"Use simple {{action_id}} format only, not {{action_id.field}} or {{action_id.output.field}}."
                         )
-                        messages += [{"role": "assistant", "content":f"previous attempt: {clean_result}"},{"role": "user", "content":f"error:: {msg}"}]
+                        messages += [
+                            {
+                                "role": "assistant",
+                                "content": f"previous attempt: {clean_result}",
+                            },
+                            {"role": "user", "content": f"error:: {msg}"},
+                        ]
                         raise ValueError(msg)
 
                     code_patterns = [
-                        (r'<[a-zA-Z][^>]*>', "HTML tags"),
-                        (r'def\s+\w+\s*\(', "Python function definitions"), 
-                        (r'class\s+\w+\s*[:\(]', "Python class definitions"),
-                        (r'import\s+\w+', "Python imports"),
-                        (r'function\s+\w+\s*\(', "JavaScript functions"),
-                        (r'<!DOCTYPE', "HTML DOCTYPE declarations"),
-                        (r'<\?xml', "XML declarations"),
+                        (r"<[a-zA-Z][^>]*>", "HTML tags"),
+                        (r"def\s+\w+\s*\(", "Python function definitions"),
+                        (r"class\s+\w+\s*[:\(]", "Python class definitions"),
+                        (r"import\s+\w+", "Python imports"),
+                        (r"function\s+\w+\s*\(", "JavaScript functions"),
+                        (r"<!DOCTYPE", "HTML DOCTYPE declarations"),
+                        (r"<\?xml", "XML declarations"),
                     ]
-                    
+
                     for pattern, description in code_patterns:
                         if re.search(pattern, template):
                             msg = (
                                 f"Template contains {description}. Templates should not contain code. "
                                 f"Create a separate action to generate code and reference it with {{action_id}}."
                             )
-                            messages += [{"role": "assistant", "content":f"previous attempt: {clean_result}"},{"role": "user", "content":f"error:: {msg}"}]
+                            messages += [
+                                {
+                                    "role": "assistant",
+                                    "content": f"previous attempt: {clean_result}",
+                                },
+                                {"role": "user", "content": f"error:: {msg}"},
+                            ]
                             raise ValueError(msg)
-                    
-                    simple_placeholders = [p for p in all_placeholders if '.' not in p]
+
+                    simple_placeholders = [p for p in all_placeholders if "." not in p]
                     action_ids = {a.id for a in plan.actions}
-                    missing_actions = [p for p in simple_placeholders if p not in action_ids]
+                    missing_actions = [
+                        p for p in simple_placeholders if p not in action_ids
+                    ]
                     if missing_actions:
-                        msg = (f"Template references non-existent actions: {missing_actions}. "
-                               f"All placeholders must reference valid action IDs.")
-                        messages += [{"role": "assistant", "content":f"previous attempt: {clean_result}"},{"role": "user", "content":f"error:: {msg}"}]
+                        msg = (
+                            f"Template references non-existent actions: {missing_actions}. "
+                            f"All placeholders must reference valid action IDs."
+                        )
+                        messages += [
+                            {
+                                "role": "assistant",
+                                "content": f"previous attempt: {clean_result}",
+                            },
+                            {"role": "user", "content": f"error:: {msg}"},
+                        ]
                         raise ValueError(msg)
 
                 return plan
