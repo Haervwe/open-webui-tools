@@ -18,10 +18,8 @@ you can contact me through  github.
 
 import logging
 import json
-import asyncio
 from typing import Dict, List, Callable, Awaitable
 from pydantic import BaseModel, Field
-from dataclasses import dataclass
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
 import pandas as pd
