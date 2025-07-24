@@ -126,11 +126,11 @@ class Pipe:
         )
         WRITER_MODEL: str = Field(
             default="",
-            description="Model to use for text/documentation actions (e.g., RP/Writer model)",
+            description="Model to use for text/documentation actions (e.g., RP/Writer model). This model should focus ONLY on content generation and should NOT handle tool calls for post-processing like saving files. Create separate tool-based actions for any file operations.",
         )
         CODER_MODEL: str = Field(
             default="",
-            description="Model to use for code/script generation actions (e.g., Coding specialized model)",
+            description="Model to use for code/script generation actions (e.g., Coding specialized model). This model should focus ONLY on code generation and should NOT handle tool calls for post-processing like saving files. Create separate tool-based actions for any file operations.",
         )
         WRITER_SYSTEM_PROMPT: str = Field(
             default="""You are a Creative Writing Agent, specialized in generating high-quality narrative content, dialogue, and creative text. Your role is to focus on producing engaging, well-written content that matches the requested style and tone.
@@ -172,6 +172,9 @@ CRITICAL GUIDELINES:
 3. When using tools:
    - Use EXACTLY as specified in the tool documentation
    - Process and format the tool output appropriately for this step
+   - You can reference previous action outputs directly in tool parameters using the format: "@action_id" (e.g., "@search_results" to use the complete output from the search_results action)
+   - When using "@action_id" references, the complete output will be automatically substituted - you don't need to copy/paste content manually
+   - If the referenced output contains extra text that isn't needed for the tool call, you can either handle it manually by extracting what you need, or use additional tools to process it first
 4. Produce a complete, self-contained output that can be used by dependent steps
 5. Never ask for clarification - work with what is provided
 6. Never output an empty message
@@ -197,7 +200,8 @@ WRITER-SPECIFIC REQUIREMENTS:
 - Focus on narrative flow and reader engagement
 - Produce polished, publication-ready content for this action step only
 - Do not break character or reference being an AI
-- Your response is the complete output for this writing action""",
+- Your response is the complete output for this writing action
+- DO NOT attempt to save, write to files, or perform any tool operations - those are handled in separate actions""",
             description="Additional requirements specifically for Writer Model actions",
         )
         CODER_REQUIREMENTS_SUFFIX: str = Field(
@@ -210,7 +214,8 @@ CODER-SPECIFIC REQUIREMENTS:
 - Follow best practices and conventions for the target language
 - Include error handling where appropriate
 - Add inline comments for complex logic
-- Your response is the complete code output for this action""",
+- Your response is the complete code output for this action
+- DO NOT attempt to save, write to files, or perform any tool operations - those are handled in separate actions""",
             description="Additional requirements specifically for Coder Model actions",
         )
         ACTION_REQUIREMENTS_SUFFIX: str = Field(
@@ -220,7 +225,9 @@ ACTION-SPECIFIC REQUIREMENTS:
 - Process and synthesize tool outputs appropriately
 - Provide clear, actionable results that can be used by dependent steps
 - Include relevant details from tool outputs in your response
-- Do not simply repeat tool outputs - synthesize them meaningfully""",
+- Do not simply repeat tool outputs - synthesize them meaningfully
+- You can use @action_id references in tool parameters to reference complete outputs from previous actions (e.g., "@search_results" to use the full output from the search_results action)
+- When using @action_id references, the complete output will be automatically substituted - handle any extra text appropriately for your tool's needs""",
             description="Additional requirements specifically for Action Model (tool-using) actions",
         )
         AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT: bool = Field(
@@ -246,9 +253,16 @@ ACTION-SPECIFIC REQUIREMENTS:
     def pipes(self) -> list[dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
 
-    def get_system_prompt_for_model(self, action: Action, step_number: int, context: dict[str, Any], requirements: str, model: str) -> str:
+    def get_system_prompt_for_model(
+        self,
+        action: Action,
+        step_number: int,
+        context: dict[str, Any],
+        requirements: str,
+        model: str,
+    ) -> str:
         """Generate model-specific system prompts based on the model type."""
-        
+
         # Add model-specific requirements suffix
         enhanced_requirements = requirements
         match model:
@@ -258,7 +272,7 @@ ACTION-SPECIFIC REQUIREMENTS:
                 enhanced_requirements += self.valves.CODER_REQUIREMENTS_SUFFIX
             case _:  # ACTION_MODEL (default)
                 enhanced_requirements += self.valves.ACTION_REQUIREMENTS_SUFFIX
-        
+
         base_context = f"""
     TASK CONTEXT:
     - Step {step_number} Description: {action.description}
@@ -271,14 +285,14 @@ ACTION-SPECIFIC REQUIREMENTS:
     EXECUTION REQUIREMENTS:
     {enhanced_requirements}
 """
-        
+
         match model:
             case m if m == self.valves.WRITER_MODEL:
                 return f"SYSTEM: {self.valves.WRITER_SYSTEM_PROMPT}\n{base_context}"
-            
+
             case m if m == self.valves.CODER_MODEL:
                 return f"SYSTEM: {self.valves.CODER_SYSTEM_PROMPT}\n{base_context}"
-            
+
             case _:  # ACTION_MODEL (default)
                 return f"SYSTEM: {self.valves.ACTION_SYSTEM_PROMPT}\n{base_context}"
 
@@ -290,6 +304,7 @@ ACTION-SPECIFIC REQUIREMENTS:
         top_p: float = 0.9,
         model: str | dict[str, Any] = "",
         tools: dict[str, dict[Any, Any]] = {},
+        action_results: dict[str, dict[str, str]] = {},
     ) -> str:
         messages = (
             [
@@ -353,7 +368,64 @@ ACTION-SPECIFIC REQUIREMENTS:
                         if k in allowed_params
                     }
 
+                    def resolve_action_references(
+                        params: dict[str, Any],
+                    ) -> dict[str, Any]:
+                        """Recursively resolve @action_id references in tool parameters"""
+                        resolved_params = {}
+                        for key, value in params.items():
+                            if isinstance(value, str) and value.startswith("@"):
+                                action_id = value[1:]
+                                if action_id in action_results:
+                                    resolved_params[key] = action_results[
+                                        action_id
+                                    ].get("result", "")
+                                    logger.info(
+                                        f"Resolved @{action_id} reference in parameter '{key}'"
+                                    )
+                                else:
+                                    resolved_params[key] = value
+                                    logger.warning(
+                                        f"Action ID '{action_id}' not found for reference in parameter '{key}'"
+                                    )
+                            elif isinstance(value, dict):
+                                resolved_params[key] = resolve_action_references(value)
+                            elif isinstance(value, list):
+                                resolved_list = []
+                                for item in value:
+                                    if isinstance(item, str) and item.startswith("@"):
+                                        action_id = item[1:]
+                                        if action_id in action_results:
+                                            resolved_list.append(
+                                                action_results[action_id].get(
+                                                    "result", ""
+                                                )
+                                            )
+                                            logger.info(
+                                                f"Resolved @{action_id} reference in list parameter '{key}'"
+                                            )
+                                        else:
+                                            resolved_list.append(item)
+                                            logger.warning(
+                                                f"Action ID '{action_id}' not found for reference in list parameter '{key}'"
+                                            )
+                                    elif isinstance(item, dict):
+                                        resolved_list.append(
+                                            resolve_action_references(item)
+                                        )
+                                    else:
+                                        resolved_list.append(item)
+                                resolved_params[key] = resolved_list
+                            else:
+                                resolved_params[key] = value
+                        return resolved_params
+
+                    tool_function_params = resolve_action_references(
+                        tool_function_params
+                    )
+
                     tool_function = tool["callable"]
+                    logger.debug(f"{tool_call} , {tool_function_params}")
                     tool_result = await tool_function(**tool_function_params)
 
                 messages: list[dict[str, Any]] = messages + [
@@ -373,43 +445,47 @@ ACTION-SPECIFIC REQUIREMENTS:
                         ),
                     },
                 ]
-            match model:
-                case m if m == self.valves.WRITER_MODEL:
+            if model in [self.valves.WRITER_MODEL, self.valves.CODER_MODEL]:
+                if tools:
+                    action_model_response = await self.get_completion(
+                        prompt=messages,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        model=(
+                            self.valves.ACTION_MODEL
+                            if self.valves.ACTION_MODEL
+                            else self.valves.MODEL
+                        ),
+                        tools=tools,
+                        action_results=action_results,
+                    )
+
+                    specialist_type = (
+                        "creative writing specialist"
+                        if model == self.valves.WRITER_MODEL
+                        else "coding specialist"
+                    )
+                    task_focus = (
+                        "engaging, well-structured content that matches the requested style"
+                        if model == self.valves.WRITER_MODEL
+                        else "clean, well-documented code that addresses the original task requirements"
+                    )
+
+                    enhanced_messages = messages + [
+                        {"role": "assistant", "content": action_model_response},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Now, as a {specialist_type}, synthesize the above information and tool outputs "
+                                f"into a complete {'narrative' if model == self.valves.WRITER_MODEL else 'coding solution'}. "
+                                f"Focus on generating {task_focus}."
+                            ),
+                        },
+                    ]
                     tools = {}
-                    
-                case m if m == self.valves.CODER_MODEL:
-                    # For coder model, if tools are needed, let ACTION_MODEL handle tool calls first
-                    if tools:
-                        # First, let ACTION_MODEL handle the tool calls
-                        action_model_response = await self.get_completion(
-                            prompt=messages,
-                            temperature=temperature,
-                            top_k=top_k,
-                            top_p=top_p,
-                            model=self.valves.ACTION_MODEL if self.valves.ACTION_MODEL else self.valves.MODEL,
-                            tools=tools,
-                        )
-                        
-                        # Now let the CODER_MODEL synthesize the final response without tools
-                        enhanced_messages = messages + [
-                            {"role": "assistant", "content": action_model_response},
-                            {
-                                "role": "user", 
-                                "content": (
-                                    "Now, as a coding specialist, synthesize the above information and tool outputs "
-                                    "into a complete coding solution. Focus on generating clean, well-documented code "
-                                    "that addresses the original task requirements."
-                                )
-                            }
-                        ]
-                        tools = {}  # Clear tools for coder model
-                        messages = enhanced_messages
-                    else:
-                        tools = {}
-                        
-                case _:  # ACTION_MODEL or any other model
-                    pass  # Keep tools as is
-                    
+                    messages = enhanced_messages
+
             tool_response = await self.get_completion(
                 prompt=messages,
                 temperature=temperature,
@@ -417,6 +493,7 @@ ACTION-SPECIFIC REQUIREMENTS:
                 top_p=top_p,
                 model=model,
                 tools=tools,
+                action_results=action_results,
             )
 
             return tool_response
@@ -489,13 +566,15 @@ PLANNING PRINCIPLES (Follow these strictly!):
 1.  **Dependency Graph (DAG):** Create a logical flow of actions. "Write Chapter 2" MUST depend on "Write Chapter 1". "Generate Illustration for Chapter 1" MUST depend on "Write Chapter 1".
 2.  **Action Design:**
     - Each action must be a single, clear, and independently executable task.
+    - **Separate Tool Operations:** Break workflows into distinct steps where post-processing tools (saving, file operations) are separate actions. Example: "Search Web" → "Write Summary" → "Save to File" (3 separate actions, not combined).
     - For each action, specify the model to use in the 'model' field:
-        - For tool-based actions (e.g., type: 'tool', 'research'), use the TASK/ACTION model: '{self.valves.ACTION_MODEL}'
-        - For generative text actions (e.g., type: 'text', 'documentation'), use the WRITER model: '{self.valves.WRITER_MODEL}'
-        - For code/script generation actions (e.g., type: 'code', 'script'), use the CODER model: '{self.valves.CODER_MODEL}'
+        - For tool-based actions (e.g., type: 'tool', 'research', 'save'), use the TASK/ACTION model: '{self.valves.ACTION_MODEL}'
+        - For generative text actions (e.g., type: 'text', 'documentation'), use the WRITER model: '{self.valves.WRITER_MODEL}' (Note: These should NOT include tool calls for saving - create separate save actions)
+        - For code/script generation actions (e.g., type: 'code', 'script'), use the CODER model: '{self.valves.CODER_MODEL}' (Note: These should NOT include tool calls for saving - create separate save actions)
 
 3.  **Final Synthesis Action (CRITICAL - READ CAREFULLY):**
     - The very last action in the plan MUST have the `id` set to `"final_synthesis"`.
+    - **NO OTHER ACTIONS can depend on or come after the final_synthesis action.**
     - The `type` for this action should be `"synthesis"`.
     - **This is a TEMPLATE action, not a generative one.**
     - The `description` for this action MUST be the final document structure, using placeholders in the format `{{action_id}}` where the output of a dependency should go.
@@ -545,6 +624,75 @@ PLANNING PRINCIPLES (Follow these strictly!):
       }}
       ```
 
+4.  **Tool Separation Examples:**
+    - **CORRECT Workflow (Separate Steps):**
+      ```json
+      [
+        {{
+          "id": "search_web",
+          "type": "tool",
+          "description": "Search the web for information about X",
+          "tool_ids": ["web_search_tool"],
+          "model": "{self.valves.ACTION_MODEL}"
+        }},
+        {{
+          "id": "write_summary",
+          "type": "text", 
+          "description": "Write a comprehensive summary of the web search results",
+          "dependencies": ["search_web"],
+          "model": "{self.valves.WRITER_MODEL}"
+        }},
+        {{
+          "id": "save_summary",
+          "type": "tool",
+          "description": "Save the written summary to a file",
+          "tool_ids": ["file_save_tool"],
+          "dependencies": ["write_summary"],
+          "model": "{self.valves.ACTION_MODEL}"
+        }}
+      ]
+      ```
+    
+    - **WRONG Workflow (Mixed Responsibilities):**
+      ```json
+      [
+        {{
+          "id": "search_and_write",
+          "type": "text",
+          "description": "Search web and write summary and save it",
+          "tool_ids": ["web_search_tool", "file_save_tool"],
+          "model": "{self.valves.WRITER_MODEL}"
+          // WRONG: Writer model shouldn't handle tool calls for saving
+        }}
+      ]
+      ```
+
+5.  **Action Output References (NEW FEATURE):**
+    - Actions can reference previous action outputs directly in tool parameters using "@action_id" syntax
+    - This allows efficient passing of complete outputs to tools without manual copying
+    - **Examples:**
+      ```json
+      {{
+        "id": "save_content",
+        "type": "tool",
+        "description": "Save the generated content to a file",
+        "tool_ids": ["file_save_tool"],
+        "params": {{
+          "content": "@write_article",  // This will be replaced with the complete output of the "write_article" action
+          "filename": "article.txt"
+        }},
+        "dependencies": ["write_article"],
+        "model": "{self.valves.ACTION_MODEL}"
+      }}
+      ```
+    - **When to use @action_id references:**
+      - For file operations that need to save complete outputs from previous actions
+      - For tool calls that need exact content from previous steps
+      - When you want the agent to pass content "as is" without manual processing
+    - **Important notes:**
+      - If the referenced output contains extra text that the tool doesn't need, the agent can either extract what's needed manually or use additional processing tools
+      - The "@action_id" reference gives the agent access to the COMPLETE output, allowing them to handle it appropriately
+
 OUTPUT FORMAT:
 Return ONLY a JSON object with the exact structure below. Do not add any other text, explanations, or markdown.
 
@@ -577,7 +725,11 @@ Return ONLY a JSON object with the exact structure below. Do not add any other t
         for attempt in range(self.valves.MAX_RETRIES):
             try:
                 result = await self.get_completion(
-                    prompt=messages, temperature=0.8, top_k=60, top_p=0.95
+                    prompt=messages,
+                    temperature=0.8,
+                    top_k=60,
+                    top_p=0.95,
+                    action_results={},
                 )
                 clean_result = clean_json_response(result)
                 plan_dict = json.loads(clean_result)
@@ -677,6 +829,50 @@ Return ONLY a JSON object with the exact structure below. Do not add any other t
                         ]
                         raise ValueError(msg)
 
+                final_synthesis_index = next(
+                    (
+                        i
+                        for i, a in enumerate(plan.actions)
+                        if a.id == "final_synthesis"
+                    ),
+                    None,
+                )
+                if final_synthesis_index is not None:
+
+                    if final_synthesis_index != len(plan.actions) - 1:
+                        msg = (
+                            f"The 'final_synthesis' action must be the last action in the plan. "
+                            f"Currently it's at position {final_synthesis_index + 1} out of {len(plan.actions)} actions."
+                        )
+                        messages += [
+                            {
+                                "role": "assistant",
+                                "content": f"previous attempt: {clean_result}",
+                            },
+                            {"role": "user", "content": f"error:: {msg}"},
+                        ]
+                        raise ValueError(msg)
+
+                    actions_depending_on_final = [
+                        a.id
+                        for a in plan.actions
+                        if "final_synthesis" in a.dependencies
+                    ]
+                    if actions_depending_on_final:
+                        msg = (
+                            f"No actions can depend on 'final_synthesis'. "
+                            f"Found actions depending on it: {actions_depending_on_final}. "
+                            f"The 'final_synthesis' action must be the absolute final step."
+                        )
+                        messages += [
+                            {
+                                "role": "assistant",
+                                "content": f"previous attempt: {clean_result}",
+                            },
+                            {"role": "user", "content": f"error:: {msg}"},
+                        ]
+                        raise ValueError(msg)
+
                 return plan
             except Exception as e:
                 logger.error(
@@ -719,6 +915,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
             temperature=0.7,
             top_k=40,
             top_p=0.8,
+            action_results={},
         )
         return enhanced_requirements
 
@@ -812,7 +1009,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                         self.__user__,
                         extra_params,
                     )
-                    
+
                     execution_model = (
                         action.model
                         if action.model
@@ -822,7 +1019,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                             else self.valves.MODEL
                         )
                     )
-                    
+
                     system_prompt = self.get_system_prompt_for_model(
                         action, step_number, context, requirements, execution_model
                     )
@@ -836,6 +1033,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                         top_p=0.95,
                         model=execution_model,
                         tools=tools,
+                        action_results=results,
                     )
 
                     await self.emit_message(response)
@@ -1007,6 +1205,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 temperature=0.4,
                 top_k=40,
                 top_p=0.9,
+                action_results={},
             )
 
             clean_response = clean_json_response(analysis_response)
@@ -1212,7 +1411,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         user: dict[str, Any] | None = None,
     ) -> None | str:
         model = self.valves.MODEL
-        self.__user__ =  Users.get_user_by_id(__user__["id"])
+        self.__user__ = Users.get_user_by_id(__user__["id"])
         self.__request__ = __request__
         self.user = __user__
         if __task__ and __task__ != TASKS.DEFAULT:
