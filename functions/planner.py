@@ -128,21 +128,100 @@ class Pipe:
             default="",
             description="Model to use for text/documentation actions (e.g., RP/Writer model)",
         )
+        CODER_MODEL: str = Field(
+            default="",
+            description="Model to use for code/script generation actions (e.g., Coding specialized model)",
+        )
+        WRITER_SYSTEM_PROMPT: str = Field(
+            default="""You are a Creative Writing Agent, specialized in generating high-quality narrative content, dialogue, and creative text. Your role is to focus on producing engaging, well-written content that matches the requested style and tone.
+
+CREATIVE WRITING GUIDELINES:
+1. Focus on creating compelling, well-structured narrative content
+2. Maintain consistent character voices and narrative style
+3. Use vivid descriptions and engaging dialogue when appropriate
+4. Follow the specified genre, tone, and style requirements
+5. Create content that flows naturally and maintains reader engagement
+6. Pay attention to pacing, character development, and plot progression
+7. Adapt your writing style to match the context (formal, casual, creative, etc.)
+8. Never break character or mention that you are an AI
+9. Produce complete, polished content ready for use""",
+            description="System prompt template for the Writer Model",
+        )
+        CODER_SYSTEM_PROMPT: str = Field(
+            default="""You are a Coding Specialist Agent, expert in software development, scripting, and technical implementation. Your role is to generate clean, efficient, and well-documented code solutions.
+
+CODING GUIDELINES:
+1. Write clean, readable, and well-commented code
+2. Follow best practices and conventions for the target language
+3. Include proper error handling and validation where appropriate
+4. Make code modular and reusable when possible
+5. Provide complete, runnable code with no placeholders or TODOs
+6. Include necessary imports, dependencies, and setup instructions
+7. Add inline comments to explain complex logic
+8. Consider security, performance, and maintainability
+9. Test your code logic mentally before providing the solution
+10. Structure code clearly with proper indentation and organization""",
+            description="System prompt template for the Coder Model",
+        )
+        ACTION_SYSTEM_PROMPT: str = Field(
+            default="""You are the Action Agent, an expert at executing specific tasks within a larger plan. Your role is to focus solely on executing the current step, using ONLY the available tools and context provided.
+
+CRITICAL GUIDELINES:
+1. Focus EXCLUSIVELY on this step's task - do not try to solve the overall goal
+2. Use ONLY the outputs from listed dependencies - do not reference other steps
+3. When using tools:
+   - Use EXACTLY as specified in the tool documentation
+   - Process and format the tool output appropriately for this step
+4. Produce a complete, self-contained output that can be used by dependent steps
+5. Never ask for clarification - work with what is provided
+6. Never output an empty message
+7. Remember that tool outputs are only visible to you - include relevant results in your response""",
+            description="System prompt template for the Action Model",
+        )
         ACTION_PROMPT_REQUIREMENTS_TEMPLATE: str = Field(
             default="""Requirements:
-1. Use the specified tool(s) for this action if provided. Do NOT default to code/scripts unless the user explicitly requests it.
-2. The output must directly achieve the step goal and be actionable.
-3. For tool-based actions:
-   - Use the tool(s) as intended and provide clear, relevant output.
-4. For code actions (only if requested):
-   - Code must be complete, runnable, and all variables defined.
-   - No placeholder functions or TODO comments.
-5. For text/documentation actions:
-   - Be specific, actionable, and include all relevant details.
-6. For actions with dependencies, use ONLY the outputs of the listed dependencies.
-7. Do not ask for clarifications; just perform the action as described.
-            """,
-            description="General requirements for task completions, used in ALL action steps, change it to make the outputs of the task align to your general goal",
+1. Focus EXCLUSIVELY on this specific action - do not attempt to solve the entire goal
+2. Use ONLY the provided context and dependencies - do not reference other steps
+3. Produce output that directly achieves this step's objective
+4. Your response is the complete output for this action step
+5. Do not ask for clarifications; work with the information provided
+6. Never output an empty response""",
+            description="General requirements template applied to ALL actions",
+        )
+        WRITER_REQUIREMENTS_SUFFIX: str = Field(
+            default="""
+WRITER-SPECIFIC REQUIREMENTS:
+- Focus ONLY on this specific action - do not attempt to complete the entire goal
+- Create engaging, well-structured content that matches the requested style
+- Maintain consistent voice and tone throughout
+- Focus on narrative flow and reader engagement
+- Produce polished, publication-ready content for this action step only
+- Do not break character or reference being an AI
+- Your response is the complete output for this writing action""",
+            description="Additional requirements specifically for Writer Model actions",
+        )
+        CODER_REQUIREMENTS_SUFFIX: str = Field(
+            default="""
+CODER-SPECIFIC REQUIREMENTS:
+- Focus ONLY on this specific action - do not attempt to solve the entire goal
+- Write clean, readable, and well-commented code for this action step only
+- Include all necessary imports and dependencies
+- Provide complete, runnable code with no placeholders or TODOs
+- Follow best practices and conventions for the target language
+- Include error handling where appropriate
+- Add inline comments for complex logic
+- Your response is the complete code output for this action""",
+            description="Additional requirements specifically for Coder Model actions",
+        )
+        ACTION_REQUIREMENTS_SUFFIX: str = Field(
+            default="""
+ACTION-SPECIFIC REQUIREMENTS:
+- Use the specified tool(s) exactly as documented
+- Process and synthesize tool outputs appropriately
+- Provide clear, actionable results that can be used by dependent steps
+- Include relevant details from tool outputs in your response
+- Do not simply repeat tool outputs - synthesize them meaningfully""",
+            description="Additional requirements specifically for Action Model (tool-using) actions",
         )
         AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT: bool = Field(
             default=False,
@@ -166,6 +245,42 @@ class Pipe:
 
     def pipes(self) -> list[dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
+
+    def get_system_prompt_for_model(self, action: Action, step_number: int, context: dict[str, Any], requirements: str, model: str) -> str:
+        """Generate model-specific system prompts based on the model type."""
+        
+        # Add model-specific requirements suffix
+        enhanced_requirements = requirements
+        match model:
+            case m if m == self.valves.WRITER_MODEL:
+                enhanced_requirements += self.valves.WRITER_REQUIREMENTS_SUFFIX
+            case m if m == self.valves.CODER_MODEL:
+                enhanced_requirements += self.valves.CODER_REQUIREMENTS_SUFFIX
+            case _:  # ACTION_MODEL (default)
+                enhanced_requirements += self.valves.ACTION_REQUIREMENTS_SUFFIX
+        
+        base_context = f"""
+    TASK CONTEXT:
+    - Step {step_number} Description: {action.description}
+    - Available Tools: {action.tool_ids if action.tool_ids else "None"}
+    
+    DEPENDENCIES AND INPUTS:
+    - Parameters: {json.dumps(action.params)}
+    - Input from Previous Steps: {json.dumps(context)}
+
+    EXECUTION REQUIREMENTS:
+    {enhanced_requirements}
+"""
+        
+        match model:
+            case m if m == self.valves.WRITER_MODEL:
+                return f"SYSTEM: {self.valves.WRITER_SYSTEM_PROMPT}\n{base_context}"
+            
+            case m if m == self.valves.CODER_MODEL:
+                return f"SYSTEM: {self.valves.CODER_SYSTEM_PROMPT}\n{base_context}"
+            
+            case _:  # ACTION_MODEL (default)
+                return f"SYSTEM: {self.valves.ACTION_SYSTEM_PROMPT}\n{base_context}"
 
     async def get_completion(
         self,
@@ -258,8 +373,43 @@ class Pipe:
                         ),
                     },
                 ]
-            if model == self.valves.WRITER_MODEL:
-                tools = {}
+            match model:
+                case m if m == self.valves.WRITER_MODEL:
+                    tools = {}
+                    
+                case m if m == self.valves.CODER_MODEL:
+                    # For coder model, if tools are needed, let ACTION_MODEL handle tool calls first
+                    if tools:
+                        # First, let ACTION_MODEL handle the tool calls
+                        action_model_response = await self.get_completion(
+                            prompt=messages,
+                            temperature=temperature,
+                            top_k=top_k,
+                            top_p=top_p,
+                            model=self.valves.ACTION_MODEL if self.valves.ACTION_MODEL else self.valves.MODEL,
+                            tools=tools,
+                        )
+                        
+                        # Now let the CODER_MODEL synthesize the final response without tools
+                        enhanced_messages = messages + [
+                            {"role": "assistant", "content": action_model_response},
+                            {
+                                "role": "user", 
+                                "content": (
+                                    "Now, as a coding specialist, synthesize the above information and tool outputs "
+                                    "into a complete coding solution. Focus on generating clean, well-documented code "
+                                    "that addresses the original task requirements."
+                                )
+                            }
+                        ]
+                        tools = {}  # Clear tools for coder model
+                        messages = enhanced_messages
+                    else:
+                        tools = {}
+                        
+                case _:  # ACTION_MODEL or any other model
+                    pass  # Keep tools as is
+                    
             tool_response = await self.get_completion(
                 prompt=messages,
                 temperature=temperature,
@@ -342,6 +492,7 @@ PLANNING PRINCIPLES (Follow these strictly!):
     - For each action, specify the model to use in the 'model' field:
         - For tool-based actions (e.g., type: 'tool', 'research'), use the TASK/ACTION model: '{self.valves.ACTION_MODEL}'
         - For generative text actions (e.g., type: 'text', 'documentation'), use the WRITER model: '{self.valves.WRITER_MODEL}'
+        - For code/script generation actions (e.g., type: 'code', 'script'), use the CODER model: '{self.valves.CODER_MODEL}'
 
 3.  **Final Synthesis Action (CRITICAL - READ CAREFULLY):**
     - The very last action in the plan MUST have the `id` set to `"final_synthesis"`.
@@ -437,6 +588,8 @@ Return ONLY a JSON object with the exact structure below. Do not add any other t
                     if "model" not in action:
                         if action.get("type") in ["text", "documentation", "synthesis"]:
                             action["model"] = self.valves.WRITER_MODEL
+                        elif action.get("type") in ["code", "script"]:
+                            action["model"] = self.valves.CODER_MODEL
                         else:
                             action["model"] = self.valves.ACTION_MODEL
 
@@ -659,30 +812,20 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                         self.__user__,
                         extra_params,
                     )
-                    system_prompt = f"""SYSTEM: You are the Action Agent, an expert at executing specific tasks within a larger plan. Your role is to focus solely on executing the current step, using ONLY the available tools and context provided.
-
-    TASK CONTEXT:
-    - Step {step_number} Description: {action.description}
-    - Available Tools: {action.tool_ids if action.tool_ids else "None"}
-    
-    DEPENDENCIES AND INPUTS:
-    - Parameters: {json.dumps(action.params)}
-    - Input from Previous Steps: {json.dumps(context)}
-
-    EXECUTION REQUIREMENTS:
-    {requirements}
-
-    CRITICAL GUIDELINES:
-    1. Focus EXCLUSIVELY on this step's task - do not try to solve the overall goal
-    2. Use ONLY the outputs from listed dependencies - do not reference other steps
-    3. When using tools:
-       - Use EXACTLY as specified in the tool documentation
-       - Process and format the tool output appropriately for this step
-    4. Produce a complete, self-contained output that can be used by dependent steps
-    5. Never ask for clarification - work with what is provided
-    6. Never output an empty message
-    7. Remember that tool outputs are only visible to you - include relevant results in your response
-    """
+                    
+                    execution_model = (
+                        action.model
+                        if action.model
+                        else (
+                            self.valves.ACTION_MODEL
+                            if (self.valves.ACTION_MODEL != "")
+                            else self.valves.MODEL
+                        )
+                    )
+                    
+                    system_prompt = self.get_system_prompt_for_model(
+                        action, step_number, context, requirements, execution_model
+                    )
                     response = await self.get_completion(
                         prompt=[
                             {"role": "system", "content": system_prompt},
@@ -691,15 +834,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                         temperature=0.9,
                         top_k=70,
                         top_p=0.95,
-                        model=(
-                            action.model
-                            if action.model
-                            else (
-                                self.valves.ACTION_MODEL
-                                if (self.valves.ACTION_MODEL != "")
-                                else self.valves.MODEL
-                            )
-                        ),
+                        model=execution_model,
                         tools=tools,
                     )
 
