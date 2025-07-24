@@ -11,11 +11,12 @@ Transform your Open WebUI instance into a powerful AI workstation with this comp
 
 ## ✨ What's Inside
 
-This repository contains **14+ specialized tools and functions** designed to enhance your Open WebUI experience:
+This repository contains **15+ specialized tools and functions** designed to enhance your Open WebUI experience:
 
 ### 🛠️ **Tools**
 - **arXiv Search** - Academic paper discovery (no API key required!)
 - **Perplexica Search** - Web search using Perplexica API with citations
+- **Pexels Media Search** - High-quality photos and videos from Pexels API
 - **Native Image Generator** - Direct Open WebUI image generation with Ollama model management
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI ACE Step Audio** - Advanced music generation
@@ -86,27 +87,28 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 
 1. [arXiv Search Tool](#arxiv-search-tool)
 2. [Perplexica Search Tool](#perplexica-search-tool)
-3. [Native Image Generator](#native-image-generator)
-4. [Hugging Face Image Generator](#hugging-face-image-generator)
-5. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
-6. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-7. [Planner Agent v2](#planner-agent-v2)
-8. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-9. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-10. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-11. [Mopidy Music Controller](#mopidy-music-controller)
-12. [Letta Agent Pipe](#letta-agent-pipe)
-13. [MCP Pipe](#mcp-pipe)
-14. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-15. [Semantic Router Filter](#semantic-router-filter)
-16. [Full Document Filter](#full-document-filter)
-17. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-18. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-19. [Installation](#installation)
-20. [Contributing](#contributing)
-21. [License](#license)
-22. [Credits](#credits)
-23. [Support](#support)
+3. [Pexels Media Search Tool](#pexels-media-search-tool)
+4. [Native Image Generator](#native-image-generator)
+5. [Hugging Face Image Generator](#hugging-face-image-generator)
+6. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
+7. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+8. [Planner Agent v2](#planner-agent-v2)
+9. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+10. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+11. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+12. [Mopidy Music Controller](#mopidy-music-controller)
+13. [Letta Agent Pipe](#letta-agent-pipe)
+14. [MCP Pipe](#mcp-pipe)
+15. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+16. [Semantic Router Filter](#semantic-router-filter)
+17. [Full Document Filter](#full-document-filter)
+18. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+19. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+20. [Installation](#installation)
+21. [Contributing](#contributing)
+22. [License](#license)
+23. [Credits](#credits)
+24. [Support](#support)
 
 ---
 
@@ -161,6 +163,45 @@ Search the web for factual information, current events, or specific topics using
 - **Model Flexibility**: Configurable chat and embedding models
 - **Real-time Status**: Progress updates during search execution
 - **Source Tracking**: Individual source citations with metadata
+
+---
+
+### Pexels Media Search Tool
+
+### Description
+Search and retrieve high-quality photos and videos from the Pexels API. This tool provides access to Pexels' extensive collection of free stock photos and videos, with comprehensive search capabilities, automatic citation generation, and direct image display in chat. Perfect for finding professional-quality media for presentations, content creation, or creative projects.
+
+### Configuration
+- `PEXELS_API_KEY` (str): Free Pexels API key from https://www.pexels.com/api/ (required)
+- `DEFAULT_PER_PAGE` (int): Default number of results per search (default: 5, recommended for LLMs)
+- `MAX_RESULTS_PER_PAGE` (int): Maximum allowed results per page (default: 15, prevents overwhelming LLMs)
+- `DEFAULT_ORIENTATION` (str): Default photo orientation - "all", "landscape", "portrait", or "square" (default: "all")
+- `DEFAULT_SIZE` (str): Default minimum photo size - "all", "large" (24MP), "medium" (12MP), or "small" (4MP) (default: "all")
+
+**Prerequisites**: Get a free API key from [Pexels API](https://www.pexels.com/api/) and configure it in the tool's Valves settings.
+
+### Usage
+- **Photo Search Example:**
+  ```python
+  Search for photos of "modern office workspace"
+  ```
+- **Video Search Example:**
+  ```python
+  Search for videos of "ocean waves at sunset"
+  ```
+- **Curated Photos Example:**
+  ```python
+  Get curated photos from Pexels
+  ```
+
+### Features
+- **Three Search Functions**: `search_photos`, `search_videos`, and `get_curated_photos`
+- **Direct Image Display**: Images are automatically formatted with markdown for immediate display in chat
+- **Advanced Filtering**: Filter by orientation, size, color, and quality
+- **Attribution Support**: Automatic citation generation with photographer credits
+- **Rate Limit Handling**: Built-in error handling for API limits and invalid keys
+- **LLM Optimized**: Results are limited and formatted to prevent overwhelming language models
+- **Real-time Status**: Progress updates during search execution
 
 ---
 
