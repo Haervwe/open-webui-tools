@@ -104,7 +104,7 @@ Now, enhance the following prompt:
         self.__current_event_emitter__ = __event_emitter__
         self.__request__ = __request__
         self.__model__ = __model__
-        self.__user__ = User(**__user__) if isinstance(__user__, dict) else __user__
+        self.__user__ =  Users.get_user_by_id(__user__["id"]) if __user__ else None
         if __task__ and __task__ != TASKS.DEFAULT:
             return body
         # Fetch available models and log their relevant details
