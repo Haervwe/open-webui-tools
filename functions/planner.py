@@ -3,9 +3,10 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.0.2
+version: 2.0.4
 """
 
+import re
 import logging
 import json
 import asyncio
@@ -20,8 +21,6 @@ from open_webui.utils.tools import get_tools  # type: ignore
 
 from open_webui.models.users import Users, User
 from open_webui.models.tools import Tools
-
-import re
 
 
 name = "Planner_2"
@@ -39,15 +38,33 @@ def clean_thinking_tags(message: str) -> str:
 
 
 def clean_json_response(response_text: str) -> str:
-
     start = response_text.find("{")
     end = response_text.rfind("}") + 1
 
     if start == -1 or end == -1:
-
         return "{}"
 
     return response_text[start:end]
+
+
+def parse_structured_output(response: str) -> dict[str, str]:
+    """
+    Parse agent output into structured format {"primary_output": str, "supporting_details": str}.
+    If the response is not in the expected JSON format, treat the entire response as 'primary_output'.
+    """
+    try:
+        clean_response = clean_json_response(response)
+        parsed = json.loads(clean_response)
+
+        if isinstance(parsed, dict) and "primary_output" in parsed:
+            return {
+                "primary_output": str(parsed.get("primary_output", "")),
+                "supporting_details": str(parsed.get("supporting_details", "")),
+            }
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return {"primary_output": response, "supporting_details": ""}
 
 
 def setup_logger():
@@ -74,14 +91,21 @@ class Action(BaseModel):
     id: str
     type: str
     description: str
-    params: Dict[str, str] = Field(default_factory=dict)
+    params: Dict[str, Any] = Field(default_factory=dict)
     dependencies: List[str] = Field(default_factory=list)
     tool_ids: Optional[list[str]] = None
     output: Optional[Dict[str, str]] = None
     status: str = "pending"  # pending, in_progress, completed, failed, warning
     start_time: Optional[str] = None
     end_time: Optional[str] = None
-    model: Optional[str] = None  # NEW: model to use for this action
+    model: Optional[str] = None
+    tool_calls: List[str] = Field(
+        default_factory=list,
+        description="Names of tools that were actually called during execution",
+    )
+    tool_results: Dict[str, str] = Field(
+        default_factory=dict, description="Results from tool calls, keyed by tool name"
+    )
 
 
 class Plan(BaseModel):
@@ -144,7 +168,11 @@ CREATIVE WRITING GUIDELINES:
 6. Pay attention to pacing, character development, and plot progression
 7. Adapt your writing style to match the context (formal, casual, creative, etc.)
 8. Never break character or mention that you are an AI
-9. Produce complete, polished content ready for use""",
+9. Produce complete, polished content ready for use
+
+FIELD-SPECIFIC REQUIREMENTS:
+- "primary_output": The complete written content (full articles, stories, chapters, documentation, etc.) ready for immediate use
+- "supporting_details": Writing process notes, style considerations, or additional context about the content""",
             description="System prompt template for the Writer Model",
         )
         CODER_SYSTEM_PROMPT: str = Field(
@@ -160,7 +188,11 @@ CODING GUIDELINES:
 7. Add inline comments to explain complex logic
 8. Consider security, performance, and maintainability
 9. Test your code logic mentally before providing the solution
-10. Structure code clearly with proper indentation and organization""",
+10. Structure code clearly with proper indentation and organization
+
+FIELD-SPECIFIC REQUIREMENTS:
+- "primary_output": The complete functional code (full scripts, functions, classes, etc.) ready to run
+- "supporting_details": Code explanations, setup instructions, dependency notes, or implementation details""",
             description="System prompt template for the Coder Model",
         )
         ACTION_SYSTEM_PROMPT: str = Field(
@@ -178,7 +210,8 @@ CRITICAL GUIDELINES:
 4. Produce a complete, self-contained output that can be used by dependent steps
 5. Never ask for clarification - work with what is provided
 6. Never output an empty message
-7. Remember that tool outputs are only visible to you - include relevant results in your response""",
+7. Remember that tool outputs are only visible to you - include relevant results in your response
+8. Always attach images in final responses as a markdown embedded images or other markdown embedable content with the ![caption](<image uri>) or [title](<hyperlink>)""",
             description="System prompt template for the Action Model",
         )
         ACTION_PROMPT_REQUIREMENTS_TEMPLATE: str = Field(
@@ -186,9 +219,8 @@ CRITICAL GUIDELINES:
 1. Focus EXCLUSIVELY on this specific action - do not attempt to solve the entire goal
 2. Use ONLY the provided context and dependencies - do not reference other steps
 3. Produce output that directly achieves this step's objective
-4. Your response is the complete output for this action step
-5. Do not ask for clarifications; work with the information provided
-6. Never output an empty response""",
+4. Do not ask for clarifications; work with the information provided
+5. Never output an empty response""",
             description="General requirements template applied to ALL actions",
         )
         WRITER_REQUIREMENTS_SUFFIX: str = Field(
@@ -196,11 +228,21 @@ CRITICAL GUIDELINES:
 WRITER-SPECIFIC REQUIREMENTS:
 - Focus ONLY on this specific action - do not attempt to complete the entire goal
 - Create engaging, well-structured content that matches the requested style
+- Use vivid descriptions and maintain character voices
+- Incorporate sensory details to enhance immersion
+- Include internal thoughts and feelings of characters
+- Be very descriptive and creative
+- Use metaphors and similes to create vivid imagery
+- Focus on primary_output field and dont shy away on length
 - Maintain consistent voice and tone throughout
 - Focus on narrative flow and reader engagement
 - Produce polished, publication-ready content for this action step only
 - Do not break character or reference being an AI
-- Your response is the complete output for this writing action
+- Your response must be a JSON object with "primary_output" and "supporting_details" fields
+- The "primary_output" field must contain the COMPLETE written content, not just a title or description
+- The "supporting_details" fieldwill never be shown to the user is meant for internal agents comunication.
+- DO NOT add placeholder links 
+- DO NOT use the "supporting_details" for more than 150 characters is meant to be just an epigraph to explain
 - DO NOT attempt to save, write to files, or perform any tool operations - those are handled in separate actions""",
             description="Additional requirements specifically for Writer Model actions",
         )
@@ -214,7 +256,10 @@ CODER-SPECIFIC REQUIREMENTS:
 - Follow best practices and conventions for the target language
 - Include error handling where appropriate
 - Add inline comments for complex logic
-- Your response is the complete code output for this action
+- Your response must be a JSON object with "primary_output" and "supporting_details" fields
+- The "primary_output" field must contain the COMPLETE functional code, not just snippets or descriptions
+- The "supporting_details" field will never be shown to the user is meant for internal agents comunication.
+- DO NOT use the "supporting_details" for more than 150 characters is meant to be just an epigraph to explain
 - DO NOT attempt to save, write to files, or perform any tool operations - those are handled in separate actions""",
             description="Additional requirements specifically for Coder Model actions",
         )
@@ -227,7 +272,9 @@ ACTION-SPECIFIC REQUIREMENTS:
 - Include relevant details from tool outputs in your response
 - Do not simply repeat tool outputs - synthesize them meaningfully
 - You can use @action_id references in tool parameters to reference complete outputs from previous actions (e.g., "@search_results" to use the full output from the search_results action)
-- When using @action_id references, the complete output will be automatically substituted - handle any extra text appropriately for your tool's needs""",
+- When using @action_id references, the complete output will be automatically substituted - handle any extra text appropriately for your tool's needs
+- Focus on executing the task with the available tools, not on formatting your response
+- After tool execution, provide a natural, comprehensive response that incorporates the tool results""",
             description="Additional requirements specifically for Action Model (tool-using) actions",
         )
         AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT: bool = Field(
@@ -262,13 +309,11 @@ ACTION-SPECIFIC REQUIREMENTS:
         model: str,
     ) -> str:
         """Generate model-specific system prompts based on the model type."""
-
-        # Add model-specific requirements suffix
         enhanced_requirements = requirements
         match model:
-            case m if m == self.valves.WRITER_MODEL:
+            case self.valves.WRITER_MODEL:
                 enhanced_requirements += self.valves.WRITER_REQUIREMENTS_SUFFIX
-            case m if m == self.valves.CODER_MODEL:
+            case self.valves.CODER_MODEL:
                 enhanced_requirements += self.valves.CODER_REQUIREMENTS_SUFFIX
             case _:  # ACTION_MODEL (default)
                 enhanced_requirements += self.valves.ACTION_REQUIREMENTS_SUFFIX
@@ -281,6 +326,9 @@ ACTION-SPECIFIC REQUIREMENTS:
     DEPENDENCIES AND INPUTS:
     - Parameters: {json.dumps(action.params)}
     - Input from Previous Steps: {json.dumps(context)}
+    
+    NOTE: Previous step results are structured as {{"primary_output": "main_deliverable_content", "supporting_details": "additional_context"}}. 
+    You have access to both fields for context, but focus on using the "primary_output" field which contains the actual deliverable content from previous steps.
 
     EXECUTION REQUIREMENTS:
     {enhanced_requirements}
@@ -304,20 +352,43 @@ ACTION-SPECIFIC REQUIREMENTS:
         top_p: float = 0.9,
         model: str | dict[str, Any] = "",
         tools: dict[str, dict[Any, Any]] = {},
+        format: dict[str, Any] | None = None,
         action_results: dict[str, dict[str, str]] = {},
+        action: Optional[Action] = None,
     ) -> str:
+        system_content = "You are a Helpful agent that does exactly as told and dont ask clarifications"
+        if format is not None:
+            system_content += ". When responding with structured data, ensure your response is valid JSON format without any additional text, markdown formatting, or explanations."
+
         messages = (
             [
                 {
                     "role": "system",
-                    "content": "You are a Helpful agent that does exactly as told and dont ask clarifications",
+                    "content": system_content,
                 },
                 {"role": "user", "content": prompt},
             ]
             if isinstance(prompt, str)
             else prompt
         )
-        __model = model if model and not tools else self.valves.ACTION_MODEL
+
+        if model in [self.valves.WRITER_MODEL, self.valves.CODER_MODEL] and tools:
+            __model = (
+                self.valves.ACTION_MODEL
+                if self.valves.ACTION_MODEL
+                else self.valves.MODEL
+            )
+        else:
+            __model = model if model else self.valves.ACTION_MODEL
+        _tools = (
+            [
+                {"type": "function", "function": tool.get("spec", {})}
+                for tool in tools.values()
+            ]
+            if tools
+            else None
+        )
+
         try:
             form_data: dict[str, Any] = {
                 "model": __model,
@@ -325,15 +396,11 @@ ACTION-SPECIFIC REQUIREMENTS:
                 "temperature": temperature,
                 "top_k": top_k,
                 "top_p": top_p,
-                "tools": (
-                    [
-                        {"type": "function", "function": tool.get("spec", {})}
-                        for tool in tools.values()
-                    ]
-                    if tools
-                    else None
-                ),
+                "tools": _tools,
             }
+            logger.debug(f"{_tools}")
+            if format and not tools:
+                form_data["response_format"] = format
             response: dict[str, Any] = await generate_chat_completion(
                 self.__request__,
                 form_data,
@@ -341,6 +408,7 @@ ACTION-SPECIFIC REQUIREMENTS:
             )
             response_content = str(response["choices"][0]["message"]["content"])
             tool_calls: list[dict[str, Any]] | None = None
+            logger.debug(f"{tool_calls}")
             try:
                 tool_calls = response["choices"][0]["message"].get("tool_calls")
             except Exception:
@@ -351,8 +419,17 @@ ACTION-SPECIFIC REQUIREMENTS:
                 return clean_thinking_tags(response_content)
             for tool_call in tool_calls:
                 tool_function_name = tool_call["function"].get("name", None)
+
+                if action and tool_function_name:
+                    if tool_function_name not in action.tool_calls:
+                        action.tool_calls.append(tool_function_name)
+
                 if tool_function_name not in tools:
                     tool_result = f"{tool_function_name} not in {tools}"
+                    if action:
+                        action.tool_results[tool_function_name] = (
+                            f"ERROR: {tool_result}"
+                        )
                 else:
                     tool = tools[tool_function_name]
                     spec = tool.get("spec", {})
@@ -369,17 +446,17 @@ ACTION-SPECIFIC REQUIREMENTS:
                     }
 
                     def resolve_action_references(
-                        params: dict[str, Any],
+                        params: dict[str, Any | dict[str, Any]] | list[Any],
                     ) -> dict[str, Any]:
                         """Recursively resolve @action_id references in tool parameters"""
-                        resolved_params = {}
+                        resolved_params: dict[str, Any] = {}
                         for key, value in params.items():
                             if isinstance(value, str) and value.startswith("@"):
                                 action_id = value[1:]
                                 if action_id in action_results:
                                     resolved_params[key] = action_results[
                                         action_id
-                                    ].get("result", "")
+                                    ].get("primary_output", "")
                                     logger.info(
                                         f"Resolved @{action_id} reference in parameter '{key}'"
                                     )
@@ -391,7 +468,7 @@ ACTION-SPECIFIC REQUIREMENTS:
                             elif isinstance(value, dict):
                                 resolved_params[key] = resolve_action_references(value)
                             elif isinstance(value, list):
-                                resolved_list = []
+                                resolved_list: list[str] = []
                                 for item in value:
                                     if isinstance(item, str) and item.startswith("@"):
                                         action_id = item[1:]
@@ -411,7 +488,7 @@ ACTION-SPECIFIC REQUIREMENTS:
                                             )
                                     elif isinstance(item, dict):
                                         resolved_list.append(
-                                            resolve_action_references(item)
+                                            str(resolve_action_references(item))
                                         )
                                     else:
                                         resolved_list.append(item)
@@ -428,6 +505,10 @@ ACTION-SPECIFIC REQUIREMENTS:
                     logger.debug(f"{tool_call} , {tool_function_params}")
                     tool_result = await tool_function(**tool_function_params)
 
+                    # Store successful tool result
+                    if action:
+                        action.tool_results[tool_function_name] = str(tool_result)
+
                 messages: list[dict[str, Any]] = messages + [
                     {"role": "assistant", "content": None, "tool_calls": [tool_call]},
                     {
@@ -441,62 +522,49 @@ ACTION-SPECIFIC REQUIREMENTS:
                         "content": (
                             f"The tool '{tool_function_name}' has been executed and returned the output above. "
                             "Now, based on this output and the original task, provide the final, comprehensive answer for this step. "
-                            "Do not simply repeat the tool's output. Synthesize it into a complete response. Your response is the final output for this action."
+                            "Do not simply repeat the tool's output. Synthesize it into a complete response that accomplishes the step's objective. "
+                            "Focus on the actual results and deliverables from the tool execution."
                         ),
                     },
                 ]
+
             if model in [self.valves.WRITER_MODEL, self.valves.CODER_MODEL]:
-                if tools:
-                    action_model_response = await self.get_completion(
-                        prompt=messages,
-                        temperature=temperature,
-                        top_k=top_k,
-                        top_p=top_p,
-                        model=(
-                            self.valves.ACTION_MODEL
-                            if self.valves.ACTION_MODEL
-                            else self.valves.MODEL
-                        ),
-                        tools=tools,
-                        action_results=action_results,
-                    )
-
-                    specialist_type = (
-                        "creative writing specialist"
-                        if model == self.valves.WRITER_MODEL
-                        else "coding specialist"
-                    )
-                    task_focus = (
-                        "engaging, well-structured content that matches the requested style"
-                        if model == self.valves.WRITER_MODEL
-                        else "clean, well-documented code that addresses the original task requirements"
-                    )
-
-                    enhanced_messages = messages + [
-                        {"role": "assistant", "content": action_model_response},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Now, as a {specialist_type}, synthesize the above information and tool outputs "
-                                f"into a complete {'narrative' if model == self.valves.WRITER_MODEL else 'coding solution'}. "
-                                f"Focus on generating {task_focus}."
-                            ),
-                        },
-                    ]
-                    tools = {}
-                    messages = enhanced_messages
-
-            tool_response = await self.get_completion(
-                prompt=messages,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                model=model,
-                tools=tools,
-                action_results=action_results,
-            )
-
-            return tool_response
+                specialist_response = await self.get_completion(
+                    prompt=messages,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    model=model,
+                    action_results=action_results,
+                    format=format,
+                )
+                return specialist_response
+            else:
+                messages[-1][
+                    "content"
+                ] += """                       
+                            OUTPUT FORMAT REQUIREMENT:
+                            Your response MUST be formatted as a JSON object with this exact structure:
+                            {
+                                "primary_output": "The main deliverable content that directly addresses this step's objective and will be used in the final output and by dependent steps. For image generation tasks, this should be the actual image URL or file path. For text content, this should be the actual written content. For code tasks, this should be the complete functional code.",
+                                "supporting_details": "Additional context, process information, technical details, or supplementary information that may help subsequent steps understand how this output was created, but should not appear in the final result."
+                            }
+                            
+                            CRITICAL: The "primary_output" field must contain the ACTUAL deliverable (URLs for images, complete text for writing tasks, functional code for coding tasks, etc.), not just descriptions or titles. This content will be directly used by other steps and in the final synthesis.
+                            OUTPUT STRUCTURE:
+                            - "primary_output": The main deliverable content that will be used in the final output and by dependent steps (actual URLs for images, complete text for writing, functional code for coding, etc.)
+                            - "supporting_details": Additional context, process information, or details useful for subsequent steps but not for final output"""
+                tool_response = await self.get_completion(
+                    prompt=messages,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    model=model,
+                    tools=tools,
+                    action_results=action_results,
+                    action=action,
+                )
+                return tool_response
         except Exception as e:
             logger.error(f"LLM Call Error: {e}")
             raise e
@@ -557,164 +625,193 @@ ACTION-SPECIFIC REQUIREMENTS:
         ]
         """Create an execution plan for the given goal"""
         system_prompt = f"""
-You are an expert planning agent. Your job is to break down a complex goal into a precise, step-by-step plan. The plan must be a Directed Acyclic Graph (DAG).
+You are a planning agent. Break down the goal into a logical sequence of actions that build upon each other.
 
-AVAILABLE TOOLS:
+OUTPUT FORMAT CONSIDERATIONS:
+- ALL action outputs are TEXT or HYPERLINKS (URLs/URIs)
+- Image generation tools return URLs/file paths as text, NOT actual image files
+- Web content, files, and media are represented as hyperlinks/URLs in text format
+- Every action produces text-based output that can be directly included in the final synthesis
+- Do NOT assume any special formatting - treat all outputs as plain text or clickable links
+- Action IDs are indepedent of tools and tool calls, Asign an action_id that correspond with the step specific Goal
+
+FINAL SYNTHESIS REQUIREMENT:
+- The final_synthesis action MUST include ALL RELEVANT content outputs in its template
+- Include actions that produce deliverable content: text, images, code, research results, etc.
+- Do NOT miss important outputs like images, documents, or other key deliverables
+- Exclude only auxiliary/setup actions that don't produce end-user content (like configuration or intermediate processing steps)
+- When in doubt, include the action output rather than exclude it
+
+AVAILABLE TOOLS (use exact tool_id):
 {json.dumps(tools, indent=2)}
 
-PLANNING PRINCIPLES (Follow these strictly!):
-1.  **Dependency Graph (DAG):** Create a logical flow of actions. "Write Chapter 2" MUST depend on "Write Chapter 1". "Generate Illustration for Chapter 1" MUST depend on "Write Chapter 1".
-2.  **Action Design:**
-    - Each action must be a single, clear, and independently executable task.
-    - **Separate Tool Operations:** Break workflows into distinct steps where post-processing tools (saving, file operations) are separate actions. Example: "Search Web" → "Write Summary" → "Save to File" (3 separate actions, not combined).
-    - For each action, specify the model to use in the 'model' field:
-        - For tool-based actions (e.g., type: 'tool', 'research', 'save'), use the TASK/ACTION model: '{self.valves.ACTION_MODEL}'
-        - For generative text actions (e.g., type: 'text', 'documentation'), use the WRITER model: '{self.valves.WRITER_MODEL}' (Note: These should NOT include tool calls for saving - create separate save actions)
-        - For code/script generation actions (e.g., type: 'code', 'script'), use the CODER model: '{self.valves.CODER_MODEL}' (Note: These should NOT include tool calls for saving - create separate save actions)
+CRITICAL UNDERSTANDING - DEPENDENCIES:
+When action B depends on action A, action B will receive A's complete output as context. This means:
+- "Write Chapter 2" depending on "Write Chapter 1" gets the full Chapter 1 text as context
+- "Generate Illustration for Chapter 1" depending on "Write Chapter 1" gets the chapter content to create relevant imagery
+- "Research AI trends" → "Write summary based on research" → "Create presentation from summary" forms a logical chain
 
-3.  **Final Synthesis Action (CRITICAL - READ CAREFULLY):**
-    - The very last action in the plan MUST have the `id` set to `"final_synthesis"`.
-    - **NO OTHER ACTIONS can depend on or come after the final_synthesis action.**
-    - The `type` for this action should be `"synthesis"`.
-    - **This is a TEMPLATE action, not a generative one.**
-    - The `description` for this action MUST be the final document structure, using placeholders in the format `{{action_id}}` where the output of a dependency should go.
-    - DO NOT write instructions like "combine the outputs." Write the actual template.
-    - **NEVER generate code (HTML, Python, etc.) directly in the template.** If code is needed, create a separate action to generate it and reference it with `{{action_id}}`.
-    - **Only use simple placeholders like `{{action_id}}`, NOT nested ones like `{{action_id.field}}` or `{{action_id.output.field}}`.**
-    - If a generative step is required to create the final output, create it as a regular action and link it to the final_synthesis.
-    - When outputs can be used AS IS (for example text generation), use them directly in the template with simple placeholders.
-    - Its `dependencies` list must contain the IDs of the final content actions.
+**EXPLICIT DEPENDENCY RULE**: If an action needs content from previous actions, it MUST explicitly list ALL required actions in its dependencies array. Transitive dependencies are NOT automatically included.
 
-    - **Correct Example for a 2-chapter story with illustrations:**
-      ```json
-      {{
-        "id": "final_synthesis",
-        "type": "synthesis",
-        "description": "## Chapter 1\\n\\n{{write_chapter_1}}\\n\\n*Illustration: {{generate_illustration_1}}*\\n\\n---\\n\\n## Chapter 2\\n\\n{{write_chapter_2}}\\n\\n*Illustration: {{generate_illustration_2}}*",
-        "dependencies": ["write_chapter_1", "generate_illustration_1", "write_chapter_2", "generate_illustration_2"],
-        "model": "" // Model is not needed for a template action
-      }}
-      ```
+TOOL TYPES EXPLAINED:
+- Search tools: For web research, finding information
+- Image generation tools: For creating visual content  
+- File/save tools: For saving content to files or specific formats, break saving in to multiple intermediate steps instead of one aggreated one.
+- API tools: For specific integrations or data processing
+- Always use the exact "tool_id" from the available tools list when an action needs external capabilities in the correct tool_ids field
 
-    - **WRONG Example (DO NOT DO THIS):**
-      ```json
-      {{
-        "id": "final_synthesis",
-        "type": "synthesis",
-        "description": "<html><head><title>{{title}}</title></head><body>{{content}}</body></html>",
-        // This is WRONG because it generates HTML directly in template
-      }}
-      ```
+ACTION TYPES:
+- type="tool": Uses external tools, MUST specify tool_ids
+- type="text": Pure content creation (writing, documentation)
+- type="code": Code generation
+- type="synthesis": Final template action only
 
-    - **CORRECT Example for HTML output:**
-      ```json
-      {{
-        "id": "create_html_page",
-        "type": "text",
-        "description": "Generate an HTML page that displays the research results, song, and image with proper HTML structure",
-        "dependencies": ["research_action", "song_action", "image_action"],
-        "model": "writer_model"
-      }},
-      {{
-        "id": "final_synthesis",
-        "type": "synthesis",
-        "description": "{{create_html_page}}",
-        "dependencies": ["create_html_page"],
-        "model": ""
-      }}
-      ```
+MODEL ASSIGNMENT:
+- Tool actions: 'ACTION_MODEL'
+- Text/writing actions: 'WRITER_MODEL'
+- Code actions: 'CODER_MODEL'
 
-4.  **Tool Separation Examples:**
-    - **CORRECT Workflow (Separate Steps):**
-      ```json
-      [
-        {{
-          "id": "search_web",
-          "type": "tool",
-          "description": "Search the web for information about X",
-          "tool_ids": ["web_search_tool"],
-          "model": "{self.valves.ACTION_MODEL}"
-        }},
-        {{
-          "id": "write_summary",
-          "type": "text", 
-          "description": "Write a comprehensive summary of the web search results",
-          "dependencies": ["search_web"],
-          "model": "{self.valves.WRITER_MODEL}"
-        }},
-        {{
-          "id": "save_summary",
-          "type": "tool",
-          "description": "Save the written summary to a file",
-          "tool_ids": ["file_save_tool"],
-          "dependencies": ["write_summary"],
-          "model": "{self.valves.ACTION_MODEL}"
-        }}
-      ]
-      ```
-    
-    - **WRONG Workflow (Mixed Responsibilities):**
-      ```json
-      [
-        {{
-          "id": "search_and_write",
-          "type": "text",
-          "description": "Search web and write summary and save it",
-          "tool_ids": ["web_search_tool", "file_save_tool"],
-          "model": "{self.valves.WRITER_MODEL}"
-          // WRONG: Writer model shouldn't handle tool calls for saving
-        }}
-      ]
-      ```
+DEPENDENCY EXAMPLES - EXPLICIT LINKING REQUIRED:
+❌ WRONG - No context flow:
+research_ai → write_ch1, write_ch2, write_ch3 (chapters get no context from each other)
 
-5.  **Action Output References (NEW FEATURE):**
-    - Actions can reference previous action outputs directly in tool parameters using "@action_id" syntax
-    - This allows efficient passing of complete outputs to tools without manual copying
-    - **Examples:**
-      ```json
-      {{
-        "id": "save_content",
-        "type": "tool",
-        "description": "Save the generated content to a file",
-        "tool_ids": ["file_save_tool"],
-        "params": {{
-          "content": "@write_article",  // This will be replaced with the complete output of the "write_article" action
-          "filename": "article.txt"
-        }},
-        "dependencies": ["write_article"],
-        "model": "{self.valves.ACTION_MODEL}"
-      }}
-      ```
-    - **When to use @action_id references:**
-      - For file operations that need to save complete outputs from previous actions
-      - For tool calls that need exact content from previous steps
-      - When you want the agent to pass content "as is" without manual processing
-    - **Important notes:**
-      - If the referenced output contains extra text that the tool doesn't need, the agent can either extract what's needed manually or use additional processing tools
-      - The "@action_id" reference gives the agent access to the COMPLETE output, allowing them to handle it appropriately
+❌ WRONG - Implicit/transitive dependencies:
+research_ai → write_ch1 → write_ch2 → write_ch3 
+(ch3 only gets ch2, missing ch1 and research_ai context)
 
-OUTPUT FORMAT:
-Return ONLY a JSON object with the exact structure below. Do not add any other text, explanations, or markdown.
+❌ WRONG - Assuming transitive dependencies work:
+chapter_1 → chapter_2 → chapter_3 
+(chapter_3 WON'T automatically get chapter_1 content, only chapter_2)
 
+✅ CORRECT - Explicit dependencies for all needed context:
+research_ai → write_ch1 
+write_ch2 depends on [research_ai, write_ch1]
+write_ch3 depends on [research_ai, write_ch1, write_ch2] 
+(each chapter EXPLICITLY lists ALL previous actions it needs)
+
+✅ CORRECT - Story development with explicit dependencies:
+research_ai → story_outline → character_sheet → write_ch1
+write_ch2 depends on [story_outline, character_sheet, write_ch1]
+write_ch3 depends on [story_outline, character_sheet, write_ch1, write_ch2]
+
+✅ CORRECT - Book compilation example:
+research → outline → ch1 → ch2 → ch3 → compile_book
+compile_book depends on [outline, ch1, ch2, ch3] (explicitly lists all chapters needed)
+
+REMEMBER: Dependencies are NOT transitive. If action C needs content from action A and action B, 
+it must explicitly list BOTH A and B in its dependencies, even if B already depends on A.
+
+FINAL SYNTHESIS - COMPREHENSIVE TEMPLATING GUIDE:
+The final_synthesis action is a SPECIAL TEMPLATING ACTION that assembles the final output by combining results from previous actions.
+
+CRITICAL TEMPLATING RULES:
+1. **Placeholder Format**: Use {{action_id}} to reference any action's primary_output
+   - Example: {{research_results}} will be replaced with the full primary_output from the "research_results" action
+   - Example: {{chapter_1}} will be replaced with the complete text content from the "chapter_1" action
+   - Example: {{generated_image}} will be replaced with the image URL/path from the "generated_image" action
+
+2. **Template Structure**: The description field contains the FINAL OUTPUT TEMPLATE with placeholders
+   - Use Markdown formatting for proper presentation
+   - Include all relevant content using placeholders
+   - Structure the template as you want the final output to appear
+
+3. **Content Replacement**: During execution, each {{action_id}} placeholder is replaced with:
+   - The complete "primary_output" field from that action's result
+   - This is literal text substitution - what you see is what you get
+   - Images become embedded markdown: ![caption](URL)
+   - Code becomes code blocks if the original action formatted it that way
+   - Text content is inserted as-is
+
+4. **Dependencies**: MUST list ALL actions whose outputs you reference in the template
+   - If template uses {{research}} and {{summary}}, dependencies must include ["research", "summary"]
+   - Missing dependencies will result in placeholder not being replaced
+
+TEMPLATING EXAMPLES:
+
+Example 1 - Simple Report:
+```
 {{
-    "goal": "<original goal / user_prompt>",
+  "id": "final_synthesis",
+  "type": "synthesis",
+  "description": "# Research Report\n\n## Background\n{{background_research}}\n\n## Analysis\n{{data_analysis}}\n\n## Conclusion\n{{conclusions}}",
+  "dependencies": ["background_research", "data_analysis", "conclusions"]
+}}
+```
+
+Example 2 - Blog Post with Images:
+```
+{{
+  "id": "final_synthesis", 
+  "type": "synthesis",
+  "description": "# {{blog_title}}\n\n{{blog_intro}}\n\n![Featured Image]({{hero_image}})\n\n## Main Content\n{{main_content}}\n\n![Supporting Image]({{supporting_image}})\n\n## Conclusion\n{{conclusion}}",
+  "dependencies": ["blog_title", "blog_intro", "hero_image", "main_content", "supporting_image", "conclusion"]
+}}
+```
+
+Example 3 - Code Documentation:
+```
+{{
+  "id": "final_synthesis",
+  "type": "synthesis", 
+  "description": "# {{project_name}} Documentation\n\n## Overview\n{{overview}}\n\n## Installation\n```bash\n{{installation_commands}}\n```\n\n## Code\n```python\n{{main_code}}\n```\n\n## Usage Examples\n{{usage_examples}}",
+  "dependencies": ["project_name", "overview", "installation_commands", "main_code", "usage_examples"]
+}}
+```
+
+Example 4 - Multi-Chapter Story:
+```
+{{
+  "id": "final_synthesis",
+  "type": "synthesis",
+  "description": "# {{story_title}}\n\n{{story_intro}}\n\n## Chapter 1\n{{chapter_1}}\n\n## Chapter 2\n{{chapter_2}}\n\n## Chapter 3\n{{chapter_3}}\n\n## Epilogue\n{{epilogue}}",
+  "dependencies": ["story_title", "story_intro", "chapter_1", "chapter_2", "chapter_3", "epilogue"]
+}}
+```
+
+TEMPLATE FORMATTING TIPS:
+- Use `\n\n` for paragraph breaks in the description string
+- Use `\n` for single line breaks
+- Include proper Markdown headers (#, ##, ###) for structure  
+- For code blocks, use: `\n```language\n{{code_action}}\n```\n`
+- For images, use: `![Description]({{image_action}})`
+- For links, use: `[Link Text]({{url_action}})`
+
+WHAT GETS REPLACED:
+- {{action_id}} → Complete primary_output content from that action
+- If action_id produced an image URL: {{action_id}} → "https://example.com/image.jpg"
+- If action_id produced text content: {{action_id}} → "The complete text content here..."
+- If action_id produced code: {{action_id}} → "def function():\n    return 'code'"
+
+FINAL SYNTHESIS REQUIREMENTS:
+- Must be the LAST action in the plan
+- Must have id="final_synthesis" 
+- Must have type="synthesis"
+- Must include ALL content-producing actions in dependencies
+- Template must reference all important deliverables using {{action_id}} placeholders
+- Model field should be empty "" (no LLM needed for templating)
+
+REMEMBER: The final_synthesis action is a PURE TEMPLATING step - it takes the "primary_output" from each referenced action and substitutes it into the template. No AI generation happens here, just text replacement. Design your template to be the exact final output you want users to see.
+
+JSON OUTPUT:
+{{
+    "goal": "<original goal>",
     "actions": [
         {{
-            "id": "<unique_id>",
-            "type": "<tool|text|research|code|script>",
-            "description": "<SPECIFIC task description, or for final_synthesis, the template>",
-            "tool_ids": ["<tool IDs if using tools>"],
+            "id": "unique_id",
+            "type": "tool|text|code",
+            "description": "Specific task description",
+            "tool_ids": ["exact_tool_id_from_list"], 
             "params": {{}},
-            "dependencies": ["<IDs of parent actions>"],
-            "model": "<model to use for this action>"
+            "dependencies": ["action_ids_this_needs"],
+            "model": "model_name"
         }},
         {{
-        "id": "final_synthesis",
-        "type": "synthesis",
-        "description": "The `description` for this action MUST be the final document structure, using placeholders in the format `{{action_id}}` where the output of a dependency should go, in markdown format for titles.",
-        "dependencies": ["<IDs of actions whos outputs will be used in the template above>"],
-        "model": "" // Model is not needed for a template action
-        }},
+            "id": "final_synthesis",
+            "type": "synthesis",
+            "description": "# Title\\n\\n{{action1}}\\n\\n{{action2}}",
+            "dependencies": ["action1", "action2"],
+            "model": ""
+        }}
     ]
 }}
 """
@@ -724,20 +821,78 @@ Return ONLY a JSON object with the exact structure below. Do not add any other t
         ]
         for attempt in range(self.valves.MAX_RETRIES):
             try:
+                plan_format: dict[str, Any] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "execution_plan",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "goal": {"type": "string"},
+                                "actions": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string"},
+                                            "type": {"type": "string"},
+                                            "description": {"type": "string"},
+                                            "tool_ids": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
+                                            "params": {},
+                                            "dependencies": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
+                                            "model": {"type": "string"},
+                                        },
+                                        "required": [
+                                            "id",
+                                            "type",
+                                            "description",
+                                            "params",
+                                            "dependencies",
+                                            "model",
+                                        ],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                            },
+                            "required": ["goal", "actions"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+
                 result = await self.get_completion(
                     prompt=messages,
                     temperature=0.8,
                     top_k=60,
                     top_p=0.95,
+                    format=plan_format,
                     action_results={},
+                    action=None,
                 )
                 clean_result = clean_json_response(result)
                 plan_dict = json.loads(clean_result)
 
                 actions = plan_dict.get("actions", [])
 
+                model_mapping = {
+                    "ACTION_MODEL": self.valves.ACTION_MODEL,
+                    "WRITER_MODEL": self.valves.WRITER_MODEL,
+                    "CODER_MODEL": self.valves.CODER_MODEL,
+                }
+
                 for action in actions:
-                    if "model" not in action:
+
+                    if action.get("model") in model_mapping:
+                        action["model"] = model_mapping[action["model"]]
+                    elif "model" not in action or not action["model"]:
+
                         if action.get("type") in ["text", "documentation", "synthesis"]:
                             action["model"] = self.valves.WRITER_MODEL
                         elif action.get("type") in ["code", "script"]:
@@ -838,7 +993,6 @@ Return ONLY a JSON object with the exact structure below. Do not add any other t
                     None,
                 )
                 if final_synthesis_index is not None:
-
                     if final_synthesis_index != len(plan.actions) - 1:
                         msg = (
                             f"The 'final_synthesis' action must be the last action in the plan. "
@@ -872,7 +1026,7 @@ Return ONLY a JSON object with the exact structure below. Do not add any other t
                             {"role": "user", "content": f"error:: {msg}"},
                         ]
                         raise ValueError(msg)
-
+                logger.debug(f"Plan: {plan}")
                 return plan
             except Exception as e:
                 logger.error(
@@ -916,13 +1070,13 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
             top_k=40,
             top_p=0.8,
             action_results={},
+            action=None,
         )
         return enhanced_requirements
 
     async def execute_action(
         self, plan: Plan, action: Action, results: dict[str, Any], step_number: int
     ) -> dict[str, Any]:
-
         action.start_time = datetime.now().strftime("%H:%M:%S")
         action.status = "in_progress"
 
@@ -974,6 +1128,12 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
         while attempts_remaining >= 0:
             try:
                 current_attempt = self.valves.MAX_RETRIES - attempts_remaining
+
+                # Reset tool tracking for each retry attempt
+                if current_attempt > 0:
+                    action.tool_calls.clear()
+                    action.tool_results.clear()
+
                 if current_attempt == 0:
                     await self.emit_status(
                         "info",
@@ -985,6 +1145,22 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                 await self.emit_replace_mermaid(plan)
 
                 if current_attempt > 0 and best_reflection:
+                    # Enhance retry prompt to encourage tool use when previous attempt failed
+                    retry_guidance = ""
+                    if action.tool_ids and not action.tool_calls:
+                        retry_guidance += f"""
+                        
+                        IMPORTANT: You have access to these tools: {action.tool_ids}
+                        Your previous attempt did not use any tools, which may be why it failed.
+                        Consider using the appropriate tools to complete this task effectively.
+                        """
+                    elif action.tool_ids and action.tool_calls:
+                        retry_guidance += f"""
+                        
+                        Your previous attempt used tools: {action.tool_calls}
+                        But the output was still inadequate. Try different approaches or parameters.
+                        """
+
                     base_prompt += f"""
                         
                         Previous attempt had these issues:
@@ -992,6 +1168,8 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                         
                         Required corrections based on suggestions:
                         {json.dumps(best_reflection.suggestions, indent=2)}
+                        
+                        {retry_guidance}
                         
                         Please address ALL issues above in this new attempt.
                         """
@@ -1023,6 +1201,25 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                     system_prompt = self.get_system_prompt_for_model(
                         action, step_number, context, requirements, execution_model
                     )
+
+                    # Define JSON schema for action responses
+                    action_format: dict[str, Any] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "action_response",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "primary_output": {"type": "string"},
+                                    "supporting_details": {"type": "string"},
+                                },
+                                "required": ["primary_output", "supporting_details"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+
                     response = await self.get_completion(
                         prompt=[
                             {"role": "system", "content": system_prompt},
@@ -1033,7 +1230,9 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                         top_p=0.95,
                         model=execution_model,
                         tools=tools,
+                        format=action_format,
                         action_results=results,
+                        action=action,
                     )
 
                     await self.emit_message(response)
@@ -1057,7 +1256,8 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                         attempts_remaining -= 1
                         continue
 
-                    current_output = {"result": response}
+                    structured_output = parse_structured_output(response)
+                    current_output = structured_output
 
                 except Exception as api_error:
                     if attempts_remaining > 0:
@@ -1164,24 +1364,46 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
         output: str,
     ) -> ReflectionResult:
         """Simplified output analysis using an LLM to reflect on the action's result."""
+
+        # Prepare tool call verification information
+        expected_tools = action.tool_ids if action.tool_ids else []
+        actual_tool_calls = action.tool_calls
+        tool_results_summary = {
+            tool: result[:200] + "..." if len(result) > 200 else result
+            for tool, result in action.tool_results.items()
+        }
+
         analysis_prompt = f"""
 You are an expert evaluator for a generalist agent that can use a variety of tools, not just code. Analyze the output of an action based on the project goal, the action's description, and the tools used.
 
 Overall Goal: {plan.goal}
 Action Description: {action.description}
-Tool(s) used: {action.tool_ids if action.tool_ids else "None"}
+Expected Tool(s): {expected_tools}
+Actually Called Tool(s): {actual_tool_calls}
+Tool Results Summary: {json.dumps(tool_results_summary, indent=2)}
+
 Action Output to Analyze:
 ---
 {output}
 ---
 
+CRITICAL TOOL VERIFICATION:
+- If the action was expected to use tools ({expected_tools}) but no tools were called ({actual_tool_calls}), this is a MAJOR failure
+- If tools were called, verify that the output actually incorporates their results meaningfully
+- If the output claims tools were used but no actual tool calls occurred, this is FALSE and should be heavily penalized
+- Tool results should be properly processed and integrated into the final output
+
 Instructions:
 Critically evaluate the output based on the following criteria:
-1. **Completeness**: Does the output fully address the action's description and requirements?
-2. **Correctness**: Is the information, tool usage, or code (if present) accurate and functional?
-3. **Relevance**: Does the output directly contribute to the overall goal?
-4. **Appropriateness**: Was the correct tool or method used for the task (not defaulting to code unless requested)?
-
+1. **Tool Usage Verification**: STRICTLY verify that claimed tool usage matches actual tool calls. False claims about tool usage should result in quality_score <= 0.3
+2. **Output Format**: The output should be a valid JSON object with "primary_output" and "supporting_details" fields
+3. **Completeness**: Does the output fully address the action's description and requirements?
+4. **Correctness**: Is the information, tool usage, or code (if present) accurate and functional?
+5. **Relevance**: Does the output directly contribute to the overall goal?
+6. **Tool Integration**: If tools were used, are their results properly integrated and processed in the output?
+7. **Content Quality**: Is the primary_output field clean, complete, and ready for use by subsequent steps?
+8. **Markdown integration**: Markdown format for deliverables is preferable using the embeding formats for example ![caption](<image uri>) to show image or embedable content.
+9. **Missing Tool Calls**: if tool calls werent done Ask the model to call them but do not mention Format at this step.
 Your response MUST be a single, valid JSON object with the following structure. Do not add any text before or after the JSON object.
 {{
     "is_successful": <boolean>,
@@ -1191,21 +1413,55 @@ Your response MUST be a single, valid JSON object with the following structure. 
 }}
 
 Scoring Guide:
-- 0.9-1.0: Perfect, no issues.
-- 0.7-0.89: Minor issues, but mostly correct and usable.
-- 0.5-0.69: Significant issues that prevent the output from being used as-is.
-- 0.0-0.49: Severely flawed, incorrect, or incomplete.
+- 0.9-1.0: Perfect, properly structured, tools used correctly, no issues
+- 0.7-0.89: Minor issues, but mostly correct and usable
+- 0.5-0.69: Significant issues that prevent the output from being used as-is
+- 0.3-0.49: Major problems, incorrect tool usage claims, or incomplete execution
+- 0.0-0.29: Severely flawed, false tool claims, or completely incorrect
 
-Be brutally honest. A high `quality_score` should only be given to high-quality outputs.
+Be brutally honest. A high `quality_score` should only be given to high-quality outputs that properly use tools when expected and follow the correct format.
 """
         analysis_response = ""
         try:
+            reflection_format: dict[str, Any] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "reflection_analysis",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "is_successful": {"type": "boolean"},
+                            "quality_score": {
+                                "type": "number",
+                                "minimum": 0.0,
+                                "maximum": 1.0,
+                            },
+                            "issues": {"type": "array", "items": {"type": "string"}},
+                            "suggestions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": [
+                            "is_successful",
+                            "quality_score",
+                            "issues",
+                            "suggestions",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+
             analysis_response = await self.get_completion(
                 prompt=analysis_prompt,
                 temperature=0.4,
                 top_k=40,
                 top_p=0.9,
+                format=reflection_format,
                 action_results={},
+                action=None,
             )
 
             clean_response = clean_json_response(analysis_response)
@@ -1305,7 +1561,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                     placeholder = f"{{{action_id}}}"
                     if action_id in completed_results:
                         dependency_output = completed_results[action_id].get(
-                            "result", ""
+                            "primary_output", ""
                         )
                         final_output = final_output.replace(
                             placeholder, dependency_output
@@ -1315,7 +1571,10 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                             f"Could not find output for placeholder '{placeholder}'. It may have failed or was not executed. It will be left in the final output."
                         )
 
-                action.output = {"result": final_output}
+                action.output = {
+                    "primary_output": final_output,
+                    "supporting_details": "Final synthesis completed",
+                }
                 action.status = "completed"
                 action.end_time = datetime.now().strftime("%H:%M:%S")
                 completed.add(action.id)
@@ -1340,7 +1599,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                     {
                         "step": step_counter,
                         "id": action.id,
-                        "output": result.get("result", ""),
+                        "output": result.get("primary_output", ""),
                         "status": action.status,
                     }
                 )
@@ -1443,7 +1702,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             (a for a in plan.actions if a.id == "final_synthesis"), None
         )
         if final_synthesis_action and final_synthesis_action.output:
-            final_result = final_synthesis_action.output.get("result", "")
+            final_result = final_synthesis_action.output.get("primary_output", "")
             await self.emit_status("success", "Final result ready.", True)
             await self.emit_replace("")
             await self.emit_replace_mermaid(plan)
