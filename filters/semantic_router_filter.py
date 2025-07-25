@@ -3,7 +3,7 @@ title: Semantic Router Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.5
+version: 0.2.6
 description: Filter that acts a model router, using model descriptions
 (make sure to set them in the models you want to be presented to the router)
 and the prompt, selecting the best model base,
