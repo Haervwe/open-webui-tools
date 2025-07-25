@@ -99,6 +99,10 @@ class Action(BaseModel):
     start_time: Optional[str] = None
     end_time: Optional[str] = None
     model: Optional[str] = None
+    use_lightweight_context: bool = Field(
+        default=False,
+        description="If True, only action IDs and supporting_details are passed as context instead of full primary_output content to reduce context size",
+    )
     tool_calls: List[str] = Field(
         default_factory=list,
         description="Names of tools that were actually called during execution",
@@ -277,6 +281,21 @@ ACTION-SPECIFIC REQUIREMENTS:
 - After tool execution, provide a natural, comprehensive response that incorporates the tool results""",
             description="Additional requirements specifically for Action Model (tool-using) actions",
         )
+        LIGHTWEIGHT_CONTEXT_REQUIREMENTS_SUFFIX: str = Field(
+            default="""
+LIGHTWEIGHT CONTEXT REQUIREMENTS:
+- You are working with lightweight context mode - only action IDs and supporting details are provided
+- When referencing dependencies, use the action ID name as a parameter in your tool calls (e.g., use "research_results" as a file name or identifier)
+- The actual content from previous steps is NOT included in context to save space
+- Focus on using tools with the provided action IDs as identifiers/parameters
+- Work with action IDs as if they were file names, content identifiers, or operation references
+- Trust that the action IDs represent valid content that exists in the system
+- Use @action_id references in tool parameters when you need to reference previous action outputs
+- The supporting_details field contains hints about what each action ID represents
+- Do not ask for the full content - work with the IDs as provided
+- Your tools should be able to operate using these IDs as references""",
+            description="Additional requirements for actions using lightweight context mode",
+        )
         AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT: bool = Field(
             default=False,
             description="Use an LLM call to refine the requirements of each ACTION based on the whole PLAN and GOAL before executing an ACTION (uses the ACTION_PROMPT_REQUIREMENTS_TEMPLATE as an example of requirements)",
@@ -310,15 +329,54 @@ ACTION-SPECIFIC REQUIREMENTS:
     ) -> str:
         """Generate model-specific system prompts based on the model type."""
         enhanced_requirements = requirements
-        match model:
-            case self.valves.WRITER_MODEL:
-                enhanced_requirements += self.valves.WRITER_REQUIREMENTS_SUFFIX
-            case self.valves.CODER_MODEL:
-                enhanced_requirements += self.valves.CODER_REQUIREMENTS_SUFFIX
-            case _:  # ACTION_MODEL (default)
-                enhanced_requirements += self.valves.ACTION_REQUIREMENTS_SUFFIX
+        
+        # Handle lightweight context mode
+        if action.use_lightweight_context:
+            enhanced_requirements += self.valves.LIGHTWEIGHT_CONTEXT_REQUIREMENTS_SUFFIX
+        else:
+            match model:
+                case self.valves.WRITER_MODEL:
+                    enhanced_requirements += self.valves.WRITER_REQUIREMENTS_SUFFIX
+                case self.valves.CODER_MODEL:
+                    enhanced_requirements += self.valves.CODER_REQUIREMENTS_SUFFIX
+                case _:  # ACTION_MODEL (default)
+                    enhanced_requirements += self.valves.ACTION_REQUIREMENTS_SUFFIX
 
-        base_context = f"""
+        # Format context based on lightweight mode
+        if action.use_lightweight_context:
+            # Only include action IDs and supporting details
+            lightweight_context = {}
+            for dep_id, dep_data in context.items():
+                if isinstance(dep_data, dict):
+                    lightweight_context[dep_id] = {
+                        "action_id": dep_id,
+                        "supporting_details": dep_data.get("supporting_details", "")
+                    }
+                else:
+                    lightweight_context[dep_id] = {
+                        "action_id": dep_id,
+                        "supporting_details": ""
+                    }
+            
+            base_context = f"""
+    TASK CONTEXT:
+    - Step {step_number} Description: {action.description}
+    - Available Tools: {action.tool_ids if action.tool_ids else "None"}
+    - Context Mode: LIGHTWEIGHT (only action IDs and hints provided)
+    
+    DEPENDENCIES AND INPUTS:
+    - Parameters: {json.dumps(action.params)}
+    - Lightweight Context (IDs and hints only): {json.dumps(lightweight_context)}
+    
+    NOTE: You are working in lightweight context mode. Previous step results contain only action IDs and supporting_details hints.
+    Use the action IDs as identifiers/parameters in your tool calls. The actual content is not provided to save context space.
+
+    EXECUTION REQUIREMENTS:
+    {enhanced_requirements}
+"""
+        else:
+            # Full context mode (existing behavior)
+            base_context = f"""
     TASK CONTEXT:
     - Step {step_number} Description: {action.description}
     - Available Tools: {action.tool_ids if action.tool_ids else "None"}
@@ -671,6 +729,14 @@ MODEL ASSIGNMENT:
 - Text/writing actions: 'WRITER_MODEL'
 - Code actions: 'CODER_MODEL'
 
+LIGHTWEIGHT CONTEXT MODE:
+- use_lightweight_context: Set to true for actions that work with large file operations, bulk processing, or when dependencies might produce very large content that would overflow context
+- When true, the action receives only action IDs and supporting_details from dependencies instead of full primary_output content
+- Use this for actions like file operations, data processing, bulk operations where the tool can work with identifiers/names rather than full content
+- Actions in lightweight mode should use @action_id references in tool parameters to reference previous results
+- Best for: file saving, data compilation, operations on multiple large documents, complex transformations where content size might be prohibitive
+- Default: false (full context mode)
+
 DEPENDENCY EXAMPLES - EXPLICIT LINKING REQUIRED:
 ❌ WRONG - No context flow:
 research_ai → write_ch1, write_ch2, write_ch3 (chapters get no context from each other)
@@ -718,7 +784,7 @@ CRITICAL TEMPLATING RULES:
 3. **Content Replacement**: During execution, each {{action_id}} placeholder is replaced with:
    - The complete "primary_output" field from that action's result
    - This is literal text substitution - what you see is what you get
-   - Images become embedded markdown: ![caption](URL)
+   - Images come already in embedded markdown: ![caption](URL)
    - Code becomes code blocks if the original action formatted it that way
    - Text content is inserted as-is
 
@@ -803,14 +869,16 @@ JSON OUTPUT:
             "tool_ids": ["exact_tool_id_from_list"], 
             "params": {{}},
             "dependencies": ["action_ids_this_needs"],
-            "model": "model_name"
+            "model": "model_name",
+            "use_lightweight_context": false
         }},
         {{
             "id": "final_synthesis",
             "type": "synthesis",
             "description": "# Title\\n\\n{{action1}}\\n\\n{{action2}}",
             "dependencies": ["action1", "action2"],
-            "model": ""
+            "model": "",
+            "use_lightweight_context": false
         }}
     ]
 }}
@@ -848,6 +916,10 @@ JSON OUTPUT:
                                                 "items": {"type": "string"},
                                             },
                                             "model": {"type": "string"},
+                                            "use_lightweight_context": {
+                                                "type": "boolean",
+                                                "default": False
+                                            },
                                         },
                                         "required": [
                                             "id",
@@ -1075,7 +1147,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
         return enhanced_requirements
 
     async def execute_action(
-        self, plan: Plan, action: Action, results: dict[str, Any], step_number: int
+        self, plan: Plan, action: Action, context: dict[str, Any], step_number: int
     ) -> dict[str, Any]:
         action.start_time = datetime.now().strftime("%H:%M:%S")
         action.status = "in_progress"
@@ -1102,19 +1174,54 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                 )
             return parent_results
 
-        context = gather_all_parent_results(action.id, results, plan)
+        # Gather additional context for the base prompt based on lightweight context setting
+        if action.use_lightweight_context:
+            # For lightweight context, only use direct dependencies with IDs and supporting details
+            context_for_prompt = {}
+            for dep in action.dependencies:
+                if dep in context:
+                    dep_result = context.get(dep, {})
+                    context_for_prompt[dep] = {
+                        "action_id": dep,
+                        "supporting_details": dep_result.get("supporting_details", "")
+                    }
+                else:
+                    context_for_prompt[dep] = {
+                        "action_id": dep,
+                        "supporting_details": ""
+                    }
+        else:
+            # Full context mode - use the complete context as provided
+            context_for_prompt = context
+        
         requirements = (
             await self.enhance_requirements(plan, action)
             if self.valves.AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT
             else self.valves.ACTION_PROMPT_REQUIREMENTS_TEMPLATE
         )
-        base_prompt = f"""
+        
+        if action.use_lightweight_context:
+            base_prompt = f"""
+            Execute step {step_number}: {action.description}
+            Overall Goal: {plan.goal}
+        
+            Context from dependent steps (LIGHTWEIGHT MODE - IDs and hints only):
+            - Parameters: {json.dumps(action.params)}
+            - Action IDs and hints: {json.dumps(context_for_prompt)}
+        
+            {requirements}
+            
+            Focus ONLY on this specific step's output.
+            Use the action IDs as identifiers/parameters in your tool calls when referencing previous results.
+            """
+        else:
+            base_prompt = f"""
             Execute step {step_number}: {action.description}
             Overall Goal: {plan.goal}
         
             Context from dependent steps:
             - Parameters: {json.dumps(action.params)}
-            - Previous Results: {json.dumps(context)}
+            - Previous Results: {json.dumps(context_for_prompt)}
         
             {requirements}
             
@@ -1129,7 +1236,6 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
             try:
                 current_attempt = self.valves.MAX_RETRIES - attempts_remaining
 
-                # Reset tool tracking for each retry attempt
                 if current_attempt > 0:
                     action.tool_calls.clear()
                     action.tool_results.clear()
@@ -1145,7 +1251,6 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                 await self.emit_replace_mermaid(plan)
 
                 if current_attempt > 0 and best_reflection:
-                    # Enhance retry prompt to encourage tool use when previous attempt failed
                     retry_guidance = ""
                     if action.tool_ids and not action.tool_calls:
                         retry_guidance += f"""
@@ -1202,7 +1307,6 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                         action, step_number, context, requirements, execution_model
                     )
 
-                    # Define JSON schema for action responses
                     action_format: dict[str, Any] = {
                         "type": "json_schema",
                         "json_schema": {
@@ -1231,7 +1335,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
                         model=execution_model,
                         tools=tools,
                         format=action_format,
-                        action_results=results,
+                        action_results=context,
                         action=action,
                     )
 
