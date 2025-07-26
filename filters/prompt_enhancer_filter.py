@@ -4,9 +4,8 @@ author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
 version: 0.6.2
-important note: if you are going to sue this filter with custom pipes, do not use the show enhanced prompt valve setting 
+important note: if you are going to sue this filter with custom pipes, do not use the show enhanced prompt valve setting
 """
-
 
 import logging
 import re
@@ -16,7 +15,7 @@ import json
 from fastapi import Request
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
-from open_webui.models.users import User ,Users
+from open_webui.models.users import User, Users
 from open_webui.routers.models import get_models
 from open_webui.constants import TASKS
 
@@ -104,7 +103,7 @@ Now, enhance the following prompt:
         self.__current_event_emitter__ = __event_emitter__
         self.__request__ = __request__
         self.__model__ = __model__
-        self.__user__ =  Users.get_user_by_id(__user__["id"]) if __user__ else None
+        self.__user__ = Users.get_user_by_id(__user__["id"]) if __user__ else None
         if __task__ and __task__ != TASKS.DEFAULT:
             return body
         # Fetch available models and log their relevant details
@@ -145,7 +144,7 @@ Now, enhance the following prompt:
                     if isinstance(knowledge_item, dict) and "files" in knowledge_item:
                         knowledge_item["files"] = "List of files (truncated)"
 
-            logger.debug(json.dumps(truncated_model, indent=2))
+                logger.debug(json.dumps(truncated_model, indent=2))
 
         messages = body["messages"]
         user_message = get_last_user_message(messages)
@@ -186,11 +185,12 @@ Now, enhance the following prompt:
 
         # Determine the model to use
         # model_to_use = self.valves.model_id if self.valves.model_id else (body["model"])
+        print(__model__)
         model_to_use = None
         if self.valves.model_id:
             model_to_use = self.valves.model_id
         else:
-            model_to_use = body["model"]
+            model_to_use = __model__["info"]["base_model_id"]
 
         # Check if the selected model has "-pipe" or "pipe" in its name.
         is_pipeline_model = False
@@ -205,7 +205,7 @@ Now, enhance the following prompt:
             logger.warning(
                 f"Pipeline model '{model_to_use}' selected without explicit model_id.  Using main model instead."
             )
-            model_to_use = body["model"]  # Fallback to main model
+            model_to_use = body["model"]["base_model_id"]  # Fallback to main model
             is_pipeline_model = False
 
         # Construct payload for LLM request
@@ -222,13 +222,6 @@ Now, enhance the following prompt:
         }
 
         try:
-            # Use the User object directly, as done in other scripts
-            logger.debug(
-                "API CALL:\n Request: %s\n Form_data: %s\n User: %s",
-                str(self.__request__),
-                json.dumps(payload),
-                self.__user__,
-            )
 
             response = await generate_chat_completion(
                 self.__request__, payload, user=self.__user__, bypass_filter=True
@@ -301,6 +294,5 @@ Now, enhance the following prompt:
         self.__current_event_emitter__ = __event_emitter__
         self.__request__ = __request__
         self.__model__ = __model__
-        self.__user__ =  Users.get_user_by_id(__user__["id"]) if __user__ else None
-        print(body)
+        self.__user__ = Users.get_user_by_id(__user__["id"]) if __user__ else None
         return body
