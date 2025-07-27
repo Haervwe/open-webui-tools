@@ -1187,6 +1187,16 @@ JSON OUTPUT:
                     )
                     logger.warning(f"Tool validation error: {validation_error}")
 
+                try:
+                    await self.validate_and_enhance_template(plan)
+                except Exception as template_error:
+                    await self.emit_status(
+                        "warning",
+                        f"Template validation failed but continuing with plan: {str(template_error)}",
+                        False,
+                    )
+                    logger.warning(f"Template validation error: {template_error}")
+
                 logger.debug(f"Plan: {plan}")
                 return plan
             except Exception as e:
@@ -1361,6 +1371,144 @@ If no suitable tools are found, return an empty array: []
                 "warning",
                 f"Actions still missing tools (may need manual review): {', '.join(still_missing_tools)}",
                 False,
+            )
+
+    async def validate_and_enhance_template(self, plan: Plan):
+        """Check if the final_synthesis template has all required action IDs and enhance it if needed."""
+        await self.emit_status(
+            "info", "Validating final_synthesis template...", False
+        )
+
+        final_synthesis = next(
+            (a for a in plan.actions if a.id == "final_synthesis"), None
+        )
+        
+        if not final_synthesis:
+            return  # No final_synthesis action to validate
+
+        template = final_synthesis.description
+        
+        # Extract placeholders from template
+        placeholder_pattern = r"\{([a-zA-Z0-9_]+)\}"
+        template_placeholders = set(re.findall(placeholder_pattern, template))
+        
+        # Get action IDs from dependencies (these are what should be in template)
+        dependency_ids = set(final_synthesis.dependencies)
+        
+        # Find missing action IDs in template
+        missing_in_template = dependency_ids - template_placeholders
+        
+        if not missing_in_template:
+            await self.emit_status(
+                "success", "Template validation passed - all dependencies are referenced in template.", False
+            )
+            return
+
+        await self.emit_status(
+            "info", f"Template missing references to: {', '.join(missing_in_template)}. Enhancing template...", False
+        )
+
+        # Get all actions for context
+        actions_info = []
+        for action in plan.actions:
+            if action.id != "final_synthesis":
+                actions_info.append({
+                    "id": action.id,
+                    "type": action.type,
+                    "description": action.description
+                })
+
+        template_enhancement_prompt = f"""
+You are a template enhancement expert for the final_synthesis action. Your job is to enhance an incomplete template by adding missing action references in logical positions.
+
+UNDERSTANDING TEMPLATES:
+The final_synthesis action uses a TEMPLATING SYSTEM where:
+- {{action_id}} placeholders get replaced with the complete primary_output from that action
+- Each placeholder becomes the actual content (text, URLs, code, etc.) from the referenced action
+- The template structure becomes the final user-facing output after placeholder substitution
+- This is PURE TEXT REPLACEMENT - no AI processing happens during synthesis
+
+CURRENT SITUATION:
+GOAL: {plan.goal}
+
+EXISTING TEMPLATE:
+{template}
+
+TEMPLATE DEPENDENCIES: {list(dependency_ids)}
+MISSING REFERENCES: {list(missing_in_template)}
+
+ALL PLAN ACTIONS CONTEXT:
+{json.dumps(actions_info, indent=2)}
+
+ENHANCEMENT REQUIREMENTS:
+
+1. **PRESERVE EXISTING STRUCTURE**: Keep all current content, formatting, and existing {{action_id}} references exactly as they are
+
+2. **ADD MISSING REFERENCES**: Include ALL missing action references ({list(missing_in_template)}) using {{action_id}} format
+
+3. **LOGICAL PLACEMENT**: Position missing references where they make sense contextually:
+   - Research actions → Background/Introduction sections
+   - Content creation → Main body sections  
+   - Images/media → Visual elements with proper markdown
+   - Code → Code blocks with language specification
+   - Analysis → Analysis/Results sections
+   - Conclusions → Summary/Conclusion sections
+
+4. **CONTENT TYPE AWARENESS**: Consider what each action produces:
+   - Text actions: Insert as paragraphs or sections
+   - Image actions: Use ![Description]({{action_id}}) format
+   - Code actions: Use ```language\\n{{action_id}}\\n``` format
+   - Search/Research: Use in background or reference sections
+   - URL/Link actions: Use [Text]({{action_id}}) format
+
+5. **MARKDOWN STRUCTURE**: Maintain proper hierarchy with headers (#, ##, ###)
+
+6. **COMPREHENSIVE COVERAGE**: The enhanced template should create a complete deliverable that includes ALL valuable outputs from the plan
+
+7. **USER-FACING QUALITY**: The final output should be professional, well-organized, and immediately useful to users
+
+EXAMPLE ENHANCEMENT PATTERNS:
+
+If missing "research_background":
+Add: "## Background\\n{{research_background}}\\n\\n"
+
+If missing "generated_image": 
+Add: "![Generated Visualization]({{generated_image}})\\n\\n"
+
+If missing "code_solution":
+Add: "```python\\n{{code_solution}}\\n```\\n\\n"
+
+If missing "data_analysis":
+Add: "## Analysis\\n{{data_analysis}}\\n\\n"
+
+CRITICAL RULES:
+- Use ONLY {{action_id}} format - NO nested properties like {{action.output}}
+- Every missing action MUST be included somewhere logical
+- Maintain existing template flow and structure
+- Ensure the template will create a cohesive final document
+- Use proper Markdown syntax for all formatting
+
+Return ONLY the enhanced template description. Do not include explanations, comments, or extra text.
+"""
+
+        try:
+            enhanced_template = await self.get_completion(
+                prompt=template_enhancement_prompt,
+                temperature=self.valves.PLANNING_TEMPERATURE,
+                action_results={},
+                action=None,
+            )
+            
+            # Update the final_synthesis action with enhanced template
+            final_synthesis.description = enhanced_template.strip()
+            
+            await self.emit_status(
+                "success", f"Template enhanced successfully with missing references: {', '.join(missing_in_template)}", False
+            )
+            
+        except Exception as e:
+            await self.emit_status(
+                "warning", f"Failed to enhance template: {str(e)}", False
             )
 
     async def execute_action(
