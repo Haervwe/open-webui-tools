@@ -23,7 +23,7 @@ from open_webui.models.users import Users, User
 from open_webui.models.tools import Tools
 
 
-name = "Planner_2"
+name = "Planner"
 
 
 def clean_thinking_tags(message: str) -> str:
@@ -365,7 +365,28 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
             default=300, description="Action timeout in seconds"
         )
         SHOW_ACTION_SUMMARIES: bool = Field(
-            default=True, description="Show detailed summaries for completed actions in dropdown format"
+            default=True,
+            description="Show detailed summaries for completed actions in dropdown format",
+        )
+        ACTION_TEMPERATURE: float = Field(
+            default=0.7,
+            description="Temperature setting for the ACTION_MODEL (tool-using actions)",
+        )
+        WRITER_TEMPERATURE: float = Field(
+            default=0.9,
+            description="Temperature setting for the WRITER_MODEL (creative text generation)",
+        )
+        CODER_TEMPERATURE: float = Field(
+            default=0.3,
+            description="Temperature setting for the CODER_MODEL (code generation)",
+        )
+        PLANNING_TEMPERATURE: float = Field(
+            default=0.8,
+            description="Temperature setting for planning phase",
+        )
+        ANALYSIS_TEMPERATURE: float = Field(
+            default=0.4,
+            description="Temperature setting for output analysis and reflection",
         )
 
     def __init__(self):
@@ -386,8 +407,7 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
     ) -> str:
         """Generate model-specific system prompts based on the model type."""
         enhanced_requirements = requirements
-        
-        # Handle lightweight context mode
+
         if action.use_lightweight_context:
             enhanced_requirements += self.valves.LIGHTWEIGHT_CONTEXT_REQUIREMENTS_SUFFIX
         else:
@@ -396,25 +416,23 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                     enhanced_requirements += self.valves.WRITER_REQUIREMENTS_SUFFIX
                 case self.valves.CODER_MODEL:
                     enhanced_requirements += self.valves.CODER_REQUIREMENTS_SUFFIX
-                case _:  # ACTION_MODEL (default)
+                case _:
                     enhanced_requirements += self.valves.ACTION_REQUIREMENTS_SUFFIX
 
-        # Format context based on lightweight mode
         if action.use_lightweight_context:
-            # Only include action IDs and supporting details
             lightweight_context = {}
             for dep_id, dep_data in context.items():
                 if isinstance(dep_data, dict):
                     lightweight_context[dep_id] = {
                         "action_id": dep_id,
-                        "supporting_details": dep_data.get("supporting_details", "")
+                        "supporting_details": dep_data.get("supporting_details", ""),
                     }
                 else:
                     lightweight_context[dep_id] = {
                         "action_id": dep_id,
-                        "supporting_details": ""
+                        "supporting_details": "",
                     }
-            
+
             base_context = f"""
     TASK CONTEXT:
     - Step {step_number} Description: {action.description}
@@ -432,7 +450,6 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
     {enhanced_requirements}
 """
         else:
-            # Full context mode (existing behavior)
             base_context = f"""
     TASK CONTEXT:
     - Step {step_number} Description: {action.description}
@@ -463,8 +480,6 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
         self,
         prompt: str | list[dict[str, Any]],
         temperature: float = 0.7,
-        top_k: int = 50,
-        top_p: float = 0.9,
         model: str | dict[str, Any] = "",
         tools: dict[str, dict[Any, Any]] = {},
         format: dict[str, Any] | None = None,
@@ -509,8 +524,6 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                 "model": __model,
                 "messages": messages,
                 "temperature": temperature,
-                "top_k": top_k,
-                "top_p": top_p,
                 "tools": _tools,
             }
             logger.debug(f"{_tools}")
@@ -521,7 +534,7 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                 form_data,
                 user=self.__user__,
             )
-            response_content = str(response["choices"][0]["message"]["content"])
+            response_content = response["choices"][0]["message"].get("content","")
             tool_calls: list[dict[str, Any]] | None = None
             logger.debug(f"{tool_calls}")
             try:
@@ -647,8 +660,6 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                 specialist_response = await self.get_completion(
                     prompt=messages,
                     temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p,
                     model=model,
                     action_results=action_results,
                     format=format,
@@ -679,8 +690,6 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                 tool_response = await self.get_completion(
                     prompt=messages,
                     temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p,
                     model=model,
                     tools=tools,
                     action_results=action_results,
@@ -989,7 +998,7 @@ JSON OUTPUT:
                                             "model": {"type": "string"},
                                             "use_lightweight_context": {
                                                 "type": "boolean",
-                                                "default": False
+                                                "default": False,
                                             },
                                         },
                                         "required": [
@@ -1012,9 +1021,7 @@ JSON OUTPUT:
 
                 result = await self.get_completion(
                     prompt=messages,
-                    temperature=0.8,
-                    top_k=60,
-                    top_p=0.95,
+                    temperature=self.valves.PLANNING_TEMPERATURE,
                     format=plan_format,
                     action_results={},
                     action=None,
@@ -1169,17 +1176,17 @@ JSON OUTPUT:
                             {"role": "user", "content": f"error:: {msg}"},
                         ]
                         raise ValueError(msg)
-                    
+
                 try:
                     await self.validate_and_fix_tool_actions(plan)
                 except Exception as validation_error:
                     await self.emit_status(
                         "warning",
                         f"Tool validation failed but continuing with plan: {str(validation_error)}",
-                        False
+                        False,
                     )
                     logger.warning(f"Tool validation error: {validation_error}")
-                
+
                 logger.debug(f"Plan: {plan}")
                 return plan
             except Exception as e:
@@ -1220,9 +1227,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
 """
         enhanced_requirements = await self.get_completion(
             prompt=requirements_prompt,
-            temperature=0.7,
-            top_k=40,
-            top_p=0.8,
+            temperature=self.valves.ACTION_TEMPERATURE,
             action_results={},
             action=None,
         )
@@ -1231,11 +1236,9 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
     async def validate_and_fix_tool_actions(self, plan: Plan):
         """Check for tool actions missing tool_ids and automatically populate them."""
         await self.emit_status(
-            "info", 
-            "Starting tool validation for plan actions...", 
-            False
+            "info", "Starting tool validation for plan actions...", False
         )
-        
+
         tools: list[dict[str, Any]] = [
             {
                 "tool_id": tool.id,
@@ -1243,33 +1246,30 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
             }
             for tool in Tools.get_tools()
         ]
-        
+
         actions_needing_tools = [
-            action for action in plan.actions 
+            action
+            for action in plan.actions
             if action.type == "tool" and (not action.tool_ids)
         ]
-        
+
         if not actions_needing_tools:
             await self.emit_status(
-                "success",
-                "All tool actions have proper tool_ids specified.",
-                False
+                "success", "All tool actions have proper tool_ids specified.", False
             )
             return
-            
+
         await self.emit_status(
-            "info", 
-            f"Found {len(actions_needing_tools)} tool action(s) missing tool_ids. Auto-fixing...", 
-            False
+            "info",
+            f"Found {len(actions_needing_tools)} tool action(s) missing tool_ids. Auto-fixing...",
+            False,
         )
-        
+
         for action in actions_needing_tools:
             await self.emit_status(
-                "info",
-                f"Identifying tools for action: {action.id}",
-                False
+                "info", f"Identifying tools for action: {action.id}", False
             )
-            
+
             tool_selection_prompt = f"""
 You are a tool selection expert. Given an action description, select the most appropriate tool(s) from the available list.
 
@@ -1305,67 +1305,67 @@ If no suitable tools are found, return an empty array: []
                         },
                     },
                 }
-                
+
                 result = await self.get_completion(
                     prompt=tool_selection_prompt,
-                    temperature=0.3,
-                    top_k=20,
-                    top_p=0.8,
+                    temperature=self.valves.ACTION_TEMPERATURE,
                     model="",
                     format=tool_format,
                     action_results={},
                     action=None,
                 )
-                
+
                 clean_result = clean_json_response(result)
                 selected_tools = json.loads(clean_result)
-                
+
                 available_tool_ids = {tool["tool_id"] for tool in tools}
-                valid_tools = [tool_id for tool_id in selected_tools if tool_id in available_tool_ids]
-                
+                valid_tools = [
+                    tool_id
+                    for tool_id in selected_tools
+                    if tool_id in available_tool_ids
+                ]
+
                 if valid_tools:
                     action.tool_ids = valid_tools
                     await self.emit_status(
                         "success",
                         f"Added tools to {action.id}: {', '.join(valid_tools)}",
-                        False
+                        False,
                     )
                 else:
                     await self.emit_status(
                         "warning",
                         f"No suitable tools found for action {action.id}. Action may need manual review.",
-                        False
+                        False,
                     )
-                    
+
             except Exception as e:
                 await self.emit_status(
                     "warning",
                     f"Failed to auto-select tools for {action.id}: {str(e)}",
-                    False
+                    False,
                 )
-        
+
         await self.emit_status(
-            "success",
-            "Tool validation and auto-fixing completed.",
-            False
+            "success", "Tool validation and auto-fixing completed.", False
         )
-        
+
         still_missing_tools = [
-            action.id for action in plan.actions 
+            action.id
+            for action in plan.actions
             if action.type == "tool" and (not action.tool_ids)
         ]
-        
+
         if still_missing_tools:
             await self.emit_status(
                 "warning",
                 f"Actions still missing tools (may need manual review): {', '.join(still_missing_tools)}",
-                False
+                False,
             )
 
     async def execute_action(
         self, plan: Plan, action: Action, context: dict[str, Any], step_number: int
     ) -> dict[str, Any]:
-
 
         def gather_all_parent_results(
             action_id: str,
@@ -1396,22 +1396,22 @@ If no suitable tools are found, return an empty array: []
                     dep_result = context.get(dep, {})
                     context_for_prompt[dep] = {
                         "action_id": dep,
-                        "supporting_details": dep_result.get("supporting_details", "")
+                        "supporting_details": dep_result.get("supporting_details", ""),
                     }
                 else:
                     context_for_prompt[dep] = {
                         "action_id": dep,
-                        "supporting_details": ""
+                        "supporting_details": "",
                     }
         else:
             context_for_prompt = context
-        
+
         requirements = (
             await self.enhance_requirements(plan, action)
             if self.valves.AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT
             else self.valves.ACTION_PROMPT_REQUIREMENTS_TEMPLATE
         )
-        
+
         if action.use_lightweight_context:
             base_prompt = f"""
             Execute step {step_number}: {action.description}
@@ -1534,14 +1534,20 @@ If no suitable tools are found, return an empty array: []
                         },
                     }
 
+                    # Determine appropriate temperature based on model type
+                    if execution_model == self.valves.WRITER_MODEL:
+                        model_temperature = self.valves.WRITER_TEMPERATURE
+                    elif execution_model == self.valves.CODER_MODEL:
+                        model_temperature = self.valves.CODER_TEMPERATURE
+                    else:
+                        model_temperature = self.valves.ACTION_TEMPERATURE
+
                     response = await self.get_completion(
                         prompt=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": base_prompt},
                         ],
-                        temperature=0.9,
-                        top_k=70,
-                        top_p=0.95,
+                        temperature=model_temperature,
                         model=execution_model,
                         tools=tools,
                         format=action_format,
@@ -1571,7 +1577,7 @@ If no suitable tools are found, return an empty array: []
 
                     structured_output = parse_structured_output(response)
                     current_output = structured_output
-                    
+
                     # Show the current attempt immediately to user (before analysis)
                     formatted_output = self.format_action_output(action, current_output)
                     await self.emit_message(formatted_output)
@@ -1681,7 +1687,7 @@ If no suitable tools are found, return an empty array: []
             f"Action completed with best output (Quality: {best_reflection.quality_score:.2f})",
             True,
         )
-        
+
         return best_output
 
     async def analyze_output(
@@ -1772,7 +1778,7 @@ Scoring Guide:
 
 Be brutally honest. A high `quality_score` should only be given to high-quality outputs that properly use tools when expected and follow the correct format.
 """
-        
+
         # Retry loop for analysis
         attempts_remaining = self.valves.MAX_RETRIES
         while attempts_remaining >= 0:
@@ -1792,7 +1798,10 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                                     "minimum": 0.0,
                                     "maximum": 1.0,
                                 },
-                                "issues": {"type": "array", "items": {"type": "string"}},
+                                "issues": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
                                 "suggestions": {
                                     "type": "array",
                                     "items": {"type": "string"},
@@ -1811,9 +1820,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
                 analysis_response = await self.get_completion(
                     prompt=analysis_prompt,
-                    temperature=0.4,
-                    top_k=40,
-                    top_p=0.9,
+                    temperature=self.valves.ANALYSIS_TEMPERATURE,
                     format=reflection_format,
                     action_results={},
                     action=None,
@@ -1823,12 +1830,12 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 analysis_data = json.loads(clean_response)
 
                 return ReflectionResult(**analysis_data)
-                
+
             except (json.JSONDecodeError, TypeError, KeyError) as e:
                 logger.error(
                     f"Failed to parse reflection analysis (attempt {self.valves.MAX_RETRIES - attempts_remaining + 1}/{self.valves.MAX_RETRIES + 1}): {e}. Raw response: {analysis_response}"
                 )
-                
+
                 if attempts_remaining > 0:
                     attempts_remaining -= 1
                     await asyncio.sleep(1)  # Brief delay before retry
@@ -1845,12 +1852,12 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                             "The action should be retried, focusing on generating a simpler, clearer output."
                         ],
                     )
-                    
+
             except Exception as e:
                 logger.error(
                     f"An unexpected error occurred during output analysis (attempt {self.valves.MAX_RETRIES - attempts_remaining + 1}/{self.valves.MAX_RETRIES + 1}): {e}. Raw response: {analysis_response}"
                 )
-                
+
                 if attempts_remaining > 0:
                     attempts_remaining -= 1
                     await asyncio.sleep(1)  # Brief delay before retry
@@ -1863,7 +1870,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                         issues=[f"An unexpected error occurred during analysis: {e}"],
                         suggestions=["Retry the action."],
                     )
-        
+
         # This should never be reached, but added for completeness
         return ReflectionResult(
             is_successful=False,
@@ -1958,25 +1965,27 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 action.end_time = datetime.now().strftime("%H:%M:%S")
                 completed.add(action.id)
                 completed_results[action.id] = action.output
-                
+
                 await self.emit_status("success", "Final output assembled.", True)
-                
+
                 # Check if this is truly the final action (no more actions to execute)
                 remaining_actions = [a for a in plan.actions if a.id not in completed]
                 if not remaining_actions:
                     # This is the final result - show as normal message
-                    formatted_output = self.format_action_output(action, action.output, is_final_result=True)
+                    formatted_output = self.format_action_output(
+                        action, action.output, is_final_result=True
+                    )
                     await self.emit_message(formatted_output)
                 else:
                     # There are still actions to execute - add to summaries for now
                     summary = self.generate_action_summary(action, plan)
                     if summary:
                         completed_summaries.append(summary)
-                
+
                 continue  #
 
             in_progress.add(action.id)
-            
+
             # Set status to in_progress and update mermaid immediately
             action.status = "in_progress"
             action.start_time = datetime.now().strftime("%H:%M:%S")
@@ -2026,14 +2035,25 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
         # Check if final synthesis was completed and show it as final message
         final_synthesis_action = next(
-            (a for a in plan.actions if a.id == "final_synthesis" and a.status == "completed"), None
+            (
+                a
+                for a in plan.actions
+                if a.id == "final_synthesis" and a.status == "completed"
+            ),
+            None,
         )
         if final_synthesis_action and final_synthesis_action.output:
             # Remove final synthesis from summaries if it exists
-            completed_summaries = [s for s in completed_summaries if "🎯 Final Synthesis Complete" not in s]
-            
+            completed_summaries = [
+                s for s in completed_summaries if "🎯 Final Synthesis Complete" not in s
+            ]
+
             # Show final synthesis as the ultimate result
-            formatted_output = self.format_action_output(final_synthesis_action, final_synthesis_action.output, is_final_result=True)
+            formatted_output = self.format_action_output(
+                final_synthesis_action,
+                final_synthesis_action.output,
+                is_final_result=True,
+            )
             await self.emit_message(formatted_output)
 
         plan.execution_summary = {
@@ -2082,73 +2102,78 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
     def clean_nested_markdown(self, text: str) -> str:
         """Clean nested markdown image syntax like ![alt](![alt2](url)) to just ![alt2](url)"""
         import re
-        
-        # Pattern to match nested markdown images: ![text](![text](url))
-        # This will find the outer pattern and extract the inner one
-        nested_pattern = r'!\[([^\]]*)\]\(!\[([^\]]*)\]\(([^)]+)\)\)'
-        
-        # Replace nested markdown with just the inner markdown image
-        # Keep the inner alt text and URL, discard the outer alt text
-        cleaned_text = re.sub(nested_pattern, r'![\2](\3)', text)
-        
+
+        nested_pattern = r"!\[([^\]]*)\]\(!\[([^\]]*)\]\(([^)]+)\)\)"
+
+        cleaned_text = re.sub(nested_pattern, r"![\2](\3)", text)
+
         return cleaned_text
 
-    def format_action_output(self, action: Action, output: dict[str, str], is_final_result: bool = False) -> str:
+    def format_action_output(
+        self, action: Action, output: dict[str, str], is_final_result: bool = False
+    ) -> str:
         """Format action output for user display (non-JSON format)"""
         primary_output = output.get("primary_output", "")
         supporting_details = output.get("supporting_details", "")
-        
-        # Clean nested markdown in both primary output and supporting details
+
         primary_output = self.clean_nested_markdown(primary_output)
         supporting_details = self.clean_nested_markdown(supporting_details)
-        
-        # Special formatting for final synthesis
+
         if action.id == "final_synthesis":
             if is_final_result:
                 # Clean output without header for final result
                 formatted_content = f"{primary_output}\n\n"
             else:
-                formatted_content = f"## 🎯 Final Synthesis Complete\n\n{primary_output}\n\n---\n"
+                formatted_content = (
+                    f"## 🎯 Final Synthesis Complete\n\n{primary_output}\n\n---\n"
+                )
             return formatted_content
-        
 
         formatted_content = f"## 🔄 Action: {action.description}\n\n"
-        
+
         if primary_output:
             formatted_content += f"{primary_output}\n\n"
-        
+
         if supporting_details and supporting_details.strip():
             formatted_content += f"<details>\n<summary>📋 Supporting Details</summary>\n\n{supporting_details}\n\n</details>\n\n"
-        
+
         formatted_content += "---\n"
         return formatted_content
 
     async def emit_full_state(self, plan: Plan, completed_summaries: list[str]):
         """Emit the full state including mermaid diagram and all summaries"""
         mermaid = await self.generate_mermaid(plan)
-        
+
         content_parts = [f"```mermaid\n{mermaid}\n```"]
-        
+
         if completed_summaries:
             content_parts.append("---")
             content_parts.extend(completed_summaries)
-        
+
         final_synthesis_action = next(
             (a for a in plan.actions if a.id == "final_synthesis"), None
         )
-        
+
         if final_synthesis_action and self.valves.SHOW_ACTION_SUMMARIES:
             template = final_synthesis_action.description
             preview_template = template
-            
+
             template_placeholders = re.findall(r"\{([a-zA-Z0-9_]+)\}", template)
             total_placeholders = len(template_placeholders)
-            
-            completed_actions = [a for a in plan.actions if a.status in ["completed", "warning"] and a.output]
-            pending_actions = [a for a in plan.actions if a.status == "pending" and a.id != "final_synthesis"]
-            
+
+            completed_actions = [
+                a
+                for a in plan.actions
+                if a.status in ["completed", "warning"] and a.output
+            ]
+            pending_actions = [
+                a
+                for a in plan.actions
+                if a.status == "pending" and a.id != "final_synthesis"
+            ]
+
             completed_placeholders = 0
-            
+
             for action in completed_actions:
                 placeholder = f"{{{action.id}}}"
                 if placeholder in template and action.output:
@@ -2156,14 +2181,17 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                     preview_content = action.output.get("primary_output", "")
                     if len(preview_content) > 200:
                         preview_content = preview_content[:200] + "..."
-                    preview_template = preview_template.replace(placeholder, f"✅ [{action.id}]: {preview_content}")
-            
-    
+                    preview_template = preview_template.replace(
+                        placeholder, f"✅ [{action.id}]: {preview_content}"
+                    )
+
             for action in pending_actions:
                 placeholder = f"{{{action.id}}}"
                 if placeholder in template:
-                    preview_template = preview_template.replace(placeholder, f"⏳ [{action.id}]: Pending...")
-            
+                    preview_template = preview_template.replace(
+                        placeholder, f"⏳ [{action.id}]: Pending..."
+                    )
+
             final_synthesis_content = f"""<details>
 <summary>📋 Final Synthesis Template ({completed_placeholders}/{total_placeholders} outputs ready)</summary>
 
@@ -2176,7 +2204,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
 </details>"""
             content_parts.append(final_synthesis_content)
-        
+
         full_content = "\n\n".join(content_parts)
         await self.emit_replace(full_content)
 
@@ -2184,28 +2212,34 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         """Generate a detailed summary of a completed action in dropdown format"""
         if not self.valves.SHOW_ACTION_SUMMARIES:
             return ""
-        
+
         if action.id == "final_synthesis":
             summary_title = "🎯 Final Synthesis Complete"
         else:
             status_emoji = "✅" if action.status == "completed" else "⚠️"
-            summary_title = f"{status_emoji} {action.status.title()}: {action.description}"
-        
+            summary_title = (
+                f"{status_emoji} {action.status.title()}: {action.description}"
+            )
+
         tool_calls_str = ", ".join(action.tool_calls) if action.tool_calls else "None"
-        
+
         tool_results_summary = ""
         if action.tool_results:
-            tool_results_summary = "\n".join([
-                f"- **{tool}**: {result[:100]}{'...' if len(result) > 100 else ''}" 
-                for tool, result in action.tool_results.items()
-            ])
+            tool_results_summary = "\n".join(
+                [
+                    f"- **{tool}**: {result[:100]}{'...' if len(result) > 100 else ''}"
+                    for tool, result in action.tool_results.items()
+                ]
+            )
         else:
             tool_results_summary = "None"
 
         execution_time = ""
         if action.start_time and action.end_time:
-            execution_time = f"**Execution Time**: {action.start_time} - {action.end_time}\n"
-     
+            execution_time = (
+                f"**Execution Time**: {action.start_time} - {action.end_time}\n"
+            )
+
         summary_content = f"""**Action ID**: {action.id}
 **Type**: {action.type}
 **Status**: {action.status}
