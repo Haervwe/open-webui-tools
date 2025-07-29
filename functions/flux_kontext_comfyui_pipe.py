@@ -13,10 +13,12 @@ import aiohttp
 import asyncio
 import random
 from typing import List, Dict, Callable, Optional
+from distro import name
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import get_last_user_message_item
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.models.users import User, Users
+from open_webui.constants import TASKS
 
 import logging
 import requests
@@ -24,7 +26,7 @@ import requests
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+name = "ComfyUI Universal Pipe"
 
 # --- OLLAMA VRAM Management Functions ---
 def get_loaded_models(api_url: str = "http://localhost:11434") -> list:
@@ -104,7 +106,7 @@ DEFAULT_WORKFLOW_JSON = json.dumps(
         },
         "194": {
             "inputs": {
-                "seed": 558680250753563,
+                "seed": random.randint(1, 2**32 - 1),
                 "steps": 20,
                 "cfg": 1,
                 "sampler_name": "dpmpp_2m",
@@ -343,7 +345,7 @@ class Pipe:
         enhanced_prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
         await event_emitter(
             {
-                "type": "message",
+                "type": "chat:message:delta",
                 "data": {
                     "content": enhanced_prompt_message,
                 },
@@ -356,6 +358,7 @@ class Pipe:
         body: dict,
         __user__: dict,
         __event_emitter__: Callable,
+        __task__=None,
         __request__=None,
     ) -> dict:
         self.__event_emitter__ = __event_emitter__
@@ -371,12 +374,19 @@ class Pipe:
                 self.__request__,
                 self.__event_emitter__,
             )
-
-        if self.valves.unload_ollama_models:
-            await self.emit_status(
-                self.__event_emitter__, "info", "Unloading Ollama models..."
-            )
-            unload_all_models(api_url=self.valves.ollama_url)
+        if __task__ and __task__ != TASKS.DEFAULT:
+            if self.valves.vision_model_id:
+                response = await generate_chat_completion(
+                    self.__request__,
+                    {
+                        "model": self.valves.vision_model_id,
+                        "messages": body.get("messages"),
+                    "stream": False,
+                },
+                user=self.__user__,
+                )
+                return f"{name}: {response['choices'][0]['message']['content']}"
+            return f"{name}: Edited Image!"
 
         if not base64_image:
             await self.emit_status(
@@ -472,7 +482,7 @@ class Pipe:
                     f"Here is the edited image:\n\n![Generated Image]({image_url})"
                 )
                 await self.__event_emitter__(
-                    {"type": "message", "data": {"content": response_content}}
+                    {"type": "chat:message:delta", "data": {"content": response_content}}
                 )
                 await self.emit_status(
                     self.__event_emitter__,

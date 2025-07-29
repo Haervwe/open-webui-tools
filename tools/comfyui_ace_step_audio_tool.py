@@ -8,6 +8,7 @@ version: 0.2.0
 """
 
 import json
+import random
 from typing import Optional, Dict, Any, Callable, Awaitable
 import aiohttp
 import asyncio
@@ -388,6 +389,7 @@ class Tools:
         )
         tags_node: str = Field(default="14", description="Node ID for tags input.")
         lyrics_node: str = Field(default="14", description="Node ID for lyrics input.")
+        seed_node: str = Field(default="52", description="Node ID for seed input.")
         model_node: str = Field(
             default="40", description="Node ID for model checkpoint input."
         )
@@ -533,7 +535,7 @@ class Tools:
                 self.valves.model_name,
             ):
                 return f"Error: Model node ID '{self.valves.model_node}' not found/configured."
-
+            active_workflow[self.valves.seed_node]["inputs"]["seed"] = random.randint(1, 2**32 - 1)
             client_id = str(uuid.uuid4())
             payload = {"prompt": active_workflow, "client_id": client_id}
 
