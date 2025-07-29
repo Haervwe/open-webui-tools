@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.0.6
+version: 2.0.7
 """
 
 import re
@@ -534,7 +534,7 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                 form_data,
                 user=self.__user__,
             )
-            response_content = response["choices"][0]["message"].get("content","")
+            response_content = response["choices"][0]["message"].get("content", "")
             tool_calls: list[dict[str, Any]] | None = None
             logger.debug(f"{tool_calls}")
             try:
@@ -579,20 +579,47 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                         """Recursively resolve @action_id references in tool parameters"""
                         resolved_params: dict[str, Any] = {}
                         for key, value in params.items():
-                            if isinstance(value, str) and value.startswith("@"):
-                                action_id = value[1:]
-                                if action_id in action_results:
-                                    resolved_params[key] = action_results[
-                                        action_id
-                                    ].get("primary_output", "")
-                                    logger.info(
-                                        f"Resolved @{action_id} reference in parameter '{key}'"
-                                    )
+                            if isinstance(value, str):
+                                if value.startswith("@"):
+                                    # Direct reference to an action
+                                    action_id = value[1:]
+                                    if action_id in action_results:
+                                        resolved_params[key] = action_results[
+                                            action_id
+                                        ].get("primary_output", "")
+                                        logger.info(
+                                            f"Resolved @{action_id} reference in parameter '{key}'"
+                                        )
+                                    else:
+                                        resolved_params[key] = value
+                                        logger.warning(
+                                            f"Action ID '{action_id}' not found for reference in parameter '{key}'"
+                                        )
                                 else:
-                                    resolved_params[key] = value
-                                    logger.warning(
-                                        f"Action ID '{action_id}' not found for reference in parameter '{key}'"
-                                    )
+                                    pattern = r"@([a-zA-Z0-9_-]+)"
+                                    matches = re.findall(pattern, value)
+
+                                    if matches:
+                                        resolved_value = value
+                                        for match in matches:
+                                            action_id = match
+                                            if action_id in action_results:
+                                                replacement = action_results[
+                                                    action_id
+                                                ].get("primary_output", "")
+                                                resolved_value = resolved_value.replace(
+                                                    f"@{action_id}", replacement
+                                                )
+                                                logger.info(
+                                                    f"Resolved embedded @{action_id} reference in string parameter '{key}'"
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    f"Embedded action ID '{action_id}' not found in string parameter '{key}'"
+                                                )
+                                        resolved_params[key] = resolved_value
+                                    else:
+                                        resolved_params[key] = value
                             elif isinstance(value, dict):
                                 resolved_params[key] = resolve_action_references(value)
                             elif isinstance(value, list):
@@ -603,7 +630,7 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                                         if action_id in action_results:
                                             resolved_list.append(
                                                 action_results[action_id].get(
-                                                    "result", ""
+                                                    "primary_output", ""
                                                 )
                                             )
                                             logger.info(
@@ -759,6 +786,8 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
         system_prompt = f"""
 You are a planning agent. Break down the goal into a logical sequence of actions that build upon each other.
 
+IMPORTANT: All plans MUST include a final_synthesis step that combines the outputs from previous steps into a final deliverable.
+
 OUTPUT FORMAT CONSIDERATIONS:
 - ALL action outputs are TEXT or HYPERLINKS (URLs/URIs)
 - Image generation tools return URLs/file paths as text, NOT actual image files
@@ -767,8 +796,10 @@ OUTPUT FORMAT CONSIDERATIONS:
 - Do NOT assume any special formatting - treat all outputs as plain text or clickable links
 - Action IDs are indepedent of tools and tool calls, Asign an action_id that correspond with the step specific Goal
 
-FINAL SYNTHESIS REQUIREMENT:
+FINAL SYNTHESIS REQUIREMENT (MANDATORY):
+- EVERY plan MUST include a final_synthesis action as the last step
 - The final_synthesis action MUST include ALL RELEVANT content outputs in its template
+- The final_synthesis template IS the actual deliverable that will be presented to the user
 - Include actions that produce deliverable content: text, images, code, research results, etc.
 - Do NOT miss important outputs like images, documents, or other key deliverables
 - Exclude only auxiliary/setup actions that don't produce end-user content (like configuration or intermediate processing steps)
@@ -936,7 +967,7 @@ FINAL SYNTHESIS REQUIREMENTS:
 - Template must reference all important deliverables using {{action_id}} placeholders
 - Model field should be empty "" (no LLM needed for templating)
 
-REMEMBER: The final_synthesis action is a PURE TEMPLATING step - it takes the "primary_output" from each referenced action and substitutes it into the template. No AI generation happens here, just text replacement. Design your template to be the exact final output you want users to see.
+REMEMBER: The final_synthesis action is a PURE TEMPLATING step - it takes the "primary_output" from each referenced action and substitutes it into the template. No AI generation happens here, just text replacement. Design your template to be the exact final output you want users to see. The template you create IS the final deliverable, not a reference or placeholder for another file.
 
 JSON OUTPUT:
 {{
@@ -1056,7 +1087,7 @@ JSON OUTPUT:
                 )
 
                 if not any(a.id == "final_synthesis" for a in plan.actions):
-                    msg = "The generated plan is missing the required 'final_synthesis' action."
+                    msg = "The generated plan is missing the required 'final_synthesis' action. This is a MANDATORY step that creates the final deliverable by combining outputs from previous steps. The final_synthesis template IS the actual content that will be delivered to the user."
                     messages += [
                         {
                             "role": "assistant",
@@ -1375,48 +1406,58 @@ If no suitable tools are found, return an empty array: []
 
     async def validate_and_enhance_template(self, plan: Plan):
         """Check if the final_synthesis template has all required action IDs and enhance it if needed."""
-        await self.emit_status(
-            "info", "Validating final_synthesis template...", False
-        )
+        await self.emit_status("info", "Validating final_synthesis template...", False)
 
         final_synthesis = next(
             (a for a in plan.actions if a.id == "final_synthesis"), None
         )
-        
+
         if not final_synthesis:
+            await self.emit_status(
+                "error",
+                "Missing mandatory final_synthesis step! The plan must include a final synthesis template that combines outputs into a deliverable.",
+                False,
+            )
+            logger.error("Plan missing required final_synthesis action.")
             return  # No final_synthesis action to validate
 
         template = final_synthesis.description
-        
+
         # Extract placeholders from template
         placeholder_pattern = r"\{([a-zA-Z0-9_]+)\}"
         template_placeholders = set(re.findall(placeholder_pattern, template))
-        
+
         # Get action IDs from dependencies (these are what should be in template)
         dependency_ids = set(final_synthesis.dependencies)
-        
+
         # Find missing action IDs in template
         missing_in_template = dependency_ids - template_placeholders
-        
+
         if not missing_in_template:
             await self.emit_status(
-                "success", "Template validation passed - all dependencies are referenced in template.", False
+                "success",
+                "Template validation passed - all dependencies are referenced in template.",
+                False,
             )
             return
 
         await self.emit_status(
-            "info", f"Template missing references to: {', '.join(missing_in_template)}. Enhancing template...", False
+            "info",
+            f"Template missing references to: {', '.join(missing_in_template)}. Enhancing template...",
+            False,
         )
 
         # Get all actions for context
         actions_info = []
         for action in plan.actions:
             if action.id != "final_synthesis":
-                actions_info.append({
-                    "id": action.id,
-                    "type": action.type,
-                    "description": action.description
-                })
+                actions_info.append(
+                    {
+                        "id": action.id,
+                        "type": action.type,
+                        "description": action.description,
+                    }
+                )
 
         template_enhancement_prompt = f"""
 You are a template enhancement expert for the final_synthesis action. Your job is to enhance an incomplete template by adding missing action references in logical positions.
@@ -1427,6 +1468,8 @@ The final_synthesis action uses a TEMPLATING SYSTEM where:
 - Each placeholder becomes the actual content (text, URLs, code, etc.) from the referenced action
 - The template structure becomes the final user-facing output after placeholder substitution
 - This is PURE TEXT REPLACEMENT - no AI processing happens during synthesis
+- THIS TEMPLATE IS THE ACTUAL FINAL DELIVERABLE that will be presented to the user
+- The template should NOT reference saving files or outputs elsewhere - it should contain the actual content
 
 CURRENT SITUATION:
 GOAL: {plan.goal}
@@ -1498,14 +1541,16 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                 action_results={},
                 action=None,
             )
-            
+
             # Update the final_synthesis action with enhanced template
             final_synthesis.description = enhanced_template.strip()
-            
+
             await self.emit_status(
-                "success", f"Template enhanced successfully with missing references: {', '.join(missing_in_template)}", False
+                "success",
+                f"Template enhanced successfully with missing references: {', '.join(missing_in_template)}",
+                False,
             )
-            
+
         except Exception as e:
             await self.emit_status(
                 "warning", f"Failed to enhance template: {str(e)}", False
@@ -2078,7 +2123,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
             if action.id == "final_synthesis":
                 await self.emit_status(
-                    "info", "Assembling final output from template...", False
+                    "info", "Assembling final deliverable from template...", False
                 )
                 action.status = "in_progress"
                 action.start_time = datetime.now().strftime("%H:%M:%S")
@@ -2114,7 +2159,11 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 completed.add(action.id)
                 completed_results[action.id] = action.output
 
-                await self.emit_status("success", "Final output assembled.", True)
+                await self.emit_status(
+                    "success",
+                    "Final deliverable assembled. This is the complete result that will be presented to the user.",
+                    True,
+                )
 
                 # Check if this is truly the final action (no more actions to execute)
                 remaining_actions = [a for a in plan.actions if a.id not in completed]
@@ -2248,9 +2297,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         )
 
     def clean_nested_markdown(self, text: str) -> str:
-        """Clean nested markdown image syntax like ![alt](![alt2](url)) to just ![alt2](url)"""
-        import re
-
         nested_pattern = r"!\[([^\]]*)\]\(!\[([^\]]*)\]\(([^)]+)\)\)"
 
         cleaned_text = re.sub(nested_pattern, r"![\2](\3)", text)
