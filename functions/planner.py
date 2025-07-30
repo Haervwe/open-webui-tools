@@ -26,6 +26,24 @@ from open_webui.models.tools import Tools
 name = "Planner"
 
 
+def setup_logger():
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        handler.set_name(name)
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.propagate = False
+    return logger
+
+
+logger = setup_logger()
+
+
 def clean_thinking_tags(message: str) -> str:
     pattern = re.compile(
         r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>"
@@ -48,6 +66,7 @@ def clean_json_response(response_text: str) -> str:
 
 
 def parse_structured_output(response: str) -> dict[str, str]:
+    
     """
     Parse agent output into structured format {"primary_output": str, "supporting_details": str}.
     If the response is not in the expected JSON format, treat the entire response as 'primary_output'.
@@ -65,24 +84,6 @@ def parse_structured_output(response: str) -> dict[str, str]:
         pass
 
     return {"primary_output": response, "supporting_details": ""}
-
-
-def setup_logger():
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        logger.setLevel(logging.DEBUG)
-        handler = logging.StreamHandler()
-        handler.set_name(name)
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        logger.propagate = False
-    return logger
-
-
-logger = setup_logger()
 
 
 class Action(BaseModel):
@@ -1602,6 +1603,16 @@ Return ONLY the enhanced template description. Do not include explanations, comm
             else self.valves.ACTION_PROMPT_REQUIREMENTS_TEMPLATE
         )
 
+        user_guidance_text = ""
+        if action.params and "user_guidance" in action.params:
+            user_guidance_text = f"""
+            
+            **IMPORTANT USER GUIDANCE**:
+            {action.params["user_guidance"]}
+            
+            Please carefully consider this guidance when executing the action.
+            """
+
         if action.use_lightweight_context:
             base_prompt = f"""
             Execute step {step_number}: {action.description}
@@ -1612,6 +1623,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
             - Action IDs and hints: {json.dumps(context_for_prompt)}
         
             {requirements}
+            {user_guidance_text}
             
             Focus ONLY on this specific step's output.
             Use the action IDs as identifiers/parameters in your tool calls when referencing previous results.
@@ -1626,6 +1638,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
             - Previous Results: {json.dumps(context_for_prompt)}
         
             {requirements}
+            {user_guidance_text}
             
             Focus ONLY on this specific step's output.
             """
@@ -1843,7 +1856,19 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                     await self.emit_status(
                         "error", f"Action failed after all attempts: {str(e)}", True
                     )
-                    raise
+                    
+                    # Prompt user for failed action (exception case)
+                    user_decision = await self.handle_failed_action_with_exception(action, str(e))
+                    if user_decision == "retry":
+                        # Reset action and retry
+                        action.status = "pending"
+                        action.start_time = None
+                        action.end_time = None
+                        action.tool_calls.clear()
+                        action.tool_results.clear()
+                        return await self.execute_action(plan, action, context, step_number)
+                    else:
+                        raise RuntimeError("User chose to abort after action failure")
 
         if best_output is None or best_reflection is None:
             action.status = "failed"
@@ -1853,13 +1878,36 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                 "Action failed to produce any valid output after all attempts",
                 True,
             )
-            raise RuntimeError("No valid output produced after all attempts")
+            
+            # Prompt user for failed action
+            user_decision = await self.handle_failed_action(action)
+            if user_decision == "retry":
+                # Reset action and retry
+                action.status = "pending"
+                action.start_time = None
+                action.end_time = None
+                action.tool_calls.clear()
+                action.tool_results.clear()
+                return await self.execute_action(plan, action, context, step_number)
+            else:
+                raise RuntimeError("User chose to abort after action failure")
 
         if not best_reflection.is_successful:
             action.status = "warning"
             action.end_time = datetime.now().strftime("%H:%M:%S")
             action.output = best_output
-
+            
+            # Prompt user for warning action
+            user_decision = await self.handle_warning_action(action, best_output, best_reflection)
+            if user_decision == "retry":
+                # Reset action and retry
+                action.status = "pending"
+                action.start_time = None
+                action.end_time = None
+                action.tool_calls.clear()
+                action.tool_results.clear()
+                return await self.execute_action(plan, action, context, step_number)
+            # If approved, continue with warning status
 
         else:
             action.status = "completed"
@@ -2199,8 +2247,23 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             except Exception as e:
                 step_counter += 1
                 logger.error(f"Action {action.id} failed: {e}")
-                action.status = "failed"
-                completed.add(action.id)
+                
+                # Check if this is a user abort decision
+                if "User chose to abort" in str(e):
+                    await self.emit_status(
+                        "error",
+                        f"Plan execution aborted by user due to failed action: {action.id}",
+                        True,
+                    )
+                    # Set action as failed and break execution
+                    action.status = "failed"
+                    completed.add(action.id)
+                    await self.emit_full_state(plan, completed_summaries)
+                    break  # Stop plan execution
+                else:
+                    # Regular failure handling
+                    action.status = "failed"
+                    completed.add(action.id)
 
                 await self.emit_full_state(plan, completed_summaries)
             finally:
@@ -2273,11 +2336,17 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         )
 
     def clean_nested_markdown(self, text: str) -> str:
-        nested_pattern = r"!\[([^\]]*)\]\(!\[([^\]]*)\]\(([^)]+)\)\)"
 
-        cleaned_text = re.sub(nested_pattern, r"![\2](\3)", text)
+        nested_image_in_text_pattern = r"!\[([^\]]*)\]\([^!\)]*!\[([^\]]*)\]\(([^)]+)\)[^)]*\)"
+        text = re.sub(nested_image_in_text_pattern, r"![\2](\3)", text)
 
-        return cleaned_text
+        classic_nested_pattern = r"!\[([^\]]*)\]\(!\[([^\]]*)\]\(([^)]+)\)\)"
+        text = re.sub(classic_nested_pattern, r"![\2](\3)", text)
+        
+        nested_link_in_image_pattern = r"!\[([^\]]*)\]\([^!\)]*\[([^\]]*)\]\(([^)]+)\)[^)]*\)"
+        text = re.sub(nested_link_in_image_pattern, r"![\1](\3)", text)
+        
+        return text
 
     def format_action_output(
         self, action: Action, output: dict[str, str], is_final_result: bool = False
@@ -2322,8 +2391,13 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         final_synthesis_action = next(
             (a for a in plan.actions if a.id == "final_synthesis"), None
         )
+        
+        incomplete_actions = [
+            a for a in plan.actions 
+            if a.status not in ["completed", "warning", "failed"] and a.id != "final_synthesis"
+        ]
 
-        if final_synthesis_action and self.valves.SHOW_ACTION_SUMMARIES:
+        if final_synthesis_action and self.valves.SHOW_ACTION_SUMMARIES and incomplete_actions:
             template = final_synthesis_action.description
             preview_template = template
 
@@ -2425,6 +2499,78 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
         return f"<details>\n<summary>{summary_title}</summary>\n\n{summary_content}\n\n---\n\n</details>"
 
+    async def handle_failed_action(self, action: Action) -> str:
+        """Handle a completely failed action by prompting user for retry or abort decision"""
+        
+        user_response = await self.__current_event_call__({
+            "type": "input",
+            "data": {
+                "title": "🚨 Action Failed",
+                "message": f"Action '{action.description}' failed completely after all retry attempts.",
+                "placeholder": "Type 'retry' to try again, 'abort' to stop, or provide guidance..."
+            }
+        })
+        
+        response_text = user_response.lower().strip() if user_response else "abort"
+        
+        if "retry" in response_text:
+            if len(response_text) > 10:  
+                if not action.params:
+                    action.params = {}
+                action.params["user_guidance"] = user_response
+            return "retry"
+        else:
+            return "abort"
+
+    async def handle_failed_action_with_exception(self, action: Action, error_message: str) -> str:
+        """Handle an action that failed with an exception by prompting user for retry or abort decision"""
+        
+        user_response = await self.__current_event_call__({
+            "type": "input",
+            "data": {
+                "title": "🚨 Action Failed with Exception",
+                "message": f"Action '{action.description}' failed with error: {error_message}",
+                "placeholder": "Type 'retry' to try again, 'abort' to stop, or provide guidance..."
+            }
+        })
+        
+        response_text = user_response.lower().strip() if user_response else "abort"
+        
+        if "retry" in response_text:
+            if len(response_text) > 10:
+                if not action.params:
+                    action.params = {}
+                action.params["user_guidance"] = user_response
+            return "retry"
+        else:
+            return "abort"
+
+    async def handle_warning_action(self, action: Action, best_output: dict[str, str], best_reflection: ReflectionResult) -> str:
+        """Handle an action with warnings by showing output and prompting for approval or retry"""
+        
+        primary_output = best_output.get("primary_output", "")
+        display_primary = primary_output[:500] + "..." if len(primary_output) > 500 else primary_output
+        
+        user_response = await self.__current_event_call__({
+            "type": "input", 
+            "data": {
+                "title": "⚠️ Action Completed with Warnings",
+                "message": f"Action '{action.description}' completed with quality score {best_reflection.quality_score:.2f}/1.0\n\nOutput preview:\n{display_primary}",
+                "placeholder": "Type 'approve' to accept output, 'retry' to try again, or provide guidance..."
+            }
+        })
+        
+        response_text = user_response.lower().strip() if user_response else "approve"
+        
+        if "retry" in response_text:
+            if len(response_text) > 10: 
+                if not action.params:
+                    action.params = {}
+                action.params["user_guidance"] = user_response
+            return "retry"
+        else:
+            return "approve"
+
     async def emit_action_summary(self, action: Action, plan: Plan):
         """Emit a detailed summary of a completed action in dropdown format"""
         summary = self.generate_action_summary(action, plan)
@@ -2442,6 +2588,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         __user__: dict[str, Any] | User,
         __request__: Request,
         __event_emitter__: Callable[..., Awaitable[None]],
+        __event_call__: Callable[..., Awaitable[Any]],
         __task__: TASKS | None = None,
         __model__: str | dict[str, Any] | None = None,
         user: dict[str, Any] | None = None,
@@ -2459,6 +2606,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             return f"{name}: {response['choices'][0]['message']['content']}"
 
         self.__current_event_emitter__ = __event_emitter__  # type: ignore
+        self.__current_event_call__ = __event_call__  # type: ignore
         self.__model__ = model
 
         goal = body.get("messages", [])[-1].get("content", "").strip()
