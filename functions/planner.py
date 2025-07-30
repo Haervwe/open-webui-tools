@@ -282,6 +282,8 @@ WRITER-SPECIFIC REQUIREMENTS:
 - Focus on narrative flow and reader engagement
 - Produce polished, publication-ready content for this action step only
 - Do not break character or reference being an AI
+- If asked to create scientific or technical content, ensure it is accurate and well-researched
+- Act as a top tier scientific writer if context requieres it
 - Your response must be a JSON object with "primary_output" and "supporting_details" fields
 
 CRITICAL FIELD REQUIREMENTS - AUTOMATIC FAILURE IF VIOLATED:
@@ -581,7 +583,6 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                         for key, value in params.items():
                             if isinstance(value, str):
                                 if value.startswith("@"):
-                                    # Direct reference to an action
                                     action_id = value[1:]
                                     if action_id in action_results:
                                         resolved_params[key] = action_results[
@@ -660,7 +661,6 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                     logger.debug(f"{tool_call} , {tool_function_params}")
                     tool_result = await tool_function(**tool_function_params)
 
-                    # Store successful tool result
                     if action:
                         action.tool_results[tool_function_name] = str(tool_result)
 
@@ -1419,18 +1419,15 @@ If no suitable tools are found, return an empty array: []
                 False,
             )
             logger.error("Plan missing required final_synthesis action.")
-            return  # No final_synthesis action to validate
+            return  
 
         template = final_synthesis.description
 
-        # Extract placeholders from template
         placeholder_pattern = r"\{([a-zA-Z0-9_]+)\}"
         template_placeholders = set(re.findall(placeholder_pattern, template))
 
-        # Get action IDs from dependencies (these are what should be in template)
         dependency_ids = set(final_synthesis.dependencies)
 
-        # Find missing action IDs in template
         missing_in_template = dependency_ids - template_placeholders
 
         if not missing_in_template:
@@ -1447,7 +1444,7 @@ If no suitable tools are found, return an empty array: []
             False,
         )
 
-        # Get all actions for context
+
         actions_info = []
         for action in plan.actions:
             if action.id != "final_synthesis":
@@ -1542,7 +1539,6 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                 action=None,
             )
 
-            # Update the final_synthesis action with enhanced template
             final_synthesis.description = enhanced_template.strip()
 
             await self.emit_status(
@@ -1651,8 +1647,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                         f"Attempt {current_attempt + 1}/{self.valves.MAX_RETRIES + 1} for action {action.id}",
                         False,
                     )
-                # Note: action.status is already set to "in_progress" in execute_plan
-
+               
                 if current_attempt > 0 and best_reflection:
                     retry_guidance = ""
                     if action.tool_ids and not action.tool_calls:
@@ -1727,7 +1722,6 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                         },
                     }
 
-                    # Determine appropriate temperature based on model type
                     if execution_model == self.valves.WRITER_MODEL:
                         model_temperature = self.valves.WRITER_TEMPERATURE
                     elif execution_model == self.valves.CODER_MODEL:
@@ -1771,7 +1765,6 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                     structured_output = parse_structured_output(response)
                     current_output = structured_output
 
-                    # Show the current attempt immediately to user (before analysis)
                     formatted_output = self.format_action_output(action, current_output)
                     await self.emit_message(formatted_output)
 
@@ -1818,24 +1811,20 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                     best_quality_score = current_reflection.quality_score
 
                 if current_reflection.is_successful:
-                    # Analysis passed - action output will become summary in main loop
                     break
                 else:
-                    # Analysis failed - if we're retrying, prepare for next attempt
+
                     if attempts_remaining > 0:
-                        # Show retry status instead of just clearing
                         await self.emit_status(
                             "warning",
                             f"Output needs improvement. Retrying... ({attempts_remaining} attempts remaining) (Quality Score: {current_reflection.quality_score:.2f})",
                             False,
                         )
-                        # Note: unsuccessful output will be replaced by retry attempt
 
                 if attempts_remaining > 0:
                     attempts_remaining -= 1
                     continue
                 else:
-                    # Final failed attempt - output will be handled in summary
                     break
 
             except Exception as e:
@@ -1869,7 +1858,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
             action.status = "warning"
             action.end_time = datetime.now().strftime("%H:%M:%S")
             action.output = best_output
-            # No regular message for failed actions - only summary
+
 
         else:
             action.status = "completed"
@@ -1889,9 +1878,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
         action: Action,
         output: str,
     ) -> ReflectionResult:
-        """Simplified output analysis using an LLM to reflect on the action's result."""
 
-        # Prepare tool call verification information
         expected_tools = action.tool_ids if action.tool_ids else []
         actual_tool_calls = action.tool_calls
         tool_results_summary = {
@@ -2031,10 +2018,10 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
                 if attempts_remaining > 0:
                     attempts_remaining -= 1
-                    await asyncio.sleep(1)  # Brief delay before retry
+                    await asyncio.sleep(1)
                     continue
                 else:
-                    # All retries exhausted - return default failure result
+
                     return ReflectionResult(
                         is_successful=False,
                         quality_score=0.0,
@@ -2053,10 +2040,9 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
                 if attempts_remaining > 0:
                     attempts_remaining -= 1
-                    await asyncio.sleep(1)  # Brief delay before retry
+                    await asyncio.sleep(1)
                     continue
                 else:
-                    # All retries exhausted - return default failure result
                     return ReflectionResult(
                         is_successful=False,
                         quality_score=0.0,
@@ -2064,7 +2050,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                         suggestions=["Retry the action."],
                     )
 
-        # This should never be reached, but added for completeness
         return ReflectionResult(
             is_successful=False,
             quality_score=0.0,
@@ -2082,7 +2067,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         completed: set[str] = set()
         step_counter = 1
         all_outputs: list[dict[str, int | str]] = []
-        completed_summaries: list[str] = []  # Track completed action summaries
+        completed_summaries: list[str] = []
 
         async def can_execute(action: Action) -> bool:
             return all(dep in completed for dep in action.dependencies)
@@ -2165,16 +2150,13 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                     True,
                 )
 
-                # Check if this is truly the final action (no more actions to execute)
                 remaining_actions = [a for a in plan.actions if a.id not in completed]
                 if not remaining_actions:
-                    # This is the final result - show as normal message
                     formatted_output = self.format_action_output(
                         action, action.output, is_final_result=True
                     )
                     await self.emit_message(formatted_output)
                 else:
-                    # There are still actions to execute - add to summaries for now
                     summary = self.generate_action_summary(action, plan)
                     if summary:
                         completed_summaries.append(summary)
@@ -2182,8 +2164,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 continue  #
 
             in_progress.add(action.id)
-
-            # Set status to in_progress and update mermaid immediately
             action.status = "in_progress"
             action.start_time = datetime.now().strftime("%H:%M:%S")
             await self.emit_full_state(plan, completed_summaries)
@@ -2198,12 +2178,11 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 completed_results[action.id] = result
                 completed.add(action.id)
 
-                # Add action summary to collection
+
                 summary = self.generate_action_summary(action, plan)
                 if summary:
                     completed_summaries.append(summary)
 
-                # Update mermaid to show completion
                 await self.emit_full_state(plan, completed_summaries)
 
                 all_outputs.append(
@@ -2221,16 +2200,14 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 logger.error(f"Action {action.id} failed: {e}")
                 action.status = "failed"
                 completed.add(action.id)
-                # Update mermaid to show failure
+
                 await self.emit_full_state(plan, completed_summaries)
             finally:
                 if action.id in in_progress:
                     in_progress.remove(action.id)
 
-        # Final state update
         await self.emit_full_state(plan, completed_summaries)
 
-        # Check if final synthesis was completed and show it as final message
         final_synthesis_action = next(
             (
                 a
@@ -2240,12 +2217,10 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             None,
         )
         if final_synthesis_action and final_synthesis_action.output:
-            # Remove final synthesis from summaries if it exists
             completed_summaries = [
                 s for s in completed_summaries if "🎯 Final Synthesis Complete" not in s
             ]
 
-            # Show final synthesis as the ultimate result
             formatted_output = self.format_action_output(
                 final_synthesis_action,
                 final_synthesis_action.output,
@@ -2315,7 +2290,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
         if action.id == "final_synthesis":
             if is_final_result:
-                # Clean output without header for final result
                 formatted_content = f"{primary_output}\n\n"
             else:
                 formatted_content = (
