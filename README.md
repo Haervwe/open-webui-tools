@@ -376,28 +376,51 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 
 ### 💡 Usage Examples
 
+
+**Multi-Media Content:**
+```
+search the latest AI news and create a song based on that, with that , search for stock images to use a “album cover” and create a mockup of the spotify in a plain html file with vanilla js layout using those assets embeded for interactivity
+```
+
+![Planner Agent Example](img/planner_2.png)
+*Example of Planner Agent in action Using Gemini 2.5 flash and local music generation*
+
+
 **Creative Writing:**
 ```
-Write a complete 3-chapter science fiction short story about AI consciousness with character development and plot twists
+create an epic sci fi Adult novel based on the current trends on academia news and social media about AI and other trending topics, with at least 10 chapters, well crafter world with rich characters , save each chapter in a folter named as the novel in obsidian with an illustration
 ```
+
+![Planner Agent Example](img/planner_3.png)
+*Example of Planner Agent in action Using Gemini 2.5 flash and local image generation, local saving to obsidian and websearch*
+
+
+**Interactive Error Recovery:**
+The Planner Agent features intelligent error handling that engages with users when actions fail or produce suboptimal results. When issues occur, the system pauses execution and presents you with interactive options:
+
+- **Retry with Guidance:** Provide custom instructions to help the agent understand what went wrong and how to improve
+- **Retry As-Is:** Attempt the action again without modifications
+- **Approve Output:** Accept warning-level outputs despite quality concerns
+- **Abort Execution:** Stop the entire plan if the issue is critical
+
+```
+Example scenario: If an action fails to generate proper code or retrieve expected data, 
+you'll be prompted to either provide specific guidance ("try using a different approach") 
+or decide whether to continue with the current output.
+```
+
+![Planner Agent Example](img/planner_error.png)
+*Interactive error recovery dialog showing user options when an action encounters issues during plan execution*
+
+
 
 **Technical Development:**
 ```
 Create a fully-featured Conway's Game of Life SPA with responsive UI, game controls, and pattern presets using vanilla HTML/CSS/JS
 ```
 
-**Research & Analysis:**
-```
-Research latest quantum computing developments from 2024, create analysis report with visuals, and provide investment recommendations
-```
-
-**Multi-Media Content:**
-```
-Create a complete blog post about sustainable energy with research data, generated images, and publication-ready formatting
-```
-
 ![Planner Agent Example](img/planner.png)
-*Example of Planner Agent in action*
+*Example of Planner Agent in action Using local Qwen 3 14b as planner and action model and DeepCoder 14b as Coding model (previous verision of the script)*
 
 ---
 

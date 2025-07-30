@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.1.0
+version: 2.1.1
 """
 
 import re
@@ -850,35 +850,62 @@ that dont need the full context of the previous steps but only a reference to th
   such as when the action can process files or data based on identifiers rather than needing the full
 - Default: false (full context mode)
 
-DEPENDENCY EXAMPLES - EXPLICIT LINKING REQUIRED:
-❌ WRONG - No context flow:
-research_ai → write_ch1, write_ch2, write_ch3 (chapters get no context from each other)
+CRITICAL DEPENDENCY FLOW RULES - CHILD NODES CANNOT ACCESS GRANDPARENT NODES:
 
-❌ WRONG - Implicit/transitive dependencies:
-research_ai → write_ch1 → write_ch2 → write_ch3 
-(ch3 only gets ch2, missing ch1 and research_ai context)
+**FUNDAMENTAL RULE**: Each action can ONLY access content from its DIRECT parent dependencies. There is NO automatic access to grandparent or ancestor nodes.
 
-❌ WRONG - Assuming transitive dependencies work:
-chapter_1 → chapter_2 → chapter_3 
-(chapter_3 WON'T automatically get chapter_1 content, only chapter_2)
+**DEPENDENCY CHAIN CONSTRAINT**: In a dependency chain A → B → C, action C can ONLY see the output from action B. Action C CANNOT see action A's output unless A is explicitly listed in C's dependencies.
 
-✅ CORRECT - Explicit dependencies for all needed context:
+**EXPLICIT DEPENDENCY REQUIREMENT**: If an action needs content from multiple previous actions, ALL of them MUST be explicitly listed in the dependencies array.
+
+DEPENDENCY EXAMPLES - PROPER PARENT-CHILD FLOW:
+
+❌ WRONG - Assuming transitive/grandparent access:
+```
+research_ai → write_ch1 → write_ch2 → write_ch3
+```
+Problem: write_ch3 can only see write_ch2 output, NOT research_ai or write_ch1
+
+❌ WRONG - Missing explicit dependencies:
+```
+research_ai → story_outline → write_ch1
+write_ch2 depends on [write_ch1]  // Missing story_outline and research_ai
+```
+Problem: write_ch2 only gets write_ch1 context, missing essential outline and research
+
+❌ WRONG - Incomplete dependency chains:
+```
+create_outline → write_intro → write_body → write_conclusion
+```
+Problem: write_conclusion can't access create_outline or write_intro, only write_body
+
+✅ CORRECT - Explicit parent dependencies:
+```
 research_ai → write_ch1 
-write_ch2 depends on [research_ai, write_ch1]
-write_ch3 depends on [research_ai, write_ch1, write_ch2] 
-(each chapter EXPLICITLY lists ALL previous actions it needs)
+write_ch2 depends on [research_ai, write_ch1]           // EXPLICIT access to both
+write_ch3 depends on [research_ai, write_ch1, write_ch2] // EXPLICIT access to all needed
+```
 
-✅ CORRECT - Story development with explicit dependencies:
+✅ CORRECT - Proper story development:
+```
 research_ai → story_outline → character_sheet → write_ch1
-write_ch2 depends on [story_outline, character_sheet, write_ch1]
-write_ch3 depends on [story_outline, character_sheet, write_ch1, write_ch2]
+write_ch2 depends on [story_outline, character_sheet, write_ch1]  // ALL needed dependencies
+write_ch3 depends on [story_outline, character_sheet, write_ch1, write_ch2]  // ALL needed
+```
 
-✅ CORRECT - Book compilation example:
-research → outline → ch1 → ch2 → ch3 → compile_book
-compile_book depends on [outline, ch1, ch2, ch3] (explicitly lists all chapters needed)
+✅ CORRECT - Multi-source compilation:
+```
+research → outline → ch1
+         → outline → ch2  
+         → outline → ch3
+compile_book depends on [outline, ch1, ch2, ch3]  // EXPLICIT access to all chapters
+```
 
-REMEMBER: Dependencies are NOT transitive. If action C needs content from action A and action B, 
-it must explicitly list BOTH A and B in its dependencies, even if B already depends on A.
+**CRITICAL UNDERSTANDING**: 
+- Each action is a separate execution context that ONLY receives the outputs from actions explicitly listed in its dependencies
+- There is NO automatic inheritance or transitive dependency resolution
+- If an action needs context from action A, action A MUST be in its dependencies array, regardless of any intermediate actions
+- The system enforces strict parent-child relationships to prevent context pollution and ensure predictable execution
 
 FINAL SYNTHESIS - COMPREHENSIVE TEMPLATING GUIDE:
 The final_synthesis action is a SPECIAL TEMPLATING ACTION that assembles the final output by combining results from previous actions.
@@ -1407,8 +1434,8 @@ If no suitable tools are found, return an empty array: []
             )
 
     async def validate_and_enhance_template(self, plan: Plan):
-        """Check if the final_synthesis template has all required action IDs and enhance it if needed."""
-        await self.emit_status("info", "Validating final_synthesis template...", False)
+        """Always enhance the final_synthesis template to ensure proper formatting and completeness."""
+        await self.emit_status("info", "Enhancing final_synthesis template...", False)
 
         final_synthesis = next(
             (a for a in plan.actions if a.id == "final_synthesis"), None
@@ -1432,20 +1459,11 @@ If no suitable tools are found, return an empty array: []
 
         missing_in_template = dependency_ids - template_placeholders
 
-        if not missing_in_template:
-            await self.emit_status(
-                "success",
-                "Template validation passed - all dependencies are referenced in template.",
-                False,
-            )
-            return
-
         await self.emit_status(
             "info",
-            f"Template missing references to: {', '.join(missing_in_template)}. Enhancing template...",
+            "Enhancing template for better formatting and completeness...",
             False,
         )
-
 
         actions_info = []
         for action in plan.actions:
@@ -1459,7 +1477,7 @@ If no suitable tools are found, return an empty array: []
                 )
 
         template_enhancement_prompt = f"""
-You are a template enhancement expert for the final_synthesis action. Your job is to enhance an incomplete template by adding missing action references in logical positions.
+You are a template enhancement expert for the final_synthesis action. Your job is to enhance the template by ensuring proper formatting, adding missing action references, and improving overall structure.
 
 UNDERSTANDING TEMPLATES:
 The final_synthesis action uses a TEMPLATING SYSTEM where:
@@ -1477,7 +1495,7 @@ EXISTING TEMPLATE:
 {template}
 
 TEMPLATE DEPENDENCIES: {list(dependency_ids)}
-MISSING REFERENCES: {list(missing_in_template)}
+{"MISSING REFERENCES: " + str(list(missing_in_template)) if missing_in_template else "ALL DEPENDENCIES REFERENCED"}
 
 ALL PLAN ACTIONS CONTEXT:
 {json.dumps(actions_info, indent=2)}
@@ -1486,9 +1504,9 @@ ENHANCEMENT REQUIREMENTS:
 
 1. **PRESERVE EXISTING STRUCTURE**: Keep all current content, formatting, and existing {{action_id}} references exactly as they are
 
-2. **ADD MISSING REFERENCES**: Include ALL missing action references ({list(missing_in_template)}) using {{action_id}} format
+2. **ADD MISSING REFERENCES**: {"Include ALL missing action references (" + str(list(missing_in_template)) + ") using {{action_id}} format" if missing_in_template else "All references are present - focus on formatting improvements"}
 
-3. **LOGICAL PLACEMENT**: Position missing references where they make sense contextually:
+3. **LOGICAL PLACEMENT**: Position any missing references where they make sense contextually:
    - Research actions → Background/Introduction sections
    - Content creation → Main body sections  
    - Images/media → Visual elements with proper markdown
@@ -1508,6 +1526,19 @@ ENHANCEMENT REQUIREMENTS:
 6. **COMPREHENSIVE COVERAGE**: The enhanced template should create a complete deliverable that includes ALL valuable outputs from the plan
 
 7. **USER-FACING QUALITY**: The final output should be professional, well-organized, and immediately useful to users
+
+8. **PROPER BACKTICKS FOR CODE**: 
+   - Always use proper code block formatting with language specification
+   - Use ```python for Python code, ```javascript for JavaScript, ```bash for shell commands, etc.
+   - Ensure code blocks are properly closed with ```
+   - For inline code, use single backticks: `code_snippet`
+
+9. **PROPER MARKDOWN FORMATTING**:
+   - Use proper heading hierarchy (# for main title, ## for sections, ### for subsections)
+   - Use **bold** for emphasis and *italic* for lighter emphasis
+   - Use proper list formatting with - or * for bullets
+   - Use > for blockquotes when appropriate
+   - Use --- for horizontal rules to separate sections
 
 EXAMPLE ENHANCEMENT PATTERNS:
 
@@ -1529,6 +1560,8 @@ CRITICAL RULES:
 - Maintain existing template flow and structure
 - Ensure the template will create a cohesive final document
 - Use proper Markdown syntax for all formatting
+- Always use proper backticks for code blocks with language specification
+- Ensure professional, well-structured output
 
 Return ONLY the enhanced template description. Do not include explanations, comments, or extra text.
 """
@@ -1543,11 +1576,18 @@ Return ONLY the enhanced template description. Do not include explanations, comm
 
             final_synthesis.description = enhanced_template.strip()
 
-            await self.emit_status(
-                "success",
-                f"Template enhanced successfully with missing references: {', '.join(missing_in_template)}",
-                False,
-            )
+            if missing_in_template:
+                await self.emit_status(
+                    "success",
+                    f"Template enhanced successfully with missing references: {', '.join(missing_in_template)}",
+                    False,
+                )
+            else:
+                await self.emit_status(
+                    "success",
+                    "Template enhanced successfully for better formatting and structure",
+                    False,
+                )
 
         except Exception as e:
             await self.emit_status(
