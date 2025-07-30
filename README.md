@@ -24,7 +24,7 @@ This repository contains **15+ specialized tools and functions** designed to enh
   
 
 ### 🔄 **Function Pipes**
-- **Planner Agent v2** - Autonomous task execution with tool support
+- **Planner Agent v2** - Advanced autonomous agent with specialized models, interactive guidance, and comprehensive execution management
 - **arXiv Research MCTS** - Advanced research with Monte Carlo Tree Search
 - **Multi Model Conversations** - Multi-agent discussions
 - **Resume Analyzer** - Professional resume analysis
@@ -336,38 +336,65 @@ Connects Open WebUI to the Flux Kontext image-to-image editing model via ComfyUI
 
 ### Planner Agent v2
 
-Now with tool calling.
+**Advanced autonomous agent with specialized model support, interactive user guidance, and comprehensive execution management.**
 
-This powerful agent allows you to define a goal, and it will autonomously generate and execute a plan to achieve it. The Planner is a generalist agent, capable of handling any text-based task, making it ideal for complex, multi-step requests that would typically require multiple prompts and manual intervention. 
+This powerful agent autonomously generates and executes multi-step plans to achieve complex goals. It's a generalist agent capable of handling any text-based task, making it ideal for complex requests that would typically require multiple prompts and manual intervention.
 
-It features advanced capabilities like:
+### 🚀 Key Features
 
-* **Automatic Plan Generation:**  Breaks down your goal into a sequence of actionable steps with defined dependencies.
-* **Adaptive Execution:**  Executes each step, dynamically adjusting to the results of previous actions.
-* **Reflection and Refinement:** Analyzes the output of each step, identifies potential issues, and iteratively refines the output through multiple attempts.
-* **Robust Error Handling:** Includes retries and fallback mechanisms to ensure successful execution even with occasional API errors.
-* **Detailed Execution Summary:** Provides a comprehensive report of the plan execution, including timings and potential issues.
+* **🧠 Intelligent Planning:** Automatically breaks down goals into actionable steps with dependency mapping
+* **🎨 Specialized Models:** Dedicated models for writing (WRITER_MODEL), coding (CODER_MODEL), and tool usage (ACTION_MODEL) with automatic routing
+* **🔍 Quality Control:** Real-time output analysis with quality scoring (0.0-1.0) and iterative improvement
+* **🎭 Interactive Error Handling:** When actions fail or produce low-quality outputs, the system pauses and prompts you with options: retry with custom guidance/instructions, retry as-is, approve current output despite warnings, or abort the entire plan execution
+* **📊 Live Progress:** Real-time Mermaid diagrams with color-coded status indicators
+* **🧩 Template System:** Final synthesis using `{{action_id}}` placeholders for seamless content assembly
+* **🔧 Native Tool Integration:** Automatically discovers and uses all available Open WebUI tools
+* **⚡ Advanced Features:** Lightweight context mode, concurrent execution, cross-action references (`@action_id`), and comprehensive validation
+* **🔮 MCP(OpenAPI servers) Support:** Model Context Protocol integration coming soon for extended tool capabilities
 
-**Features:**
+### ⚙️ Configuration
 
-* **General Purpose:** Can handle a wide range of text-based tasks, from creative writing and code generation to research summarization and problem-solving.
-* **Multi-Step Task Management:** Excels at managing complex tasks that require multiple steps and dependencies.
-* **Integration with Native Open WebUI Tools:** Agents can use asigned tools to complete the task.
-* **Context Awareness:**  Maintains context throughout the execution process, ensuring that each step builds upon the previous ones.
-* **Output Optimization:**  Employs a reflection mechanism to analyze and improve the output of each step through multiple iterations.
+**Core Models:**
+- `MODEL`: Main planning LLM
+- `ACTION_MODEL`: Tool-based actions and general tasks  
+- `WRITER_MODEL`: Creative writing and documentation
+- `CODER_MODEL`: Code generation and development
 
-### Configuration
-- `MODEL`: The model ID for the main planning LLM.
-- `ACTION_MODEL`: The model ID for executing most actions.
-- `WRITER_MODEL`: The model ID for text-heavy actions like writing documentation.
-- `MAX_RETRIES`: The number of times an action can be retried if it fails.
-- `AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT`: Whether to use an LLM to enhance the requirements for each task.
+**Temperature Controls:**
+- `PLANNING_TEMPERATURE` (0.8): Planning creativity
+- `ACTION_TEMPERATURE` (0.7): Tool execution precision
+- `WRITER_TEMPERATURE` (0.9): Creative writing freedom
+- `CODER_TEMPERATURE` (0.3): Code generation accuracy
+- `ANALYSIS_TEMPERATURE` (0.4): Output analysis precision
 
-### Usage
-- **Example:**
-  ```
-  Create a fully-featured Single Page Application (SPA) for Conway's Game of Life, including a responsive UI. No frameworks, only clean HTML, JS, and CSS.
-  ```
+**Execution Settings:**
+- `MAX_RETRIES` (3): Retry attempts per action
+- `CONCURRENT_ACTIONS` (1): Parallel processing limit
+- `ACTION_TIMEOUT` (300): Individual action timeout
+- `SHOW_ACTION_SUMMARIES` (true): Detailed execution summaries
+- `AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT` (false): AI-enhanced requirements
+
+### 💡 Usage Examples
+
+**Creative Writing:**
+```
+Write a complete 3-chapter science fiction short story about AI consciousness with character development and plot twists
+```
+
+**Technical Development:**
+```
+Create a fully-featured Conway's Game of Life SPA with responsive UI, game controls, and pattern presets using vanilla HTML/CSS/JS
+```
+
+**Research & Analysis:**
+```
+Research latest quantum computing developments from 2024, create analysis report with visuals, and provide investment recommendations
+```
+
+**Multi-Media Content:**
+```
+Create a complete blog post about sustainable energy with research data, generated images, and publication-ready formatting
+```
 
 ![Planner Agent Example](img/planner.png)
 *Example of Planner Agent in action*
