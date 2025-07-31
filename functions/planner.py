@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.1.1
+version: 2.1.2
 """
 
 import re
@@ -66,7 +66,6 @@ def clean_json_response(response_text: str) -> str:
 
 
 def parse_structured_output(response: str) -> dict[str, str]:
-    
     """
     Parse agent output into structured format {"primary_output": str, "supporting_details": str}.
     If the response is not in the expected JSON format, treat the entire response as 'primary_output'.
@@ -225,20 +224,6 @@ CODING GUIDELINES:
         ACTION_SYSTEM_PROMPT: str = Field(
             default="""You are the Action Agent, an expert at executing specific tasks within a larger plan. Your role is to focus solely on executing the current step, using ONLY the available tools and context provided.
 
-CRITICAL OUTPUT STRUCTURE - MANDATORY:
-Your response MUST be a JSON object with exactly these fields:
-{
-    "primary_output": "THE MAIN DELIVERABLE/RESULT GOES HERE",
-    "supporting_details": "Brief context or metadata (max 150 chars)"
-}
-
-FIELD USAGE RULES - AUTOMATIC FAILURE IF VIOLATED:
-- "primary_output": MUST contain the MAIN DELIVERABLE content that users need or subsequent steps will use
-- "supporting_details": MUST only contain brief explanatory notes, source info, or metadata - NEVER the main deliverable
-- WRONG: putting the main result/content in supporting_details while primary_output has just a title/summary
-- WRONG: putting "See supporting details" in primary_output
-- WRONG: primary_output contains only brief descriptions while actual deliverable content is elsewhere
-
 CRITICAL GUIDELINES:
 1. Focus EXCLUSIVELY on this step's task - do not try to solve the overall goal
 2. Use ONLY the outputs from listed dependencies - do not reference other steps
@@ -327,16 +312,22 @@ CRITICAL FIELD REQUIREMENTS - AUTOMATIC FAILURE IF VIOLATED:
             default="""
 ACTION-SPECIFIC REQUIREMENTS:
 - Use the specified tool(s) exactly as documented
-- Process and synthesize tool outputs appropriately
-- Provide clear, actionable results that can be used by dependent steps
-- Include relevant details from tool outputs in your response
-- Do not simply repeat tool outputs - synthesize them meaningfully
+- CRITICAL: Extract and present the COMPLETE, DETAILED content from tool outputs, not condensed summaries
+- When tools return rich information, preserve the valuable details, context, and nuanced content
+- For search tools: Present the full findings with detailed explanations, context, and relevant specifics
+- For research tools: Include comprehensive analysis with supporting details, data points, and thorough insights
+- Provide SUBSTANTIVE, DETAILED content that gives users the complete picture, not just headlines or bullet points
+- Include relevant details, explanations, context, and supporting information from tool outputs
+- Organize information clearly but maintain depth and completeness of the original content
+- Do not oversimplify or reduce complex information to mere titles or brief points
 - You can use @action_id references in tool parameters to reference complete outputs from previous actions (e.g., "@search_results" to use the full output from the search_results action)
 - When using @action_id references, the complete output will be automatically substituted - handle any extra text appropriately for your tool's needs
-- Focus on executing the task with the available tools, not on formatting your response
-- After tool execution, provide a natural, comprehensive response that incorporates the tool results
-- Tool outputs should be processed and the important information included in your final response
-- If tools produce files, images, or URLs, include them properly formatted in your response""",
+- After tool execution, provide a comprehensive, detailed response that incorporates the full substantive content from tool results
+- SYNTHESIS MEANS: Organize and present the complete information in a clear, structured way while preserving important details and context
+- Tool outputs should be processed to include the COMPLETE DETAILED CONTENT in your final response
+- Better to include too much relevant detail than to oversimplify into headlines
+- If tools produce files, images, or URLs, include them properly formatted in your response
+- Focus on delivering thorough, complete information that users can learn from and act upon""",
             description="Additional requirements specifically for Action Model (tool-using) actions",
         )
         LIGHTWEIGHT_CONTEXT_REQUIREMENTS_SUFFIX: str = Field(
@@ -404,7 +395,7 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
     def get_system_prompt_for_model(
         self,
         action: Action,
-        step_number: int,
+        step_number: int | str,
         context: dict[str, Any],
         requirements: str,
         model: str,
@@ -512,6 +503,10 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                 if self.valves.ACTION_MODEL
                 else self.valves.MODEL
             )
+            if action:
+                messages[0]["content"] = self.get_system_prompt_for_model(
+                    action, action.id, action_results, messages[0]["content"], __model
+                )
         else:
             __model = model if model else self.valves.ACTION_MODEL
         _tools = (
@@ -665,7 +660,10 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
 
                     if action:
                         action.tool_results[tool_function_name] = str(tool_result)
-
+                if action and isinstance(model, str):
+                    messages[0]["content"] = self.get_system_prompt_for_model(
+                        action, action.id, action_results, messages[0]["content"], model
+                    )
                 messages: list[dict[str, Any]] = messages + [
                     {"role": "assistant", "content": None, "tool_calls": [tool_call]},
                     {
@@ -679,8 +677,12 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                         "content": (
                             f"The tool '{tool_function_name}' has been executed and returned the output above. "
                             "Now, based on this output and the original task, provide the final, comprehensive answer for this step. "
-                            "Do not simply repeat the tool's output. Synthesize it into a complete response that accomplishes the step's objective. "
-                            "Focus on the actual results and deliverables from the tool execution."
+                            "CRITICAL: Extract and present the COMPLETE, DETAILED content from the tool output. Do not oversimplify into brief summaries or title lists. "
+                            "If the tool returned search results or research data, provide the FULL substantive content with detailed explanations, context, and comprehensive information. "
+                            "Include specific details, examples, data points, and thorough explanations that give users the complete picture. "
+                            "Organize the information clearly but preserve the depth and richness of the original content. "
+                            "Better to include comprehensive details than to reduce complex information to headlines or bullet points. "
+                            "Your response should contain the complete, detailed information that users can learn from and act upon."
                         ),
                     },
                 ]
@@ -714,7 +716,10 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                             - CORRECT EXAMPLE: {"primary_output": "Here is the actual important result...", "supporting_details": "Tool: search, 3 results"}
                             
                             CRITICAL: The "primary_output" field must contain the ACTUAL deliverable (URLs for images, complete text for writing tasks, functional code for coding tasks, etc.), not just descriptions or titles. This content will be directly used by other steps and in the final synthesis.
-                            Tool outputs should be processed and the important information included in "primary_output"
+                            CONTENT DETAIL REQUIREMENT: When tools return information/data, extract and present the COMPLETE, DETAILED content with full context and comprehensive information
+                            For search/research tools: Include the FULL substantive content with detailed explanations, specific examples, and thorough coverage - NOT condensed summaries or title lists
+                            Preserve the depth and richness of the tool output - better to include comprehensive details than to oversimplify
+                            Tool outputs should be processed to include the COMPLETE DETAILED CONTENT/INFORMATION in "primary_output"
                             If tools produce files, images, or URLs, include them properly formatted in "primary_output" """
                 tool_response = await self.get_completion(
                     prompt=messages,
@@ -781,6 +786,7 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
             {
                 "tool_id": tool.id,
                 "tool_name": tool.name,
+                "tool_description": tool.meta.description,
             }
             for tool in Tools.get_tools()
         ]
@@ -1313,6 +1319,7 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
             {
                 "tool_id": tool.id,
                 "tool_name": tool.name,
+                "tool_description": tool.meta.description,
             }
             for tool in Tools.get_tools()
         ]
@@ -1448,7 +1455,7 @@ If no suitable tools are found, return an empty array: []
                 False,
             )
             logger.error("Plan missing required final_synthesis action.")
-            return  
+            return
 
         template = final_synthesis.description
 
@@ -1701,7 +1708,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                         f"Attempt {current_attempt + 1}/{self.valves.MAX_RETRIES + 1} for action {action.id}",
                         False,
                     )
-               
+
                 if current_attempt > 0 and best_reflection:
                     retry_guidance = ""
                     if action.tool_ids and not action.tool_calls:
@@ -1896,9 +1903,11 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                     await self.emit_status(
                         "error", f"Action failed after all attempts: {str(e)}", True
                     )
-                    
+
                     # Prompt user for failed action (exception case)
-                    user_decision = await self.handle_failed_action_with_exception(action, str(e))
+                    user_decision = await self.handle_failed_action_with_exception(
+                        action, str(e)
+                    )
                     if user_decision == "retry":
                         # Reset action and retry
                         action.status = "pending"
@@ -1906,7 +1915,9 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                         action.end_time = None
                         action.tool_calls.clear()
                         action.tool_results.clear()
-                        return await self.execute_action(plan, action, context, step_number)
+                        return await self.execute_action(
+                            plan, action, context, step_number
+                        )
                     else:
                         raise RuntimeError("User chose to abort after action failure")
 
@@ -1918,7 +1929,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                 "Action failed to produce any valid output after all attempts",
                 True,
             )
-            
+
             # Prompt user for failed action
             user_decision = await self.handle_failed_action(action)
             if user_decision == "retry":
@@ -1936,9 +1947,11 @@ Return ONLY the enhanced template description. Do not include explanations, comm
             action.status = "warning"
             action.end_time = datetime.now().strftime("%H:%M:%S")
             action.output = best_output
-            
+
             # Prompt user for warning action
-            user_decision = await self.handle_warning_action(action, best_output, best_reflection)
+            user_decision = await self.handle_warning_action(
+                action, best_output, best_reflection
+            )
             if user_decision == "retry":
                 # Reset action and retry
                 action.status = "pending"
@@ -2267,7 +2280,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 completed_results[action.id] = result
                 completed.add(action.id)
 
-
                 summary = self.generate_action_summary(action, plan)
                 if summary:
                     completed_summaries.append(summary)
@@ -2287,7 +2299,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             except Exception as e:
                 step_counter += 1
                 logger.error(f"Action {action.id} failed: {e}")
-                
+
                 # Check if this is a user abort decision
                 if "User chose to abort" in str(e):
                     await self.emit_status(
@@ -2377,15 +2389,19 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
     def clean_nested_markdown(self, text: str) -> str:
 
-        nested_image_in_text_pattern = r"!\[([^\]]*)\]\([^!\)]*!\[([^\]]*)\]\(([^)]+)\)[^)]*\)"
+        nested_image_in_text_pattern = (
+            r"!\[([^\]]*)\]\([^!\)]*!\[([^\]]*)\]\(([^)]+)\)[^)]*\)"
+        )
         text = re.sub(nested_image_in_text_pattern, r"![\2](\3)", text)
 
         classic_nested_pattern = r"!\[([^\]]*)\]\(!\[([^\]]*)\]\(([^)]+)\)\)"
         text = re.sub(classic_nested_pattern, r"![\2](\3)", text)
-        
-        nested_link_in_image_pattern = r"!\[([^\]]*)\]\([^!\)]*\[([^\]]*)\]\(([^)]+)\)[^)]*\)"
+
+        nested_link_in_image_pattern = (
+            r"!\[([^\]]*)\]\([^!\)]*\[([^\]]*)\]\(([^)]+)\)[^)]*\)"
+        )
         text = re.sub(nested_link_in_image_pattern, r"![\1](\3)", text)
-        
+
         return text
 
     def format_action_output(
@@ -2431,13 +2447,19 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         final_synthesis_action = next(
             (a for a in plan.actions if a.id == "final_synthesis"), None
         )
-        
+
         incomplete_actions = [
-            a for a in plan.actions 
-            if a.status not in ["completed", "warning", "failed"] and a.id != "final_synthesis"
+            a
+            for a in plan.actions
+            if a.status not in ["completed", "warning", "failed"]
+            and a.id != "final_synthesis"
         ]
 
-        if final_synthesis_action and self.valves.SHOW_ACTION_SUMMARIES and incomplete_actions:
+        if (
+            final_synthesis_action
+            and self.valves.SHOW_ACTION_SUMMARIES
+            and incomplete_actions
+        ):
             template = final_synthesis_action.description
             preview_template = template
 
@@ -2541,41 +2563,20 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
     async def handle_failed_action(self, action: Action) -> str:
         """Handle a completely failed action by prompting user for retry or abort decision"""
-        
-        user_response = await self.__current_event_call__({
-            "type": "input",
-            "data": {
-                "title": "🚨 Action Failed",
-                "message": f"Action '{action.description}' failed completely after all retry attempts.",
-                "placeholder": "Type 'retry' to try again, 'abort' to stop, or provide guidance..."
-            }
-        })
-        
-        response_text = user_response.lower().strip() if user_response else "abort"
-        
-        if "retry" in response_text:
-            if len(response_text) > 10:  
-                if not action.params:
-                    action.params = {}
-                action.params["user_guidance"] = user_response
-            return "retry"
-        else:
-            return "abort"
 
-    async def handle_failed_action_with_exception(self, action: Action, error_message: str) -> str:
-        """Handle an action that failed with an exception by prompting user for retry or abort decision"""
-        
-        user_response = await self.__current_event_call__({
-            "type": "input",
-            "data": {
-                "title": "🚨 Action Failed with Exception",
-                "message": f"Action '{action.description}' failed with error: {error_message}",
-                "placeholder": "Type 'retry' to try again, 'abort' to stop, or provide guidance..."
+        user_response = await self.__current_event_call__(
+            {
+                "type": "input",
+                "data": {
+                    "title": "🚨 Action Failed",
+                    "message": f"Action '{action.description}' failed completely after all retry attempts.",
+                    "placeholder": "Type 'retry' to try again, 'abort' to stop, or provide guidance...",
+                },
             }
-        })
-        
+        )
+
         response_text = user_response.lower().strip() if user_response else "abort"
-        
+
         if "retry" in response_text:
             if len(response_text) > 10:
                 if not action.params:
@@ -2585,25 +2586,63 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         else:
             return "abort"
 
-    async def handle_warning_action(self, action: Action, best_output: dict[str, str], best_reflection: ReflectionResult) -> str:
-        """Handle an action with warnings by showing output and prompting for approval or retry"""
-        
-        primary_output = best_output.get("primary_output", "")
-        display_primary = primary_output[:500] + "..." if len(primary_output) > 500 else primary_output
-        
-        user_response = await self.__current_event_call__({
-            "type": "input", 
-            "data": {
-                "title": "⚠️ Action Completed with Warnings",
-                "message": f"Action '{action.description}' completed with quality score {best_reflection.quality_score:.2f}/1.0\n\nOutput preview:\n{display_primary}",
-                "placeholder": "Type 'approve' to accept output, 'retry' to try again, or provide guidance..."
+    async def handle_failed_action_with_exception(
+        self, action: Action, error_message: str
+    ) -> str:
+        """Handle an action that failed with an exception by prompting user for retry or abort decision"""
+
+        user_response = await self.__current_event_call__(
+            {
+                "type": "input",
+                "data": {
+                    "title": "🚨 Action Failed with Exception",
+                    "message": f"Action '{action.description}' failed with error: {error_message}",
+                    "placeholder": "Type 'retry' to try again, 'abort' to stop, or provide guidance...",
+                },
             }
-        })
-        
-        response_text = user_response.lower().strip() if user_response else "approve"
-        
+        )
+
+        response_text = user_response.lower().strip() if user_response else "abort"
+
         if "retry" in response_text:
-            if len(response_text) > 10: 
+            if len(response_text) > 10:
+                if not action.params:
+                    action.params = {}
+                action.params["user_guidance"] = user_response
+            return "retry"
+        else:
+            return "abort"
+
+    async def handle_warning_action(
+        self,
+        action: Action,
+        best_output: dict[str, str],
+        best_reflection: ReflectionResult,
+    ) -> str:
+        """Handle an action with warnings by showing output and prompting for approval or retry"""
+
+        primary_output = best_output.get("primary_output", "")
+        display_primary = (
+            primary_output[:500] + "..."
+            if len(primary_output) > 500
+            else primary_output
+        )
+
+        user_response = await self.__current_event_call__(
+            {
+                "type": "input",
+                "data": {
+                    "title": "⚠️ Action Completed with Warnings",
+                    "message": f"Action '{action.description}' completed with quality score {best_reflection.quality_score:.2f}/1.0\n\nOutput preview:\n{display_primary}",
+                    "placeholder": "Type 'approve' to accept output, 'retry' to try again, or provide guidance...",
+                },
+            }
+        )
+
+        response_text = user_response.lower().strip() if user_response else "approve"
+
+        if "retry" in response_text:
+            if len(response_text) > 10:
                 if not action.params:
                     action.params = {}
                 action.params["user_guidance"] = user_response
