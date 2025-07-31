@@ -8,7 +8,6 @@ version: 0.2
 required_open_webui_version: 0.6.18
 """
 
-
 import requests
 from fastapi import Request
 from pydantic import BaseModel, Field
@@ -76,7 +75,7 @@ class Tools:
         Generate an image given a prompt
 
         :param prompt: prompt to use for image generation
-        :param model: model to use "" if you want to use the default model
+        :param model: model to use, leave empty to use the default model
         """
         if self.valves.unload_ollama_models:
             if __event_emitter__:
@@ -98,7 +97,7 @@ class Tools:
         )
 
         try:
-            if model != "":
+            if model:
                 __request__.app.state.config.IMAGE_GENERATION_MODEL = model
             images = await image_generations(
                 request=__request__,

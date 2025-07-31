@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.1.3
+version: 2.1.2
 """
 
 import re
@@ -87,6 +87,7 @@ def parse_structured_output(response: str) -> dict[str, str]:
 
 class UserAbortedException(Exception):
     """Custom exception for when user aborts plan execution"""
+
     def __init__(self, action_id: str, message: str = "User aborted plan execution"):
         self.action_id = action_id
         super().__init__(message)
@@ -94,6 +95,7 @@ class UserAbortedException(Exception):
 
 class PlanExecutionAbortedException(Exception):
     """Custom exception for when plan execution is aborted gracefully"""
+
     def __init__(self, message: str = "Plan execution was aborted"):
         super().__init__(message)
 
@@ -373,7 +375,8 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
             default=300, description="Action timeout in seconds"
         )
         USER_RESPONSE_TIMEOUT: int = Field(
-            default=120, description="Timeout for user response to prompts (seconds). If user doesn't respond within this time, plan will abort for safety."
+            default=120,
+            description="Timeout for user response to prompts (seconds). If user doesn't respond within this time, plan will abort for safety.",
         )
         SHOW_ACTION_SUMMARIES: bool = Field(
             default=True,
@@ -1932,7 +1935,9 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                             plan, action, context, step_number
                         )
                     else:
-                        raise UserAbortedException(action.id, "User chose to abort after action failure")
+                        raise UserAbortedException(
+                            action.id, "User chose to abort after action failure"
+                        )
 
         if best_output is None or best_reflection is None:
             action.status = "failed"
@@ -1952,7 +1957,9 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                 action.tool_results.clear()
                 return await self.execute_action(plan, action, context, step_number)
             else:
-                raise UserAbortedException(action.id, "User chose to abort after action failure")
+                raise UserAbortedException(
+                    action.id, "User chose to abort after action failure"
+                )
 
         if not best_reflection.is_successful:
             action.status = "warning"
@@ -1978,11 +1985,11 @@ Return ONLY the enhanced template description. Do not include explanations, comm
             action.status = "completed"
             action.end_time = datetime.now().strftime("%H:%M:%S")
             action.output = best_output
-            
+
             # Clear user guidance after successful completion to avoid affecting future runs
             if action.params and "user_guidance" in action.params:
                 del action.params["user_guidance"]
-                
+
         await self.emit_status(
             "success",
             f"Action completed with best output (Quality: {best_reflection.quality_score:.2f})",
@@ -2316,18 +2323,18 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             except UserAbortedException as e:
                 step_counter += 1
                 logger.info(f"Action {action.id} aborted by user: {e}")
-                
+
                 await self.emit_status(
                     "warning",
                     f"Plan execution stopped by user at action: {action.id}",
                     True,
                 )
-                
+
                 action.status = "aborted"
                 action.end_time = datetime.now().strftime("%H:%M:%S")
                 completed.add(action.id)
                 await self.emit_full_state(plan, completed_summaries)
-                
+
                 await self.emit_message(
                     f"## ⚠️ Plan Execution Stopped\n\n"
                     f"Execution was stopped by user at action: **{action.description}**\n\n"
@@ -2338,7 +2345,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                     f"- Completed Steps: {len([a for a in plan.actions if a.status == 'completed'])}\n"
                     f"- Failed Steps: {len([a for a in plan.actions if a.status == 'failed'])}\n"
                 )
-                
+
                 break
 
             except Exception as e:
@@ -2410,18 +2417,17 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         """Get user response with timeout handling"""
         if timeout_seconds is None:
             timeout_seconds = self.valves.USER_RESPONSE_TIMEOUT
-            
+
         try:
             response = await asyncio.wait_for(
-                self.__current_event_call__(event_data),
-                timeout=timeout_seconds
+                self.__current_event_call__(event_data), timeout=timeout_seconds
             )
             return response
         except asyncio.TimeoutError:
             await self.emit_status(
-                "warning", 
-                f"User response timeout after {timeout_seconds} seconds - aborting for safety", 
-                False
+                "warning",
+                f"User response timeout after {timeout_seconds} seconds - aborting for safety",
+                False,
             )
             return None
         except Exception as e:
@@ -2632,9 +2638,9 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         # Handle no response or empty response - should abort by default for safety
         if not user_response or not user_response.strip():
             await self.emit_status(
-                "warning", 
-                "No user response received - aborting plan execution for safety", 
-                False
+                "warning",
+                "No user response received - aborting plan execution for safety",
+                False,
             )
             return "abort"
 
@@ -2647,7 +2653,11 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                     action.params = {}
                 action.params["user_guidance"] = user_response.strip()
             return "retry"
-        elif "abort" in response_text or "cancel" in response_text or "stop" in response_text:
+        elif (
+            "abort" in response_text
+            or "cancel" in response_text
+            or "stop" in response_text
+        ):
             return "abort"
         else:
             # If response doesn't contain clear instructions, treat as guidance for retry
@@ -2675,9 +2685,9 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         # Handle no response or empty response - should abort by default for safety
         if not user_response or not user_response.strip():
             await self.emit_status(
-                "warning", 
-                "No user response received - aborting plan execution for safety", 
-                False
+                "warning",
+                "No user response received - aborting plan execution for safety",
+                False,
             )
             return "abort"
 
@@ -2690,7 +2700,11 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                     action.params = {}
                 action.params["user_guidance"] = user_response.strip()
             return "retry"
-        elif "abort" in response_text or "cancel" in response_text or "stop" in response_text:
+        elif (
+            "abort" in response_text
+            or "cancel" in response_text
+            or "stop" in response_text
+        ):
             return "abort"
         else:
             # If response doesn't contain clear instructions, treat as guidance for retry
@@ -2728,9 +2742,9 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         # Handle no response or empty response - should approve by default since action produced output
         if not user_response or not user_response.strip():
             await self.emit_status(
-                "info", 
-                "No user response received - auto-approving warning action output", 
-                False
+                "info",
+                "No user response received - auto-approving warning action output",
+                False,
             )
             return "approve"
 
@@ -2743,7 +2757,11 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                     action.params = {}
                 action.params["user_guidance"] = user_response.strip()
             return "retry"
-        elif "approve" in response_text or "accept" in response_text or "continue" in response_text:
+        elif (
+            "approve" in response_text
+            or "accept" in response_text
+            or "continue" in response_text
+        ):
             return "approve"
         else:
             # If response doesn't contain clear approve/retry, treat as guidance for retry
