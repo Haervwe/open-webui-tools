@@ -85,6 +85,19 @@ def parse_structured_output(response: str) -> dict[str, str]:
     return {"primary_output": response, "supporting_details": ""}
 
 
+class UserAbortedException(Exception):
+    """Custom exception for when user aborts plan execution"""
+    def __init__(self, action_id: str, message: str = "User aborted plan execution"):
+        self.action_id = action_id
+        super().__init__(message)
+
+
+class PlanExecutionAbortedException(Exception):
+    """Custom exception for when plan execution is aborted gracefully"""
+    def __init__(self, message: str = "Plan execution was aborted"):
+        super().__init__(message)
+
+
 class Action(BaseModel):
     """Model for a single action in the plan"""
 
@@ -358,6 +371,9 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
         )
         ACTION_TIMEOUT: int = Field(
             default=300, description="Action timeout in seconds"
+        )
+        USER_RESPONSE_TIMEOUT: int = Field(
+            default=120, description="Timeout for user response to prompts (seconds). If user doesn't respond within this time, plan will abort for safety."
         )
         SHOW_ACTION_SUMMARIES: bool = Field(
             default=True,
@@ -1903,13 +1919,10 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                     await self.emit_status(
                         "error", f"Action failed after all attempts: {str(e)}", True
                     )
-
-                    # Prompt user for failed action (exception case)
                     user_decision = await self.handle_failed_action_with_exception(
                         action, str(e)
                     )
                     if user_decision == "retry":
-                        # Reset action and retry
                         action.status = "pending"
                         action.start_time = None
                         action.end_time = None
@@ -1919,7 +1932,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                             plan, action, context, step_number
                         )
                     else:
-                        raise RuntimeError("User chose to abort after action failure")
+                        raise UserAbortedException(action.id, "User chose to abort after action failure")
 
         if best_output is None or best_reflection is None:
             action.status = "failed"
@@ -1930,10 +1943,8 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                 True,
             )
 
-            # Prompt user for failed action
             user_decision = await self.handle_failed_action(action)
             if user_decision == "retry":
-                # Reset action and retry
                 action.status = "pending"
                 action.start_time = None
                 action.end_time = None
@@ -1941,31 +1952,37 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                 action.tool_results.clear()
                 return await self.execute_action(plan, action, context, step_number)
             else:
-                raise RuntimeError("User chose to abort after action failure")
+                raise UserAbortedException(action.id, "User chose to abort after action failure")
 
         if not best_reflection.is_successful:
             action.status = "warning"
             action.end_time = datetime.now().strftime("%H:%M:%S")
             action.output = best_output
 
-            # Prompt user for warning action
             user_decision = await self.handle_warning_action(
                 action, best_output, best_reflection
             )
             if user_decision == "retry":
-                # Reset action and retry
                 action.status = "pending"
                 action.start_time = None
                 action.end_time = None
                 action.tool_calls.clear()
                 action.tool_results.clear()
                 return await self.execute_action(plan, action, context, step_number)
-            # If approved, continue with warning status
+            else:
+                # Warning action was approved - clear user guidance
+                if action.params and "user_guidance" in action.params:
+                    del action.params["user_guidance"]
 
         else:
             action.status = "completed"
             action.end_time = datetime.now().strftime("%H:%M:%S")
             action.output = best_output
+            
+            # Clear user guidance after successful completion to avoid affecting future runs
+            if action.params and "user_guidance" in action.params:
+                del action.params["user_guidance"]
+                
         await self.emit_status(
             "success",
             f"Action completed with best output (Quality: {best_reflection.quality_score:.2f})",
@@ -2296,26 +2313,40 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 )
                 step_counter += 1
 
+            except UserAbortedException as e:
+                step_counter += 1
+                logger.info(f"Action {action.id} aborted by user: {e}")
+                
+                await self.emit_status(
+                    "warning",
+                    f"Plan execution stopped by user at action: {action.id}",
+                    True,
+                )
+                
+                # Set action as failed and gracefully end execution
+                action.status = "aborted"
+                action.end_time = datetime.now().strftime("%H:%M:%S")
+                completed.add(action.id)
+                await self.emit_full_state(plan, completed_summaries)
+                
+                # Create graceful completion message
+                await self.emit_message(
+                    f"## ⚠️ Plan Execution Stopped\n\n"
+                    f"Execution was stopped by user at action: **{action.description}**\n\n"
+                    f"**Completed actions**: {len([a for a in plan.actions if a.status in ['completed', 'warning']])}/{len(plan.actions)}\n\n"
+                    f"The plan can be resumed by running it again."
+                )
+                
+                # Don't raise exception - just break gracefully
+                break
+
             except Exception as e:
                 step_counter += 1
                 logger.error(f"Action {action.id} failed: {e}")
 
-                # Check if this is a user abort decision
-                if "User chose to abort" in str(e):
-                    await self.emit_status(
-                        "error",
-                        f"Plan execution aborted by user due to failed action: {action.id}",
-                        True,
-                    )
-                    # Set action as failed and break execution
-                    action.status = "failed"
-                    completed.add(action.id)
-                    await self.emit_full_state(plan, completed_summaries)
-                    break  # Stop plan execution
-                else:
-                    # Regular failure handling
-                    action.status = "failed"
-                    completed.add(action.id)
+                # Regular failure handling
+                action.status = "failed"
+                completed.add(action.id)
 
                 await self.emit_full_state(plan, completed_summaries)
             finally:
@@ -2373,6 +2404,30 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         await self.__current_event_emitter__(
             {"type": "replace", "data": {"content": message}}
         )
+
+    async def get_user_response_with_timeout(
+        self, event_data: dict[str, Any], timeout_seconds: int | None = None
+    ) -> str | None:
+        """Get user response with timeout handling"""
+        if timeout_seconds is None:
+            timeout_seconds = self.valves.USER_RESPONSE_TIMEOUT
+            
+        try:
+            response = await asyncio.wait_for(
+                self.__current_event_call__(event_data),
+                timeout=timeout_seconds
+            )
+            return response
+        except asyncio.TimeoutError:
+            await self.emit_status(
+                "warning", 
+                f"User response timeout after {timeout_seconds} seconds - aborting for safety", 
+                False
+            )
+            return None
+        except Exception as e:
+            logger.error(f"Error getting user response: {e}")
+            return None
 
     async def emit_status(self, level: str, message: str, done: bool):
         await self.__current_event_emitter__(
@@ -2564,7 +2619,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
     async def handle_failed_action(self, action: Action) -> str:
         """Handle a completely failed action by prompting user for retry or abort decision"""
 
-        user_response = await self.__current_event_call__(
+        user_response = await self.get_user_response_with_timeout(
             {
                 "type": "input",
                 "data": {
@@ -2575,23 +2630,39 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             }
         )
 
-        response_text = user_response.lower().strip() if user_response else "abort"
+        # Handle no response or empty response - should abort by default for safety
+        if not user_response or not user_response.strip():
+            await self.emit_status(
+                "warning", 
+                "No user response received - aborting plan execution for safety", 
+                False
+            )
+            return "abort"
+
+        response_text = user_response.lower().strip()
 
         if "retry" in response_text:
-            if len(response_text) > 10:
+            # If user provides additional guidance beyond just "retry"
+            if len(response_text) > 6:  # More than just "retry"
                 if not action.params:
                     action.params = {}
-                action.params["user_guidance"] = user_response
+                action.params["user_guidance"] = user_response.strip()
             return "retry"
-        else:
+        elif "abort" in response_text or "cancel" in response_text or "stop" in response_text:
             return "abort"
+        else:
+            # If response doesn't contain clear instructions, treat as guidance for retry
+            if not action.params:
+                action.params = {}
+            action.params["user_guidance"] = user_response.strip()
+            return "retry"
 
     async def handle_failed_action_with_exception(
         self, action: Action, error_message: str
     ) -> str:
         """Handle an action that failed with an exception by prompting user for retry or abort decision"""
 
-        user_response = await self.__current_event_call__(
+        user_response = await self.get_user_response_with_timeout(
             {
                 "type": "input",
                 "data": {
@@ -2602,16 +2673,32 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             }
         )
 
-        response_text = user_response.lower().strip() if user_response else "abort"
+        # Handle no response or empty response - should abort by default for safety
+        if not user_response or not user_response.strip():
+            await self.emit_status(
+                "warning", 
+                "No user response received - aborting plan execution for safety", 
+                False
+            )
+            return "abort"
+
+        response_text = user_response.lower().strip()
 
         if "retry" in response_text:
-            if len(response_text) > 10:
+            # If user provides additional guidance beyond just "retry"
+            if len(response_text) > 6:  # More than just "retry"
                 if not action.params:
                     action.params = {}
-                action.params["user_guidance"] = user_response
+                action.params["user_guidance"] = user_response.strip()
             return "retry"
-        else:
+        elif "abort" in response_text or "cancel" in response_text or "stop" in response_text:
             return "abort"
+        else:
+            # If response doesn't contain clear instructions, treat as guidance for retry
+            if not action.params:
+                action.params = {}
+            action.params["user_guidance"] = user_response.strip()
+            return "retry"
 
     async def handle_warning_action(
         self,
@@ -2628,7 +2715,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             else primary_output
         )
 
-        user_response = await self.__current_event_call__(
+        user_response = await self.get_user_response_with_timeout(
             {
                 "type": "input",
                 "data": {
@@ -2639,16 +2726,32 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             }
         )
 
-        response_text = user_response.lower().strip() if user_response else "approve"
+        # Handle no response or empty response - should approve by default since action produced output
+        if not user_response or not user_response.strip():
+            await self.emit_status(
+                "info", 
+                "No user response received - auto-approving warning action output", 
+                False
+            )
+            return "approve"
+
+        response_text = user_response.lower().strip()
 
         if "retry" in response_text:
-            if len(response_text) > 10:
+            # If user provides additional guidance beyond just "retry"
+            if len(response_text) > 6:  # More than just "retry"
                 if not action.params:
                     action.params = {}
-                action.params["user_guidance"] = user_response
+                action.params["user_guidance"] = user_response.strip()
             return "retry"
-        else:
+        elif "approve" in response_text or "accept" in response_text or "continue" in response_text:
             return "approve"
+        else:
+            # If response doesn't contain clear approve/retry, treat as guidance for retry
+            if not action.params:
+                action.params = {}
+            action.params["user_guidance"] = user_response.strip()
+            return "retry"
 
     async def emit_action_summary(self, action: Action, plan: Plan):
         """Emit a detailed summary of a completed action in dropdown format"""
