@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.1.2
+version: 2.1.3
 """
 
 import re
@@ -2323,28 +2323,27 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                     True,
                 )
                 
-                # Set action as failed and gracefully end execution
                 action.status = "aborted"
                 action.end_time = datetime.now().strftime("%H:%M:%S")
                 completed.add(action.id)
                 await self.emit_full_state(plan, completed_summaries)
                 
-                # Create graceful completion message
                 await self.emit_message(
                     f"## ⚠️ Plan Execution Stopped\n\n"
                     f"Execution was stopped by user at action: **{action.description}**\n\n"
-                    f"**Completed actions**: {len([a for a in plan.actions if a.status in ['completed', 'warning']])}/{len(plan.actions)}\n\n"
-                    f"The plan can be resumed by running it again."
+                    f"Action ID: `{action.id}`\n\n"
+                    f"Status: **{action.status}**\n\n"
+                    f"Execution Summary:\n\n"
+                    f"- Total Steps: {len(plan.actions)}\n"
+                    f"- Completed Steps: {len([a for a in plan.actions if a.status == 'completed'])}\n"
+                    f"- Failed Steps: {len([a for a in plan.actions if a.status == 'failed'])}\n"
                 )
                 
-                # Don't raise exception - just break gracefully
                 break
 
             except Exception as e:
                 step_counter += 1
                 logger.error(f"Action {action.id} failed: {e}")
-
-                # Regular failure handling
                 action.status = "failed"
                 completed.add(action.id)
 
