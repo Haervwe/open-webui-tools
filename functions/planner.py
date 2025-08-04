@@ -106,7 +106,7 @@ class Action(BaseModel):
     id: str
     type: str
     description: str
-    params: Dict[str, Any] = Field(default_factory=dict)
+    params: Dict[str, Any] | None = None
     dependencies: List[str] = Field(default_factory=list)
     tool_ids: Optional[list[str]] = None
     output: Optional[Dict[str, str]] = None
@@ -474,7 +474,7 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
     - Context Mode: LIGHTWEIGHT (only action IDs and hints provided in system prompt)
     
     DEPENDENCIES AND INPUTS:
-    - Parameters: {json.dumps(action.params)}
+    {f"- Parameters: {json.dumps(action.params)}" if action.params else ""}
     - Lightweight Context (IDs and hints only): {json.dumps(lightweight_context)}
     
     NOTE: You are working in lightweight context mode. Previous step results contain only action IDs and supporting_details hints in the system prompt.
@@ -490,7 +490,7 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
     - Available Tools: {action.tool_ids if action.tool_ids else "None"}
     
     DEPENDENCIES AND INPUTS:
-    - Parameters: {json.dumps(action.params)}
+    {f"- Parameters: {json.dumps(action.params)}" if action.params else ""}
     - Input from Previous Steps: {json.dumps(context)}
     
     NOTE: Previous step results are structured as {{"primary_output": "main_deliverable_content", "supporting_details": "additional_context"}}. 
@@ -612,14 +612,20 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                     }
 
                     def resolve_action_references(
-                        params: dict[str, Any | dict[str, Any]] | list[Any],
+                        params: dict[str, Any],
                     ) -> dict[str, Any]:
                         """Recursively resolve @action_id references in tool parameters"""
+                        logger.info(f"resolve_action_references called with params: {params}")
+                        logger.info(f"Available action_results keys: {list(action_results.keys())}")
                         resolved_params: dict[str, Any] = {}
                         for key, value in params.items():
                             if isinstance(value, str):
-                                if value.startswith("@"):
+                                logger.info(f"Processing string parameter '{key}' with value: {value}")
+                                
+                                # Check if this is a pure @action_id reference (no other content)
+                                if value.startswith("@") and re.match(r"^@[a-zA-Z0-9_-]+$", value):
                                     action_id = value[1:]
+                                    logger.info(f"Found direct @action_id reference: {action_id}")
                                     if action_id in action_results:
                                         resolved_params[key] = action_results[
                                             action_id
@@ -633,8 +639,10 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                                             f"Action ID '{action_id}' not found for reference in parameter '{key}'"
                                         )
                                 else:
+                                    # Look for embedded @action_id references in the string
                                     pattern = r"@([a-zA-Z0-9_-]+)"
                                     matches = re.findall(pattern, value)
+                                    logger.info(f"Looking for embedded @action_id references in '{value}', found matches: {matches}")
 
                                     if matches:
                                         resolved_value = value
@@ -658,9 +666,9 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                                     else:
                                         resolved_params[key] = value
                             elif isinstance(value, dict):
-                                resolved_params[key] = resolve_action_references(value)
+                                resolved_params[key] = resolve_action_references(value)  # type: ignore
                             elif isinstance(value, list):
-                                resolved_list: list[str] = []
+                                resolved_list: list[Any] = []
                                 for item in value:
                                     if isinstance(item, str) and item.startswith("@"):
                                         action_id = item[1:]
@@ -680,7 +688,7 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                                             )
                                     elif isinstance(item, dict):
                                         resolved_list.append(
-                                            str(resolve_action_references(item))
+                                            resolve_action_references(item)  # type: ignore
                                         )
                                     else:
                                         resolved_list.append(item)
@@ -873,379 +881,109 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
         ]
         """Create an execution plan for the given goal"""
         system_prompt = f"""
-You are a planning agent. Break down the goal into a logical sequence of actions that build upon each other using hierarchical decomposition and chain-of-thought reasoning.
+You are an expert planning agent. Your task is to create a logical and efficient execution plan to achieve a user's goal.
 
-PLANNING STRATEGY - STEP-BY-STEP REASONING:
-1. **Analyze the Goal**: Break down what the final deliverable needs to contain
-2. **Identify Core Components**: What are the main building blocks needed?
-3. **Plan Foundation Actions**: What research, outlines, or specifications are needed first?
-4. **Create Intermediate Summaries**: What outline/summary actions will guide multiple dependent actions?
-5. **Design Implementation Actions**: What specific content/code/deliverable actions are needed?
-6. **Plan Supporting Actions**: What illustrations, examples, or enhancements are needed?
-7. **Structure Dependencies**: How do actions logically depend on each other with proper context?
+**1. Understand the Goal**
+Break down the user's request into the necessary steps to achieve the final outcome.
 
-HIERARCHICAL DECOMPOSITION APPROACH:
-- **Level 1 (Foundation)**: Research, requirements gathering, initial analysis
-- **Level 2 (Planning)**: Outlines, specifications, architectural designs, character profiles
-- **Level 3 (Implementation)**: Content creation, code writing, detailed work
-- **Level 4 (Enhancement)**: Supporting materials, illustrations, optimizations  
-- **Level 5 (Organization)**: File operations, structural organization
-- **Level 6 (Synthesis)**: Final compilation and delivery
-
-DEPENDENCY REASONING FOR EACH ACTION:
-For every action you create, explicitly think through:
-1. "What background context does this action need to work effectively?"
-2. "What specific outputs from previous actions are essential for this action?"
-3. "Should this action reference foundational materials (research, profiles, outlines)?"
-4. "Will this action's output be needed by multiple future actions?" (→ create summary/outline action)
-5. "Does this action need to maintain consistency with other parallel actions?" (→ shared dependencies)
-
-IMPORTANT: All plans MUST include a final_synthesis step that combines the outputs from previous steps into a final deliverable.
-
-OUTPUT FORMAT CONSIDERATIONS:
-- ALL action outputs are TEXT or HYPERLINKS (URLs/URIs)
-- Image generation tools return URLs/file paths as text, NOT actual image files
-- Web content, files, and media are represented as hyperlinks/URLs in text format
-- Every action produces text-based output that can be directly included in the final synthesis
-- Do NOT assume any special formatting - treat all outputs as plain text or clickable links
-- Action IDs are indepedent of tools and tool calls, Asign an action_id that correspond with the step specific Goal
-
-FINAL SYNTHESIS REQUIREMENT (MANDATORY):
-- EVERY plan MUST include a final_synthesis action as the last step
-- The final_synthesis action MUST include ALL RELEVANT content outputs in its template
-- The final_synthesis template IS the actual deliverable that will be presented to the user
-- Include actions that produce deliverable content: text, images, code, research results, etc.
-- Do NOT miss important outputs like images, documents, or other key deliverables
-- Exclude only auxiliary/setup actions that don't produce end-user content (like configuration or intermediate processing steps)
-- When in doubt, include the action output rather than exclude it
-
-AVAILABLE TOOLS (use exact tool_id):
+**2. Available Tools**
+Here is a list of tools you can use. Use the exact `tool_id` in the `tool_ids` field for any action that requires a tool.
+```json
 {json.dumps(tools, indent=2)}
-
-CRITICAL UNDERSTANDING - DEPENDENCIES AND HIERARCHICAL DECOMPOSITION:
-When action B depends on action A, action B will receive A's complete output as context. This means:
-- "Write Chapter 2" depending on "Write Chapter 1" gets the full Chapter 1 text as context
-- "Generate Illustration for Chapter 1" depending on "Write Chapter 1" gets the chapter content to create relevant imagery
-- "Research AI trends" → "Write summary based on research" → "Create presentation from summary" forms a logical chain
-
-**HIERARCHICAL DEPENDENCY STRATEGY**: Use intermediate summary/outline actions to create a hierarchical structure instead of simple linear chains:
-
-✅ GOOD - Hierarchical with Intermediate Summaries:
 ```
-research → worldbuilding → character_profiles → story_outline
-story_outline → chapter_1_outline → write_chapter_1
-story_outline + chapter_1_outline + character_profiles → chapter_2_outline → write_chapter_2
-story_outline + chapter_2_outline + character_profiles → chapter_3_outline → write_chapter_3
-```
+3. Plan Structure
+- Your output must be a JSON object with a "goal" and a list of "actions". Each action must follow this schema:
+- id: A unique, descriptive identifier (e.g., "research_topic", "write_part_1").
+- type: "tool", "text", or "code". Use "tool" if the action requires external capabilities.
+- description: A clear, concise description of the action's objective.
+- tool_ids: A list of tool_ids required for this action. Mandatory for type="tool".
+- dependencies: A list of ids of actions that must complete before this one starts.
+- model: "ACTION_MODEL" for "tool", "WRITER_MODEL" for "text", "CODER_MODEL" for "code".
+- use_lightweight_context: Set to true for actions that only organize or save content by reference.
 
-❌ BAD - Simple Linear Chain:
-```
-research → write_chapter_1 → write_chapter_2 → write_chapter_3
-```
+4. Dependency and Hierarchical Planning
+- The Golden Rule of Dependency: For any task that is part of a sequence (like a chapter, a section, or a tutorial step), its dependencies array MUST INCLUDE BOTH the previous step in the sequence (for continuity) AND the foundational outline/plan (for overall consistency). This is not optional.
+- Direct Dependencies Only: An action ONLY gets context from the outputs of the actions listed in its dependencies.
+- Hierarchical Planning: Start with foundational actions (like research or an outline). Have multiple subsequent actions depend on these foundational steps.
 
-**INTERMEDIATE OUTPUT STRATEGY**: Create summary/outline nodes that provide context for multiple dependent actions:
-- Story outlines that guide all chapters
-- Research summaries that inform multiple content actions  
-- Character profiles accessible to all character-related content
-- Technical specifications available to all implementation actions
-
-**EXPLICIT DEPENDENCY RULE**: If an action needs content from previous actions, it MUST explicitly list ALL required actions in its dependencies array. Transitive dependencies are NOT automatically included.
-Agents only have access to the EXPLICITLY referenced dependencies OUTPUTS, and cannot ever access data from nodes that are not listed explicitly as dependency.
-If some supporting material is meant to be available for all nodes it should be explicitly linked to all nodes.
-
-**DEPENDENCY REASONING STRATEGY**: For each action, explicitly reason through what context it needs:
-1. What background information does this action require?
-2. What specific outputs from previous actions are essential?
-3. What supporting materials (outlines, profiles, research) should be accessible?
-4. Should this action create an intermediate output that other actions will need?
-
-TOOL TYPES EXPLAINED:
-- Search tools: For web research, finding information
-- Image generation tools: For creating visual content  
-- File/save tools: For saving content to files or specific formats, break saving in to multiple intermediate steps instead of one aggreated one.
-- API tools: For specific integrations or data processing
-- Always use the exact "tool_id" in the "tool_ids" field from the available tools list when an action needs external capabilities in the correct tool_ids field
-- Return a JSON array of tool_ids, for example: ["tool_id_1", "tool_id_2"] in the "tool_ids" field if the "action" type is "tool". MANDATORY for tool actions.
-
-CRITICAL TOOL ASSIGNMENT RULES:
-- If an action requires external capabilities (search, file operations, API calls, etc.), it MUST have tool_ids assigned
-- Research actions MUST have search tools assigned
-- File operations MUST have appropriate file/save tools assigned
-- Image generation actions MUST have image generation tools assigned
-- NEVER leave tool_ids as null/None when the action requires external tools
-- Tool actions without tool_ids will fail during execution
-
-ACTION TYPES:
-- type="tool": Uses external tools, MUST specify tool_ids
-- type="text": Pure content creation (writing, documentation)
-- type="code": Code generation
-- type="synthesis": Final template action only
-
-MODEL ASSIGNMENT:
-- Tool actions: 'ACTION_MODEL'
-- Text/writing actions: 'WRITER_MODEL'
-- Code actions: 'CODER_MODEL'
-
-LIGHTWEIGHT CONTEXT MODE:
-- use_lightweight_context: Set to true for actions that work by REFERENCE rather than needing full content
-- When true, the action receives only action IDs and supporting_details from dependencies instead of full primary_output content
-- @action_id references in tool parameters work normally in BOTH modes (auto-resolve to full content)
-- Use this for: file operations, data organization, content archiving, saving operations, Obsidian organization
-- Best for actions that SAVE/ORGANIZE/MOVE content rather than READ/analyze content
-- When false (default), the action receives full context from dependencies
-
-EXAMPLES:
-✅ USE lightweight context:
-- "Save all chapters to files" → works with @chapter_id references
-- "Organize content in Obsidian vault" → works with action IDs as identifiers  
-- "Archive all generated content" → works with content references
-- "Compile data into spreadsheet" → works with data IDs
-
-❌ DON'T USE lightweight context:
-- "Generate illustration for chapter" → needs full chapter text for context
-- "Summarize research findings" → needs full research content
-- "Translate story to Spanish" → needs full story content
-- "Analyze writing quality" → needs full text to analyze
-
-KEY INSIGHT: If the action needs to READ/understand content → full context. If it saves/organizes by reference → lightweight context.
-
-CRITICAL DEPENDENCY FLOW RULES - CHILD NODES CANNOT ACCESS GRANDPARENT NODES:
-
-**FUNDAMENTAL RULE**: Each action can ONLY access content from its DIRECT parent dependencies. There is NO automatic access to grandparent or ancestor nodes.
-
-**DEPENDENCY CHAIN CONSTRAINT**: In a dependency chain A → B → C, action C can ONLY see the output from action B. Action C CANNOT see action A's output unless A is explicitly listed in C's dependencies.
-
-**EXPLICIT DEPENDENCY REQUIREMENT**: If an action needs content from multiple previous actions, ALL of them MUST be explicitly listed in the dependencies array.
-
-DEPENDENCY EXAMPLES - PROPER HIERARCHICAL DECOMPOSITION:
-
-❌ WRONG - Linear chain without supporting context:
-```
-research_ai → write_ch1 → write_ch2 → write_ch3
-```
-Problem: Later chapters can't access research context, no story consistency
-
-❌ WRONG - Missing intermediate planning steps:
-```
-research_ai → character_profiles → write_ch1 → write_ch2 → write_ch3
-```
-Problem: No story outline to guide chapters, no chapter-level planning
-
-✅ CORRECT - Hierarchical with intermediate planning:
-```
-research_ai → story_outline
-research_ai + story_outline → character_profiles
-story_outline + character_profiles → chapter_1_outline  
-story_outline + character_profiles + chapter_1_outline → write_chapter_1
-story_outline + character_profiles + chapter_1_outline → chapter_2_outline
-story_outline + character_profiles + chapter_2_outline → write_chapter_2
-```
-
-✅ CORRECT - Technical project with proper hierarchy:
-```
-requirements_research → technical_specification
-technical_specification → architecture_design
-technical_specification + architecture_design → module_1_design
-technical_specification + architecture_design → module_2_design  
-module_1_design → implement_module_1
-module_2_design → implement_module_2
-technical_specification + implement_module_1 + implement_module_2 → integration_guide
-```
-
-✅ CORRECT - Multi-source content creation:
-```
-topic_research → content_outline
-topic_research + content_outline → introduction_draft
-topic_research + content_outline → section_1_draft
-topic_research + content_outline → section_2_draft
-content_outline + introduction_draft + section_1_draft + section_2_draft → final_document
-```
-
-**HIERARCHICAL PLANNING PRINCIPLES**:
-1. **Create Intermediate Summaries**: Use outline/summary actions that multiple dependent actions can reference
-2. **Maintain Context Continuity**: Ensure related actions have access to shared foundational materials  
-3. **Layer Dependencies**: Build in levels - research → outlines → detailed plans → implementation
-4. **Cross-Reference Support**: Allow actions at the same level to reference each other when needed
-5. **Summary Propagation**: Important context (research, profiles, specifications) should be accessible throughout the hierarchy
-
-**CRITICAL UNDERSTANDING**: 
-- Each action is a separate execution context that ONLY receives the outputs from actions explicitly listed in its dependencies
-- There is NO automatic inheritance or transitive dependency resolution
-- If an action needs context from action A, action A MUST be in its dependencies array, regardless of any intermediate actions
-- The system enforces strict parent-child relationships to prevent context pollution and ensure predictable execution
-
-**SPECIFIC EXAMPLES FOR COMPLEX PROJECTS**:
-
-NOVEL/STORY WRITING - PROPER HIERARCHICAL STRUCTURE:
-```
-1. research_topic → story_concept_outline
-2. story_concept_outline → character_profiles  
-3. story_concept_outline + character_profiles → detailed_story_outline
-4. detailed_story_outline + character_profiles → chapter_1_outline
-5. detailed_story_outline + character_profiles + chapter_1_outline → write_chapter_1
-6. detailed_story_outline + character_profiles + write_chapter_1 → chapter_2_outline  
-7. detailed_story_outline + character_profiles + chapter_2_outline → write_chapter_2
-8. detailed_story_outline + character_profiles + write_chapter_2 → chapter_3_outline
-9. detailed_story_outline + character_profiles + chapter_3_outline → write_chapter_3
-```
-This ensures each chapter has access to the overall story structure, character consistency, and previous chapter context.
-
-TECHNICAL PROJECT - LAYERED DEPENDENCIES:
-```
-1. requirements_analysis → system_architecture
-2. system_architecture → api_specification
-3. system_architecture → database_design
-4. api_specification + database_design → backend_implementation
-5. api_specification → frontend_design
-6. frontend_design + backend_implementation → frontend_implementation
-7. system_architecture + backend_implementation + frontend_implementation → deployment_guide
-```
-
-RESEARCH REPORT - STRUCTURED APPROACH:
-```
-1. topic_research → research_summary
-2. research_summary → report_outline
-3. research_summary + report_outline → introduction_section
-4. research_summary + report_outline → methodology_section
-5. research_summary + report_outline → results_section
-6. research_summary + report_outline + results_section → analysis_section
-7. research_summary + analysis_section → conclusion_section
-```
-
-FINAL SYNTHESIS - COMPREHENSIVE TEMPLATING GUIDE:
-The final_synthesis action is a SPECIAL TEMPLATING ACTION that assembles the final output by combining results from previous actions.
-
-CRITICAL TEMPLATING RULES:
-1. **Placeholder Format**: Use {{action_id}} to reference any action's primary_output
-   - Example: {{research_results}} will be replaced with the full primary_output from the "research_results" action
-   - Example: {{chapter_1}} will be replaced with the complete text content from the "chapter_1" action
-   - Example: {{generated_image}} will be replaced with the image URL/path from the "generated_image" action
-
-2. **Template Structure**: The description field contains the FINAL OUTPUT TEMPLATE with placeholders
-   - Use Markdown formatting for proper presentation
-   - Include all relevant content using placeholders
-   - Structure the template as you want the final output to appear
-
-3. **Content Replacement**: During execution, each {{action_id}} placeholder is replaced with:
-   - The complete "primary_output" field from that action's result
-   - This is literal text substitution - what you see is what you get
-   - Images come already in embedded markdown: ![caption](URL)
-   - Code becomes code blocks if the original action formatted it that way
-   - Text content is inserted as-is
-
-4. **Dependencies**: MUST list ALL actions whose outputs you reference in the template
-   - If template uses {{research}} and {{summary}}, dependencies must include ["research", "summary"]
-   - Missing dependencies will result in placeholder not being replaced
-
-TEMPLATING EXAMPLES:
-
-Example 1 - Simple Report:
-```
+5. Final Synthesis
+Mandatory final_synthesis Action: Every plan MUST conclude with an action with the id "final_synthesis".
+Purpose: This action assembles the final deliverable for the user. Its description field should be a template that uses {{action_id}} placeholders.
+Dependencies: The final_synthesis action must list all actions whose output is included in the template as dependencies.
+Example of a Hybrid Plan (Hierarchy, Sequence, and Tools):
+```json
 {{
-  "id": "final_synthesis",
-  "type": "synthesis",
-  "description": "# Research Report\n\n## Background\n{{background_research}}\n\n## Analysis\n{{data_analysis}}\n\n## Conclusion\n{{conclusions}}",
-  "dependencies": ["background_research", "data_analysis", "conclusions"]
-}}
-```
-
-Example 2 - Blog Post with Images:
-```
-{{
-  "id": "final_synthesis", 
-  "type": "synthesis",
-  "description": "# {{blog_title}}\n\n{{blog_intro}}\n\n![Featured Image]({{hero_image}})\n\n## Main Content\n{{main_content}}\n\n![Supporting Image]({{supporting_image}})\n\n## Conclusion\n{{conclusion}}",
-  "dependencies": ["blog_title", "blog_intro", "hero_image", "main_content", "supporting_image", "conclusion"]
-}}
-```
-
-Example 3 - Code Documentation:
-```
-{{
-  "id": "final_synthesis",
-  "type": "synthesis", 
-  "description": "# {{project_name}} Documentation\n\n## Overview\n{{overview}}\n\n## Installation\n```bash\n{{installation_commands}}\n```\n\n## Code\n```python\n{{main_code}}\n```\n\n## Usage Examples\n{{usage_examples}}",
-  "dependencies": ["project_name", "overview", "installation_commands", "main_code", "usage_examples"]
-}}
-```
-
-Example 4 - Multi-Chapter Story:
-```
-{{
-  "id": "final_synthesis",
-  "type": "synthesis",
-  "description": "# {{story_title}}\n\n{{story_intro}}\n\n## Chapter 1\n{{chapter_1}}\n\n## Chapter 2\n{{chapter_2}}\n\n## Chapter 3\n{{chapter_3}}\n\n## Epilogue\n{{epilogue}}",
-  "dependencies": ["story_title", "story_intro", "chapter_1", "chapter_2", "chapter_3", "epilogue"]
-}}
-```
-
-TEMPLATE FORMATTING TIPS:
-- Use `\n\n` for paragraph breaks in the description string
-- Use `\n` for single line breaks
-- Include proper Markdown headers (#, ##, ###) for structure  
-- For code blocks, use: `\n```language\n{{code_action}}\n```\n`
-- For images, use: `![Description]({{image_action}})`
-- For links, use: `[Link Text]({{url_action}})`
-
-WHAT GETS REPLACED:
-- {{action_id}} → Complete primary_output content from that action
-- If action_id produced an image URL: {{action_id}} → "https://example.com/image.jpg"
-- If action_id produced text content: {{action_id}} → "The complete text content here..."
-- If action_id produced code: {{action_id}} → "def function():\n    return 'code'"
-
-FINAL SYNTHESIS REQUIREMENTS:
-- Must be the LAST action in the plan
-- Must have id="final_synthesis" 
-- Must have type="synthesis"
-- Must include ALL content-producing actions in dependencies
-- Template must reference all important deliverables using {{action_id}} placeholders
-- Model field should be empty "" (no LLM needed for templating)
-
-REMEMBER: The final_synthesis action is a PURE TEMPLATING step - it takes the "primary_output" from each referenced action and substitutes it into the template. No AI generation happens here, just text replacement. Design your template to be the exact final output you want users to see. The template you create IS the final deliverable, not a reference or placeholder for another file.
-
-JSON OUTPUT:
-{{
-    "goal": "<original goal>",
+    "goal": "Create a 2-part technical report on LLM agents, with diagrams, and save the outputs.",
     "actions": [
         {{
-            "id": "unique_id",
-            "type": "tool|text|code",
-            "description": "Specific task description",
-            "tool_ids": ["exact_tool_id_from_list"], 
-            "params": {{}},
-            "dependencies": ["action_ids_this_needs"],
-            "model": "model_name",
-            "use_lightweight_context": false
+            "id": "research_llm_agents",
+            "type": "tool",
+            "description": "Research the architecture of modern LLM agents.",
+            "tool_ids": ["web_search"],
+            "dependencies": [],
+            "model": "ACTION_MODEL"
+        }},
+        {{
+            "id": "create_report_outline",
+            "type": "text",
+            "description": "Create a detailed outline for the 2-part report.",
+            "tool_ids": [],
+            "dependencies": ["research_llm_agents"],
+            "model": "WRITER_MODEL"
+        }},
+        {{
+            "id": "write_part_1",
+            "type": "text",
+            "description": "Write Part 1 of the report: Core Agent Components.",
+            "tool_ids": [],
+            "dependencies": ["create_report_outline"],
+            "model": "WRITER_MODEL"
+        }},
+        {{
+            "id": "create_diagram_1",
+            "type": "tool",
+            "description": "Create a diagram illustrating the agent components from Part 1.",
+            "tool_ids": ["mage_gen"],
+            "dependencies": ["write_part_1"],
+            "model": "ACTION_MODEL"
+        }},
+        {{
+            "id": "write_part_2",
+            "type": "text",
+            "description": "Write Part 2 of the report: Agent Memory and Tools, ensuring it continues from Part 1.",
+            "tool_ids": [],
+            "dependencies": ["create_report_outline", "write_part_1"],
+            "model": "WRITER_MODEL"
+        }},
+        {{
+            "id": "create_diagram_2",
+            "type": "tool",
+            "description": "Create a diagram for the memory systems described in Part 2.",
+            "tool_ids": ["image_gen"],
+            "dependencies": ["write_part_2"],
+            "model": "ACTION_MODEL"
+        }},
+        {{
+            "id": "save_all_outputs",
+            "type": "tool",
+            "description": "Save the text and diagrams for both parts into a designated folder.",
+            "tool_ids": ["save_documents"],
+            "dependencies": ["write_part_1", "create_diagram_1", "write_part_2", "create_diagram_2"],
+            "model": "ACTION_MODEL",
+            "use_lightweight_context": true
         }},
         {{
             "id": "final_synthesis",
             "type": "synthesis",
-            "description": "# Title\\n\\n{{action1}}\\n\\n{{action2}}",
-            "dependencies": ["action1", "action2"],
-            "model": "",
-            "use_lightweight_context": false
+            "description": "# Technical Report: LLM Agents\\n\\n## Part 1: Core Components\\n{{write_part_1}}\\n![Diagram 1]({{create_diagram_1}})\\n\\n## Part 2: Memory and Tools\\n{{write_part_2}}\\n![Diagram 2]({{create_diagram_2}})",
+            "tool_ids": [],
+            "dependencies": ["write_part_1", "create_diagram_1", "write_part_2", "create_diagram_2"],
+            "model": ""
         }}
     ]
 }}
-
-CHAIN-OF-THOUGHT REASONING FOR DEPENDENCIES:
-Before generating the JSON, walk through your reasoning step-by-step:
-
-Step 1: "What is the end goal and what components does it need?"
-Step 2: "What foundational research/analysis is needed first?"  
-Step 3: "What planning/outline actions will guide multiple implementations?"
-Step 4: "What specific implementation actions are needed?"
-Step 5: "For each implementation action, what context does it need to work effectively?"
-Step 6: "What supporting actions (images, examples, etc.) enhance the deliverable?"
-Step 7: "How should dependencies be structured to ensure proper context flow?"
-
-DEPENDENCY VALIDATION CHECKLIST:
-- ✅ Does each chapter/content action have access to the overall outline/plan?
-- ✅ Do related actions share access to foundational research/profiles?
-- ✅ Are intermediate summary/outline actions created when multiple actions need similar context?
-- ✅ Does each action have ALL the context it needs to work effectively?
-- ✅ Are dependencies listed explicitly (no assumptions about transitive access)?
-- ✅ Does the final_synthesis include all important deliverable content?
+```
+Now, create a plan for the following goal.
 """
         messages = [
             {"role": "system", "content": system_prompt},
@@ -1274,7 +1012,6 @@ DEPENDENCY VALIDATION CHECKLIST:
                                                 "type": "array",
                                                 "items": {"type": "string"},
                                             },
-                                            "params": {},
                                             "dependencies": {
                                                 "type": "array",
                                                 "items": {"type": "string"},
@@ -1289,7 +1026,6 @@ DEPENDENCY VALIDATION CHECKLIST:
                                             "id",
                                             "type",
                                             "description",
-                                            "params",
                                             "dependencies",
                                             "model",
                                         ],
