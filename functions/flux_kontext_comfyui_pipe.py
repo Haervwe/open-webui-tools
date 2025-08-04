@@ -28,6 +28,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 name = "ComfyUI Universal Pipe"
 
+
 # --- OLLAMA VRAM Management Functions ---
 def get_loaded_models(api_url: str = "http://localhost:11434") -> list:
     try:
@@ -342,15 +343,7 @@ class Pipe:
         response = await generate_chat_completion(request, payload, user)
         await self.emit_status(event_emitter, "info", f"Prompt enhanced")
         enhanced_prompt = response["choices"][0]["message"]["content"]
-        enhanced_prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
-        await event_emitter(
-            {
-                "type": "chat:message:delta",
-                "data": {
-                    "content": enhanced_prompt_message,
-                },
-            }
-        )
+
         return enhanced_prompt
 
     async def pipe(
@@ -366,6 +359,7 @@ class Pipe:
         self.__user__ = Users.get_user_by_id(__user__["id"])
         messages = body.get("messages", [])
         prompt, base64_image = self.parse_input(messages)
+        prompt_message = ""
         if self.valves.enhance_prompt:
             prompt = await self.enhance_prompt(
                 prompt,
@@ -374,6 +368,15 @@ class Pipe:
                 self.__request__,
                 self.__event_emitter__,
             )
+            prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{prompt}\n\n---\n\n</details>"
+            await self.__event_emitter__(
+                {
+                    "type": "message",
+                    "data": {
+                        "content": prompt_message,
+                    },
+                }
+            )
         if __task__ and __task__ != TASKS.DEFAULT:
             if self.valves.vision_model_id:
                 response = await generate_chat_completion(
@@ -381,9 +384,9 @@ class Pipe:
                     {
                         "model": self.valves.vision_model_id,
                         "messages": body.get("messages"),
-                    "stream": False,
-                },
-                user=self.__user__,
+                        "stream": False,
+                    },
+                    user=self.__user__,
                 )
                 return f"{name}: {response['choices'][0]['message']['content']}"
             return f"{name}: Edited Image!"
@@ -485,7 +488,7 @@ class Pipe:
                     f"Here is the edited image:\n\n![Generated Image]({image_url})"
                 )
                 await self.__event_emitter__(
-                    {"type": "chat:message:delta", "data": {"content": response_content}}
+                    {"type": "message", "data": {"content": response_content}}
                 )
                 await self.emit_status(
                     self.__event_emitter__,
@@ -493,7 +496,7 @@ class Pipe:
                     "Image processed successfully!",
                     done=True,
                 )
-                return response_content
+                return
             else:
                 await self.emit_status(
                     self.__event_emitter__,
