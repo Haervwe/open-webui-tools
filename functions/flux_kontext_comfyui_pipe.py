@@ -3,7 +3,7 @@ title: ComfyUI Universal Pipe
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.0.1
+version: 3.0.2
 required_open_webui_version: 0.5.0
 """
 
