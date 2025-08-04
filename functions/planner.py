@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.1.2
+version: 2.1.3
 """
 
 import re
@@ -247,6 +247,7 @@ CRITICAL GUIDELINES:
    - Process and format the tool output appropriately for this step
    - You can reference previous action outputs directly in tool parameters using the format: "@action_id" (e.g., "@search_results" to use the complete output from the search_results action)
    - When using "@action_id" references, the complete output will be automatically substituted - you don't need to copy/paste content manually
+   - @action_id references work in both lightweight and full context modes
    - If the referenced output contains extra text that isn't needed for the tool call, you can either handle it manually by extracting what you need, or use additional tools to process it first
 4. Produce a complete, self-contained output that can be used by dependent steps
 5. Never ask for clarification - work with what is provided
@@ -336,29 +337,51 @@ ACTION-SPECIFIC REQUIREMENTS:
 - Organize information clearly but maintain depth and completeness of the original content
 - Do not oversimplify or reduce complex information to mere titles or brief points
 - You can use @action_id references in tool parameters to reference complete outputs from previous actions (e.g., "@search_results" to use the full output from the search_results action)
+- @action_id references work in both lightweight and full context modes
 - When using @action_id references, the complete output will be automatically substituted - handle any extra text appropriately for your tool's needs
 - After tool execution, provide a comprehensive, detailed response that incorporates the full substantive content from tool results
 - SYNTHESIS MEANS: Organize and present the complete information in a clear, structured way while preserving important details and context
 - Tool outputs should be processed to include the COMPLETE DETAILED CONTENT in your final response
-- Better to include too much relevant detail than to oversimplify into headlines
+- Better to include too much relevant detail than to oversimplify into headlines or bullet points.
 - If tools produce files, images, or URLs, include them properly formatted in your response
 - Focus on delivering thorough, complete information that users can learn from and act upon""",
             description="Additional requirements specifically for Action Model (tool-using) actions",
         )
         LIGHTWEIGHT_CONTEXT_REQUIREMENTS_SUFFIX: str = Field(
             default="""
-LIGHTWEIGHT CONTEXT REQUIREMENTS:
-- You are working with lightweight context mode - only action IDs and supporting details are provided
-- When referencing dependencies, use the action ID name as a parameter in your tool calls (e.g., use "research_results" as a file name or identifier)
-- The actual content from previous steps is NOT included in context to save space
-- Focus on using tools with the provided action IDs as identifiers/parameters
-- Work with action IDs as if they were file names, content identifiers, or operation references
-- Trust that the action IDs represent valid content that exists in the system
-- Use @action_id references in tool parameters when you need to reference previous action outputs
-- The supporting_details field contains hints about what each action ID represents
-- Do not ask for the full content - work with the IDs as provided
-- Your tools should be able to operate using these IDs as references""",
+🔍 LIGHTWEIGHT CONTEXT MODE ACTIVE 🔍
+
+CRITICAL UNDERSTANDING:
+- You are receiving METADATA ONLY about previous actions, NOT their actual content
+- The context shows content type, length, and brief descriptions - these are NOT the real content!
+- DO NOT treat the metadata descriptions as the actual deliverable content
+
+TO ACCESS REAL CONTENT:
+- Use @action_id references in tool parameters (e.g., "@research_data", "@chapter_1")
+- @action_id references automatically resolve to the FULL primary_output content from those actions
+- This is the ONLY way to access actual content in lightweight mode
+
+WORKING PATTERN:
+- Use the metadata to understand what actions are available and their content types
+- Reference them using @action_id syntax in your tool calls to access their real content
+- Think of action IDs as handles/pointers to content, not the content itself
+- Your tools will receive the full content when you use @action_id references
+
+EXAMPLE:
+- Metadata shows: "chapter_1: markdown document, 2500 chars, brief: story introduction"
+- To save it: use parameter "content": "@chapter_1" in your save tool
+- The tool will receive the FULL 2500-character chapter content, not just "story introduction"
+
+Remember: Metadata = what's available. @action_id = how to get the real content.""",
             description="Additional requirements for actions using lightweight context mode",
+        )
+        ENABLE_LIGHTWEIGHT_CONTEXT_OPTIMIZATION: bool = Field(
+            default=True,
+            description="Enable automatic lightweight context optimization for appropriate actions",
+        )
+        ENABLE_TOOL_RESULT_TRUNCATION: bool = Field(
+            default=True,
+            description="Enable truncation of tool results when substitutions are used in lightweight context mode",
         )
         AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT: bool = Field(
             default=False,
@@ -370,9 +393,6 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
         CONCURRENT_ACTIONS: int = Field(
             default=1,
             description="Maximum concurrent actions (experimental try on your own risk)",
-        )
-        ACTION_TIMEOUT: int = Field(
-            default=300, description="Action timeout in seconds"
         )
         USER_RESPONSE_TIMEOUT: int = Field(
             default=120,
@@ -451,14 +471,14 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
     TASK CONTEXT:
     - Step {step_number} Description: {action.description}
     - Available Tools: {action.tool_ids if action.tool_ids else "None"}
-    - Context Mode: LIGHTWEIGHT (only action IDs and hints provided)
+    - Context Mode: LIGHTWEIGHT (only action IDs and hints provided in system prompt)
     
     DEPENDENCIES AND INPUTS:
     - Parameters: {json.dumps(action.params)}
     - Lightweight Context (IDs and hints only): {json.dumps(lightweight_context)}
     
-    NOTE: You are working in lightweight context mode. Previous step results contain only action IDs and supporting_details hints.
-    Use the action IDs as identifiers/parameters in your tool calls. The actual content is not provided to save context space.
+    NOTE: You are working in lightweight context mode. Previous step results contain only action IDs and supporting_details hints in the system prompt.
+    The actual content is not provided in the context to save space. However, @action_id references in tool parameters still work normally and will be resolved to full content.
 
     EXECUTION REQUIREMENTS:
     {enhanced_requirements}
@@ -678,7 +698,49 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
                     tool_result = await tool_function(**tool_function_params)
 
                     if action:
-                        action.tool_results[tool_function_name] = str(tool_result)
+                        # Check if this tool was called with substitutions and lightweight context is active
+                        tool_result_str = str(tool_result)
+
+                        # Check if any @action_id references were used in the tool parameters
+                        had_substitutions = False
+                        for param_value in tool_function_params.values():
+                            if isinstance(param_value, str) and "@" in param_value:
+                                had_substitutions = True
+                                break
+                            elif isinstance(param_value, dict):
+                                # Recursively check nested dictionaries
+                                def check_dict_for_substitutions(d):
+                                    for v in d.values():
+                                        if isinstance(v, str) and "@" in v:
+                                            return True
+                                        elif isinstance(v, dict):
+                                            if check_dict_for_substitutions(v):
+                                                return True
+                                    return False
+
+                                if check_dict_for_substitutions(param_value):
+                                    had_substitutions = True
+                                    break
+
+                        # If lightweight context is active and substitutions were used, truncate the result
+                        if (
+                            self.valves.ENABLE_TOOL_RESULT_TRUNCATION
+                            and action.use_lightweight_context
+                            and had_substitutions
+                            and len(tool_result_str) > 200
+                        ):
+                            # Truncate to first 100 and last 100 characters
+                            truncated_result = (
+                                tool_result_str[:100]
+                                + "\n\n[TRUNCATED - Lightweight context mode with substitutions active]\n\n"
+                                + tool_result_str[-100:]
+                            )
+                            action.tool_results[tool_function_name] = truncated_result
+                            logger.info(
+                                f"Truncated tool result for '{tool_function_name}' in action '{action.id}' due to lightweight context with substitutions"
+                            )
+                        else:
+                            action.tool_results[tool_function_name] = tool_result_str
                 if action and isinstance(model, str):
                     messages[0]["content"] = self.get_system_prompt_for_model(
                         action, action.id, action_results, messages[0]["content"], model
@@ -811,7 +873,32 @@ LIGHTWEIGHT CONTEXT REQUIREMENTS:
         ]
         """Create an execution plan for the given goal"""
         system_prompt = f"""
-You are a planning agent. Break down the goal into a logical sequence of actions that build upon each other.
+You are a planning agent. Break down the goal into a logical sequence of actions that build upon each other using hierarchical decomposition and chain-of-thought reasoning.
+
+PLANNING STRATEGY - STEP-BY-STEP REASONING:
+1. **Analyze the Goal**: Break down what the final deliverable needs to contain
+2. **Identify Core Components**: What are the main building blocks needed?
+3. **Plan Foundation Actions**: What research, outlines, or specifications are needed first?
+4. **Create Intermediate Summaries**: What outline/summary actions will guide multiple dependent actions?
+5. **Design Implementation Actions**: What specific content/code/deliverable actions are needed?
+6. **Plan Supporting Actions**: What illustrations, examples, or enhancements are needed?
+7. **Structure Dependencies**: How do actions logically depend on each other with proper context?
+
+HIERARCHICAL DECOMPOSITION APPROACH:
+- **Level 1 (Foundation)**: Research, requirements gathering, initial analysis
+- **Level 2 (Planning)**: Outlines, specifications, architectural designs, character profiles
+- **Level 3 (Implementation)**: Content creation, code writing, detailed work
+- **Level 4 (Enhancement)**: Supporting materials, illustrations, optimizations  
+- **Level 5 (Organization)**: File operations, structural organization
+- **Level 6 (Synthesis)**: Final compilation and delivery
+
+DEPENDENCY REASONING FOR EACH ACTION:
+For every action you create, explicitly think through:
+1. "What background context does this action need to work effectively?"
+2. "What specific outputs from previous actions are essential for this action?"
+3. "Should this action reference foundational materials (research, profiles, outlines)?"
+4. "Will this action's output be needed by multiple future actions?" (→ create summary/outline action)
+5. "Does this action need to maintain consistency with other parallel actions?" (→ shared dependencies)
 
 IMPORTANT: All plans MUST include a final_synthesis step that combines the outputs from previous steps into a final deliverable.
 
@@ -835,13 +922,42 @@ FINAL SYNTHESIS REQUIREMENT (MANDATORY):
 AVAILABLE TOOLS (use exact tool_id):
 {json.dumps(tools, indent=2)}
 
-CRITICAL UNDERSTANDING - DEPENDENCIES:
+CRITICAL UNDERSTANDING - DEPENDENCIES AND HIERARCHICAL DECOMPOSITION:
 When action B depends on action A, action B will receive A's complete output as context. This means:
 - "Write Chapter 2" depending on "Write Chapter 1" gets the full Chapter 1 text as context
 - "Generate Illustration for Chapter 1" depending on "Write Chapter 1" gets the chapter content to create relevant imagery
 - "Research AI trends" → "Write summary based on research" → "Create presentation from summary" forms a logical chain
 
+**HIERARCHICAL DEPENDENCY STRATEGY**: Use intermediate summary/outline actions to create a hierarchical structure instead of simple linear chains:
+
+✅ GOOD - Hierarchical with Intermediate Summaries:
+```
+research → worldbuilding → character_profiles → story_outline
+story_outline → chapter_1_outline → write_chapter_1
+story_outline + chapter_1_outline + character_profiles → chapter_2_outline → write_chapter_2
+story_outline + chapter_2_outline + character_profiles → chapter_3_outline → write_chapter_3
+```
+
+❌ BAD - Simple Linear Chain:
+```
+research → write_chapter_1 → write_chapter_2 → write_chapter_3
+```
+
+**INTERMEDIATE OUTPUT STRATEGY**: Create summary/outline nodes that provide context for multiple dependent actions:
+- Story outlines that guide all chapters
+- Research summaries that inform multiple content actions  
+- Character profiles accessible to all character-related content
+- Technical specifications available to all implementation actions
+
 **EXPLICIT DEPENDENCY RULE**: If an action needs content from previous actions, it MUST explicitly list ALL required actions in its dependencies array. Transitive dependencies are NOT automatically included.
+Agents only have access to the EXPLICITLY referenced dependencies OUTPUTS, and cannot ever access data from nodes that are not listed explicitly as dependency.
+If some supporting material is meant to be available for all nodes it should be explicitly linked to all nodes.
+
+**DEPENDENCY REASONING STRATEGY**: For each action, explicitly reason through what context it needs:
+1. What background information does this action require?
+2. What specific outputs from previous actions are essential?
+3. What supporting materials (outlines, profiles, research) should be accessible?
+4. Should this action create an intermediate output that other actions will need?
 
 TOOL TYPES EXPLAINED:
 - Search tools: For web research, finding information
@@ -850,6 +966,14 @@ TOOL TYPES EXPLAINED:
 - API tools: For specific integrations or data processing
 - Always use the exact "tool_id" in the "tool_ids" field from the available tools list when an action needs external capabilities in the correct tool_ids field
 - Return a JSON array of tool_ids, for example: ["tool_id_1", "tool_id_2"] in the "tool_ids" field if the "action" type is "tool". MANDATORY for tool actions.
+
+CRITICAL TOOL ASSIGNMENT RULES:
+- If an action requires external capabilities (search, file operations, API calls, etc.), it MUST have tool_ids assigned
+- Research actions MUST have search tools assigned
+- File operations MUST have appropriate file/save tools assigned
+- Image generation actions MUST have image generation tools assigned
+- NEVER leave tool_ids as null/None when the action requires external tools
+- Tool actions without tool_ids will fail during execution
 
 ACTION TYPES:
 - type="tool": Uses external tools, MUST specify tool_ids
@@ -863,17 +987,27 @@ MODEL ASSIGNMENT:
 - Code actions: 'CODER_MODEL'
 
 LIGHTWEIGHT CONTEXT MODE:
-- use_lightweight_context: Set to true for actions that work with large file operations, bulk processing, or when dependencies might produce very large content that would overflow context
+- use_lightweight_context: Set to true for actions that work by REFERENCE rather than needing full content
 - When true, the action receives only action IDs and supporting_details from dependencies instead of full primary_output content
-- Use this for actions like file operations, data processing, bulk operations where the tool can work with identifiers/names rather than full content
-- Actions in lightweight mode should use @action_id references in tool parameters to reference previous results
-- Best for: file saving, data compilation, operations on multiple large documents, complex transformations where content size might be prohibitive
-- When false, the action receives full context from dependencies (default behavior)
-- Best for file operations that require saving or processing content verbatim, like saving chapters, saving generated images, or saving code, 
-that dont need the full context of the previous steps but only a reference to the previous action's output
-- Use lightweight context mode when the action can operate with just the action IDs and supporting details,
-  such as when the action can process files or data based on identifiers rather than needing the full
-- Default: false (full context mode)
+- @action_id references in tool parameters work normally in BOTH modes (auto-resolve to full content)
+- Use this for: file operations, data organization, content archiving, saving operations, Obsidian organization
+- Best for actions that SAVE/ORGANIZE/MOVE content rather than READ/analyze content
+- When false (default), the action receives full context from dependencies
+
+EXAMPLES:
+✅ USE lightweight context:
+- "Save all chapters to files" → works with @chapter_id references
+- "Organize content in Obsidian vault" → works with action IDs as identifiers  
+- "Archive all generated content" → works with content references
+- "Compile data into spreadsheet" → works with data IDs
+
+❌ DON'T USE lightweight context:
+- "Generate illustration for chapter" → needs full chapter text for context
+- "Summarize research findings" → needs full research content
+- "Translate story to Spanish" → needs full story content
+- "Analyze writing quality" → needs full text to analyze
+
+KEY INSIGHT: If the action needs to READ/understand content → full context. If it saves/organizes by reference → lightweight context.
 
 CRITICAL DEPENDENCY FLOW RULES - CHILD NODES CANNOT ACCESS GRANDPARENT NODES:
 
@@ -883,54 +1017,100 @@ CRITICAL DEPENDENCY FLOW RULES - CHILD NODES CANNOT ACCESS GRANDPARENT NODES:
 
 **EXPLICIT DEPENDENCY REQUIREMENT**: If an action needs content from multiple previous actions, ALL of them MUST be explicitly listed in the dependencies array.
 
-DEPENDENCY EXAMPLES - PROPER PARENT-CHILD FLOW:
+DEPENDENCY EXAMPLES - PROPER HIERARCHICAL DECOMPOSITION:
 
-❌ WRONG - Assuming transitive/grandparent access:
+❌ WRONG - Linear chain without supporting context:
 ```
 research_ai → write_ch1 → write_ch2 → write_ch3
 ```
-Problem: write_ch3 can only see write_ch2 output, NOT research_ai or write_ch1
+Problem: Later chapters can't access research context, no story consistency
 
-❌ WRONG - Missing explicit dependencies:
+❌ WRONG - Missing intermediate planning steps:
 ```
-research_ai → story_outline → write_ch1
-write_ch2 depends on [write_ch1]  // Missing story_outline and research_ai
+research_ai → character_profiles → write_ch1 → write_ch2 → write_ch3
 ```
-Problem: write_ch2 only gets write_ch1 context, missing essential outline and research
+Problem: No story outline to guide chapters, no chapter-level planning
 
-❌ WRONG - Incomplete dependency chains:
+✅ CORRECT - Hierarchical with intermediate planning:
 ```
-create_outline → write_intro → write_body → write_conclusion
-```
-Problem: write_conclusion can't access create_outline or write_intro, only write_body
-
-✅ CORRECT - Explicit parent dependencies:
-```
-research_ai → write_ch1 
-write_ch2 depends on [research_ai, write_ch1]           // EXPLICIT access to both
-write_ch3 depends on [research_ai, write_ch1, write_ch2] // EXPLICIT access to all needed
+research_ai → story_outline
+research_ai + story_outline → character_profiles
+story_outline + character_profiles → chapter_1_outline  
+story_outline + character_profiles + chapter_1_outline → write_chapter_1
+story_outline + character_profiles + chapter_1_outline → chapter_2_outline
+story_outline + character_profiles + chapter_2_outline → write_chapter_2
 ```
 
-✅ CORRECT - Proper story development:
+✅ CORRECT - Technical project with proper hierarchy:
 ```
-research_ai → story_outline → character_sheet → write_ch1
-write_ch2 depends on [story_outline, character_sheet, write_ch1]  // ALL needed dependencies
-write_ch3 depends on [story_outline, character_sheet, write_ch1, write_ch2]  // ALL needed
+requirements_research → technical_specification
+technical_specification → architecture_design
+technical_specification + architecture_design → module_1_design
+technical_specification + architecture_design → module_2_design  
+module_1_design → implement_module_1
+module_2_design → implement_module_2
+technical_specification + implement_module_1 + implement_module_2 → integration_guide
 ```
 
-✅ CORRECT - Multi-source compilation:
+✅ CORRECT - Multi-source content creation:
 ```
-research → outline → ch1
-         → outline → ch2  
-         → outline → ch3
-compile_book depends on [outline, ch1, ch2, ch3]  // EXPLICIT access to all chapters
+topic_research → content_outline
+topic_research + content_outline → introduction_draft
+topic_research + content_outline → section_1_draft
+topic_research + content_outline → section_2_draft
+content_outline + introduction_draft + section_1_draft + section_2_draft → final_document
 ```
+
+**HIERARCHICAL PLANNING PRINCIPLES**:
+1. **Create Intermediate Summaries**: Use outline/summary actions that multiple dependent actions can reference
+2. **Maintain Context Continuity**: Ensure related actions have access to shared foundational materials  
+3. **Layer Dependencies**: Build in levels - research → outlines → detailed plans → implementation
+4. **Cross-Reference Support**: Allow actions at the same level to reference each other when needed
+5. **Summary Propagation**: Important context (research, profiles, specifications) should be accessible throughout the hierarchy
 
 **CRITICAL UNDERSTANDING**: 
 - Each action is a separate execution context that ONLY receives the outputs from actions explicitly listed in its dependencies
 - There is NO automatic inheritance or transitive dependency resolution
 - If an action needs context from action A, action A MUST be in its dependencies array, regardless of any intermediate actions
 - The system enforces strict parent-child relationships to prevent context pollution and ensure predictable execution
+
+**SPECIFIC EXAMPLES FOR COMPLEX PROJECTS**:
+
+NOVEL/STORY WRITING - PROPER HIERARCHICAL STRUCTURE:
+```
+1. research_topic → story_concept_outline
+2. story_concept_outline → character_profiles  
+3. story_concept_outline + character_profiles → detailed_story_outline
+4. detailed_story_outline + character_profiles → chapter_1_outline
+5. detailed_story_outline + character_profiles + chapter_1_outline → write_chapter_1
+6. detailed_story_outline + character_profiles + write_chapter_1 → chapter_2_outline  
+7. detailed_story_outline + character_profiles + chapter_2_outline → write_chapter_2
+8. detailed_story_outline + character_profiles + write_chapter_2 → chapter_3_outline
+9. detailed_story_outline + character_profiles + chapter_3_outline → write_chapter_3
+```
+This ensures each chapter has access to the overall story structure, character consistency, and previous chapter context.
+
+TECHNICAL PROJECT - LAYERED DEPENDENCIES:
+```
+1. requirements_analysis → system_architecture
+2. system_architecture → api_specification
+3. system_architecture → database_design
+4. api_specification + database_design → backend_implementation
+5. api_specification → frontend_design
+6. frontend_design + backend_implementation → frontend_implementation
+7. system_architecture + backend_implementation + frontend_implementation → deployment_guide
+```
+
+RESEARCH REPORT - STRUCTURED APPROACH:
+```
+1. topic_research → research_summary
+2. research_summary → report_outline
+3. research_summary + report_outline → introduction_section
+4. research_summary + report_outline → methodology_section
+5. research_summary + report_outline → results_section
+6. research_summary + report_outline + results_section → analysis_section
+7. research_summary + analysis_section → conclusion_section
+```
 
 FINAL SYNTHESIS - COMPREHENSIVE TEMPLATING GUIDE:
 The final_synthesis action is a SPECIAL TEMPLATING ACTION that assembles the final output by combining results from previous actions.
@@ -1047,6 +1227,25 @@ JSON OUTPUT:
         }}
     ]
 }}
+
+CHAIN-OF-THOUGHT REASONING FOR DEPENDENCIES:
+Before generating the JSON, walk through your reasoning step-by-step:
+
+Step 1: "What is the end goal and what components does it need?"
+Step 2: "What foundational research/analysis is needed first?"  
+Step 3: "What planning/outline actions will guide multiple implementations?"
+Step 4: "What specific implementation actions are needed?"
+Step 5: "For each implementation action, what context does it need to work effectively?"
+Step 6: "What supporting actions (images, examples, etc.) enhance the deliverable?"
+Step 7: "How should dependencies be structured to ensure proper context flow?"
+
+DEPENDENCY VALIDATION CHECKLIST:
+- ✅ Does each chapter/content action have access to the overall outline/plan?
+- ✅ Do related actions share access to foundational research/profiles?
+- ✅ Are intermediate summary/outline actions created when multiple actions need similar context?
+- ✅ Does each action have ALL the context it needs to work effectively?
+- ✅ Are dependencies listed explicitly (no assumptions about transitive access)?
+- ✅ Does the final_synthesis include all important deliverable content?
 """
         messages = [
             {"role": "system", "content": system_prompt},
@@ -1282,7 +1481,20 @@ JSON OUTPUT:
                     )
                     logger.warning(f"Template validation error: {template_error}")
 
-                logger.debug(f"Plan: {plan}")
+                try:
+                    if self.valves.ENABLE_LIGHTWEIGHT_CONTEXT_OPTIMIZATION:
+                        await self.validate_and_flag_lightweight_context(plan)
+                except Exception as lightweight_error:
+                    await self.emit_status(
+                        "warning",
+                        f"Lightweight context validation failed but continuing with plan: {str(lightweight_error)}",
+                        False,
+                    )
+                    logger.warning(
+                        f"Lightweight context validation error: {lightweight_error}"
+                    )
+
+                logger.debug(f"Plan: {plan.model_dump_json()}")
                 return plan
             except Exception as e:
                 logger.error(
@@ -1384,6 +1596,14 @@ INSTRUCTIONS:
 4. If multiple tools are needed, list all relevant tool_ids
 5. Focus on tools that directly accomplish the action's objective
 
+SPECIFIC TOOL MAPPING GUIDELINES:
+- Research actions (search, find information, gather data): Use search tools (arxiv_search_tool, wiki_search_tool, perplexica_search)
+- Image generation actions: Use image generation tools (native_image_gen, create_image_hf, pexels_image_search_tool)
+- File operations (save, write): Use appropriate file/save tools
+- API integrations: Use specific API tools as needed
+
+CRITICAL: If the action requires external capabilities (search, file operations, API calls), you MUST select appropriate tools. Do not return an empty array unless the action truly doesn't need any external tools.
+
 OUTPUT FORMAT:
 Return a JSON array of tool_ids, for example: ["tool_id_1", "tool_id_2"]
 If no suitable tools are found, return an empty array: []
@@ -1414,12 +1634,17 @@ If no suitable tools are found, return an empty array: []
                 clean_result = clean_json_response(result)
                 selected_tools = json.loads(clean_result)
 
+                logger.info(f"Tool selection result for {action.id}: {selected_tools}")
+
                 available_tool_ids = {tool["tool_id"] for tool in tools}
                 valid_tools = [
                     tool_id
                     for tool_id in selected_tools
                     if tool_id in available_tool_ids
                 ]
+
+                logger.info(f"Available tool IDs: {available_tool_ids}")
+                logger.info(f"Valid tools for {action.id}: {valid_tools}")
 
                 if valid_tools:
                     action.tool_ids = valid_tools
@@ -1491,7 +1716,7 @@ If no suitable tools are found, return an empty array: []
             False,
         )
 
-        actions_info = []
+        actions_info: list[dict[str, str]] = []
         for action in plan.actions:
             if action.id != "final_synthesis":
                 actions_info.append(
@@ -1620,6 +1845,166 @@ Return ONLY the enhanced template description. Do not include explanations, comm
                 "warning", f"Failed to enhance template: {str(e)}", False
             )
 
+    async def validate_and_flag_lightweight_context(self, plan: Plan):
+        """Analyze the plan and flag appropriate actions for lightweight context mode using LLM categorization."""
+        await self.emit_status(
+            "info", "Analyzing plan for lightweight context optimization...", False
+        )
+
+        lightweight_candidates : list[Action] = []
+
+        for action in plan.actions:
+
+            if action.id == "final_synthesis":
+                continue
+            if not action.dependencies:
+                continue
+
+            if len(action.dependencies) == 1:
+                continue
+
+
+            has_file_operations = any(
+                keyword in action.description.lower()
+                for keyword in [
+                    "save",
+                    "organize",
+                    "file",
+                    "folder",
+                    "archive",
+                    "store",
+                    "obsidian",
+                    "vault",
+                ]
+            )
+
+            has_many_dependencies = len(action.dependencies) > 3
+
+            has_tools = bool(action.tool_ids)
+
+            is_candidate = (
+                has_file_operations 
+                or (
+                    has_tools and has_many_dependencies
+                )
+            )
+
+            if is_candidate:
+                lightweight_candidates.append(action)
+
+        if not lightweight_candidates:
+            await self.emit_status(
+                "info",
+                "No actions identified for lightweight context optimization.",
+                False,
+            )
+            return
+
+        await self.emit_status(
+            "info",
+            f"Found {len(lightweight_candidates)} candidate action(s) for lightweight context analysis.",
+            False,
+        )
+
+        # Use LLM to categorize which actions should use lightweight context
+        for action in lightweight_candidates:
+            categorization_prompt = f"""
+You are an expert at analyzing whether an action should use lightweight context mode.
+
+CRITICAL UNDERSTANDING - LIGHTWEIGHT CONTEXT MODE:
+- Lightweight context = Action receives only METADATA about dependencies (content type, length, brief description)
+- Full context = Action receives complete primary_output content from dependencies
+- @action_id references in tool parameters work in BOTH modes (they auto-resolve to full content)
+- The key difference: Can the action work effectively with just @action_id references, or does it need to read/analyze the full content in its reasoning?
+
+WHEN TO USE LIGHTWEIGHT CONTEXT:
+✅ SHOULD USE (action works with @action_id references in tools):
+- File operations that save/organize content: uses @action_id in file paths/content parameters
+- Obsidian/note operations: uses @action_id to reference content to save
+- Data compilation: uses @action_id to gather content into tools
+- Archive/backup operations: uses @action_id to specify what to archive
+- Organization tasks: uses @action_id to reference what to organize
+- Actions that primarily MOVE, SAVE, or ORGANIZE existing content
+
+❌ SHOULD NOT USE (action needs full content for reasoning/analysis):
+- Content analysis: needs to READ and analyze actual content for decision-making
+- Image generation based on content: needs full text to understand what image to create
+- Content creation that builds upon previous content: needs full context for coherent writing
+- Summarization: needs full content to create accurate summaries
+- Translation: needs full source text for accurate translation
+- Quality assessment: needs full content to evaluate
+- Actions that need to read, understand, or analyze content for their reasoning
+
+KEY INSIGHT - @action_id vs CONTENT ANALYSIS:
+- Actions that use @action_id in tool parameters to pass content → YES lightweight
+- Actions that need to read/understand content for decision-making → NO lightweight
+- File saving with @chapter_content works with lightweight (just passes reference)
+- Image generation needs full chapter content for reasoning (needs to understand what to illustrate)
+
+ACTION TO ANALYZE:
+- ID: {action.id}
+- Description: {action.description}
+- Type: {action.type}
+- Tool IDs: {action.tool_ids if action.tool_ids else "None"}
+- Dependencies: {action.dependencies}
+- Dependencies count: {len(action.dependencies)}
+
+ANALYSIS LOGIC:
+1. Does this action need to READ/analyze the actual content of dependencies? → NO lightweight
+2. Does this action work by saving/organizing content using references? → YES lightweight  
+3. Is this image generation that needs source content for context? → NO lightweight
+4. Is this file/note organization that works with content IDs? → YES lightweight
+
+EXAMPLES WITH REASONING:
+- "Generate illustration for chapter" → NO (needs to understand chapter content to decide what to illustrate)
+- "Save chapters to Obsidian vault" → YES (uses @chapter_id to save, doesn't need to analyze content)
+- "Organize all content into folder structure" → YES (uses @action_id references to organize by reference)
+- "Create summary based on research" → NO (needs to read and analyze research content for summarization)
+- "Compile all reports into ZIP file" → YES (uses @report_id references, doesn't analyze content)
+- "Write conclusion based on analysis" → NO (needs to read analysis content for reasoning)
+
+Return ONLY "YES" if the action should use lightweight context, or "NO" if it should not.
+"""
+
+            try:
+                categorization_result = await self.get_completion(
+                    prompt=categorization_prompt,
+                    temperature=0.1,  # Low temperature for consistent categorization
+                    action_results={},
+                    action=None,
+                )
+
+                should_use_lightweight = categorization_result.strip().upper() == "YES"
+
+                if should_use_lightweight:
+                    action.use_lightweight_context = True
+                    logger.info(
+                        f"LLM flagged action '{action.id}' for lightweight context mode"
+                    )
+                    await self.emit_status(
+                        "info",
+                        f"LLM flagged action '{action.id}' for lightweight context mode.",
+                        False,
+                    )
+                else:
+                    logger.info(
+                        f"LLM determined action '{action.id}' should not use lightweight context"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Failed to categorize action '{action.id}': {str(e)}")
+                # Default to not using lightweight context if categorization fails
+                continue
+
+        flagged_count = len(
+            [a for a in lightweight_candidates if a.use_lightweight_context]
+        )
+        await self.emit_status(
+            "success",
+            f"LLM analysis completed. Flagged {flagged_count} action(s) for lightweight context optimization.",
+            False,
+        )
+
     async def execute_action(
         self, plan: Plan, action: Action, context: dict[str, Any], step_number: int
     ) -> dict[str, Any]:
@@ -1647,18 +2032,46 @@ Return ONLY the enhanced template description. Do not include explanations, comm
             return parent_results
 
         if action.use_lightweight_context:
+            # In lightweight mode, provide only metadata and clear instructions about @action_id usage
             context_for_prompt = {}
             for dep in action.dependencies:
                 if dep in context:
                     dep_result = context.get(dep, {})
+                    # Extract basic metadata about the action result
+                    primary_output = dep_result.get("primary_output", "")
+                    supporting_details = dep_result.get("supporting_details", "")
+                    
+                    # Create a brief summary for context awareness
+                    content_type = "unknown"
+                    if primary_output:
+                        if primary_output.startswith("#"):
+                            content_type = "markdown document"
+                        elif primary_output.startswith("```"):
+                            content_type = "code"
+                        elif "http" in primary_output and ("jpg" in primary_output or "png" in primary_output or "gif" in primary_output):
+                            content_type = "image URL"
+                        elif primary_output.startswith("http"):
+                            content_type = "URL/link"
+                        else:
+                            content_type = "text content"
+                    
+                    # Provide lightweight context with clear instructions
                     context_for_prompt[dep] = {
                         "action_id": dep,
-                        "supporting_details": dep_result.get("supporting_details", ""),
+                        "content_type": content_type,
+                        "content_length": len(primary_output) if primary_output else 0,
+                        "has_content": bool(primary_output),
+                        "brief_description": supporting_details[:100] + "..." if len(supporting_details) > 100 else supporting_details,
+                        "usage_note": f"Use @{dep} in tool parameters to access the full content"
                     }
                 else:
                     context_for_prompt[dep] = {
                         "action_id": dep,
-                        "supporting_details": "",
+                        "content_type": "unknown",
+                        "content_length": 0,
+                        "has_content": False,
+                        "brief_description": "",
+                        "usage_note": f"Use @{dep} in tool parameters to access the full content"
                     }
         else:
             context_for_prompt = context
@@ -1681,33 +2094,48 @@ Return ONLY the enhanced template description. Do not include explanations, comm
 
         if action.use_lightweight_context:
             base_prompt = f"""
-            Execute step {step_number}: {action.description}
-            Overall Goal: {plan.goal}
-        
-            Context from dependent steps (LIGHTWEIGHT MODE - IDs and hints only):
-            - Parameters: {json.dumps(action.params)}
-            - Action IDs and hints: {json.dumps(context_for_prompt)}
-        
-            {requirements}
-            {user_guidance_text}
-            
-            Focus ONLY on this specific step's output.
-            Use the action IDs as identifiers/parameters in your tool calls when referencing previous results.
-            """
+Execute step {step_number}: {action.description}
+Overall Goal: {plan.goal}
+
+🔍 LIGHTWEIGHT CONTEXT MODE ACTIVE 🔍
+
+CRITICAL UNDERSTANDING:
+- You are receiving METADATA ONLY from previous actions, NOT the actual content
+- The "context_metadata" below contains only brief descriptions and content type information
+- DO NOT treat the brief descriptions as the actual content - they are just summaries!
+
+TO ACCESS ACTUAL CONTENT:
+- Use @action_id references in your tool parameters (e.g., "@chapter_1", "@research_data")
+- @action_id references will automatically resolve to the FULL primary_output content
+- This is the ONLY way to access the real content in lightweight mode
+
+Context Metadata (NOT the actual content):
+- Parameters: {json.dumps(action.params)}
+- Available Actions Metadata: {json.dumps(context_for_prompt)}
+
+{requirements}
+{user_guidance_text}
+
+IMPORTANT REMINDERS:
+1. The metadata above shows what actions are available, but NOT their content
+2. To use content from previous actions, reference them as @action_id in tool parameters
+3. Example: If you need content from "research_results", use "@research_results" in your tool calls
+4. Focus ONLY on this specific step's output - let @action_id references handle content access
+"""
         else:
             base_prompt = f"""
-            Execute step {step_number}: {action.description}
-            Overall Goal: {plan.goal}
-        
-            Context from dependent steps:
-            - Parameters: {json.dumps(action.params)}
-            - Previous Results: {json.dumps(context_for_prompt)}
-        
-            {requirements}
-            {user_guidance_text}
-            
-            Focus ONLY on this specific step's output.
-            """
+Execute step {step_number}: {action.description}
+Overall Goal: {plan.goal}
+
+Context from dependent steps:
+- Parameters: {json.dumps(action.params)}
+- Previous Results: {json.dumps(context_for_prompt)}
+
+{requirements}
+{user_guidance_text}
+
+Focus ONLY on this specific step's output.
+"""
 
         attempts_remaining = self.valves.MAX_RETRIES
         best_output = None
@@ -2523,7 +2951,8 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             template = final_synthesis_action.description
             preview_template = template
 
-            template_placeholders = re.findall(r"\{([a-zA-Z0-9_]+)\}", template)
+            # Get unique placeholders from template (avoid counting duplicates)
+            template_placeholders = set(re.findall(r"\{([a-zA-Z0-9_]+)\}", template))
             total_placeholders = len(template_placeholders)
 
             completed_actions = [
@@ -2539,22 +2968,24 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
             completed_placeholders = 0
 
-            for action in completed_actions:
-                placeholder = f"{{{action.id}}}"
-                if placeholder in template and action.output:
+            # Count completed placeholders by checking which template placeholders have completed actions
+            for placeholder_id in template_placeholders:
+                action = next((a for a in completed_actions if a.id == placeholder_id), None)
+                if action and action.output:
                     completed_placeholders += 1
                     preview_content = action.output.get("primary_output", "")
                     if len(preview_content) > 200:
                         preview_content = preview_content[:200] + "..."
                     preview_template = preview_template.replace(
-                        placeholder, f"✅ [{action.id}]: {preview_content}"
+                        f"{{{placeholder_id}}}", f"✅ [{placeholder_id}]: {preview_content}"
                     )
 
-            for action in pending_actions:
-                placeholder = f"{{{action.id}}}"
-                if placeholder in template:
+            # Handle pending placeholders
+            for placeholder_id in template_placeholders:
+                action = next((a for a in pending_actions if a.id == placeholder_id), None)
+                if action:
                     preview_template = preview_template.replace(
-                        placeholder, f"⏳ [{action.id}]: Pending..."
+                        f"{{{placeholder_id}}}", f"⏳ [{placeholder_id}]: Pending..."
                     )
 
             final_synthesis_content = f"""<details>

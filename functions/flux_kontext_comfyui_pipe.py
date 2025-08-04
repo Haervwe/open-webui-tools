@@ -396,6 +396,9 @@ class Pipe:
                 done=True,
             )
             return body
+        if self.valves.unload_ollama_models:
+            logger.info("Unloading all Ollama models from VRAM...")
+            unload_all_models(self.valves.ollama_url)
         try:
             workflow = json.loads(self.valves.ComfyUI_Workflow_JSON)
         except json.JSONDecodeError:

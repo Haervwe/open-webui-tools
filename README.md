@@ -420,7 +420,7 @@ Create a fully-featured Conway's Game of Life SPA with responsive UI, game contr
 ```
 
 ![Planner Agent Example](img/planner.png)
-*Example of Planner Agent in action Using local Qwen 3 14b as planner and action model and DeepCoder 14b as Coding model (previous verision of the script)*
+*Example of Planner Agent in action Using local Hermes 8b (previous verision of the script)*
 
 ---
 
