@@ -16,8 +16,6 @@ import uuid
 import os
 from pydantic import BaseModel, Field
 import requests
-
-# Import CACHE_DIR from OpenWebUI configuration for local file storage
 from open_webui.config import CACHE_DIR
 
 
