@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.1
+version: 0.2.2
 """
 
 import json
@@ -296,7 +296,7 @@ def extract_audio_files(job_data: Dict) -> list:
 
 
 async def download_audio_to_cache(
-    comfyui_http_url: str, filename: str, subfolder: str = ""
+    comfyui_http_url: str, filename: str, subfolder: str = "", base_url: str = ""
 ) -> Optional[str]:
     """
     Download audio file from ComfyUI to OpenWebUI cache directory.
@@ -329,7 +329,7 @@ async def download_audio_to_cache(
                         audio_file.write(audio_content)
 
                     # Return the cache URL path that OpenWebUI can serve
-                    return f"/cache/audio/generations/{local_filename}"
+                    return f"{base_url}/cache/audio/generations/{local_filename}"
                 else:
                     print(
                         f"[DEBUG] Failed to download audio from ComfyUI: HTTP {response.status}"
@@ -407,6 +407,10 @@ class Tools:
         save_local: bool = Field(
             default=True,
             description="Copy the generated song to the Open Webui Storage Backend",
+        )
+        owui_base_url: str = Field(
+            default="http://localhost:3000",
+            description="Your owui base url",
         )
 
     def __init__(self):
@@ -535,7 +539,9 @@ class Tools:
                 self.valves.model_name,
             ):
                 return f"Error: Model node ID '{self.valves.model_node}' not found/configured."
-            active_workflow[self.valves.seed_node]["inputs"]["seed"] = random.randint(1, 2**32 - 1)
+            active_workflow[self.valves.seed_node]["inputs"]["seed"] = random.randint(
+                1, 2**32 - 1
+            )
             client_id = str(uuid.uuid4())
             payload = {"prompt": active_workflow, "client_id": client_id}
 
@@ -590,7 +596,7 @@ class Tools:
 
                 if self.valves.save_local:
                     local_audio_url = await download_audio_to_cache(
-                        http_api_url, filename, subfolder
+                        http_api_url, filename, subfolder, self.valves.owui_base_url
                     )
                     if local_audio_url:
                         if __event_emitter__:
@@ -604,7 +610,7 @@ class Tools:
                                 }
                             )
 
-                        return f"Song generated successfully! The audio is embedded above and can be downloaded from: {local_audio_url}"
+                        return f"Song generated successfully! The audio is embedded above and can be downloaded from: {local_audio_url} please show it to the user, this output is only shown to you, please provide the markdown url to the user"
                 else:
                     # Fallback to ComfyUI direct link if download fails
                     subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
@@ -615,13 +621,13 @@ class Tools:
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": "⚠️ Song generated but local storage failed. Using direct link.",
+                                    "description": "🎉 Song generated and saved on Comfyui!",
                                     "done": True,
                                 },
                             }
                         )
 
-                    return f"Song generated! Note: Local storage failed, using direct ComfyUI link: {comfyui_url}"
+                    return f"Song generated successfully! The audio is embedded above and can be downloaded from: {comfyui_url} please show it to the user, this output is only shown to you, please provide the markdown url to the user &type=output and ALL parts of the URI are necessary do not modify or truncate it"
             else:
                 outputs_json = json.dumps(job_data.get("outputs", {}), indent=2)
                 return (
