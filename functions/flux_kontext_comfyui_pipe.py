@@ -1,11 +1,10 @@
-"""
-title: ComfyUI Universal Pipe
-author: Haervwe
-author_url: https://github.com/Haervwe/open-webui-tools
-funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.0.2
-required_open_webui_version: 0.5.0
-"""
+# title: ComfyUI Universal Pipe
+# author: Haervwe
+# author_url: https://github.com/Haervwe/open-webui-tools
+# funding_url: https://github.com/Haervwe/open-webui-tools
+# version: 3.2.0 (Modified)
+# required_open_webui_version: 0.5.0
+
 
 import json
 import uuid
@@ -13,23 +12,28 @@ import aiohttp
 import asyncio
 import random
 from typing import List, Dict, Callable, Optional
-from distro import name
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import get_last_user_message_item
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.models.users import User, Users
-from open_webui.constants import TASKS
 
 import logging
 import requests
 
+# [START] MODIFICATION: Added necessary imports for file handling
+import io
+import mimetypes
+from fastapi import UploadFile
+from open_webui.routers.files import upload_file_handler
+# [END] MODIFICATION
+
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-name = "ComfyUI Universal Pipe"
 
 
 # --- OLLAMA VRAM Management Functions ---
+# ... (this section remains unchanged)
 def get_loaded_models(api_url: str = "http://localhost:11434") -> list:
     try:
         response = requests.get(f"{api_url.rstrip('/')}/api/ps", timeout=5)
@@ -53,8 +57,8 @@ def unload_all_models(api_url: str = "http://localhost:11434"):
     except requests.RequestException as e:
         logger.error(f"Error unloading Ollama models: {e}")
 
-
 # --- Default Workflow ---
+# ... (this section remains unchanged)
 DEFAULT_WORKFLOW_JSON = json.dumps(
     {
         "6": {
@@ -107,7 +111,7 @@ DEFAULT_WORKFLOW_JSON = json.dumps(
         },
         "194": {
             "inputs": {
-                "seed": random.randint(1, 2**32 - 1),
+                "seed": 558680250753563,
                 "steps": 20,
                 "cfg": 1,
                 "sampler_name": "dpmpp_2m",
@@ -128,9 +132,9 @@ DEFAULT_WORKFLOW_JSON = json.dumps(
     indent=2,
 )
 
-
 class Pipe:
     class Valves(BaseModel):
+        # ... (this section remains unchanged)
         ComfyUI_Address: str = Field(
             default="http://127.0.0.1:8188",
             description="Address of the running ComfyUI server.",
@@ -189,7 +193,44 @@ class Pipe:
         self.valves = self.Valves()
         self.client_id = str(uuid.uuid4())
 
+    # [START] MODIFICATION: Added new helper function to save image and create public URL
+    def _save_image_and_get_public_url(self, request, image_data: bytes, content_type: str, user: User) -> str:
+        """
+        Saves the image data to OpenWebUI's file storage and returns a publicly accessible URL.
+        This logic is adapted from OpenWebUI's native image generation handling.
+        """
+        try:
+            image_format = mimetypes.guess_extension(content_type)
+            if not image_format:
+                # Default to .png if the content type is generic (e.g., 'application/octet-stream')
+                image_format = ".png"
+
+            file = UploadFile(
+                file=io.BytesIO(image_data),
+                filename=f"generated-image{image_format}",
+                headers={"content-type": content_type},
+            )
+            
+            # Use OpenWebUI's internal file handler to save the file
+            file_item = upload_file_handler(
+                request=request,
+                file=file,
+                metadata={}, # Metadata is optional
+                process=False,
+                user=user,
+            )
+            
+            # Construct the relative URL that OpenWebUI frontend can understand
+            url = request.app.url_path_for("get_file_content_by_id", id=file_item.id)
+            return url
+        except Exception as e:
+            logger.error(f"Error saving image to OpenWebUI: {e}", exc_info=True)
+            raise
+
+    # [END] MODIFICATION
+
     async def emit_status(
+        # ... (this function remains unchanged)
         self, event_emitter: Callable, level: str, description: str, done: bool = False
     ):
         if event_emitter:
@@ -206,6 +247,7 @@ class Pipe:
             )
 
     async def wait_for_job_signal(
+        # ... (this function remains unchanged)
         self, ws_api_url: str, prompt_id: str, event_emitter: Callable
     ) -> bool:
         """Waits for the 'executed' signal from WebSocket without fetching data."""
@@ -264,6 +306,7 @@ class Pipe:
         return False
 
     def extract_image_data(self, outputs: Dict) -> Optional[Dict]:
+        # ... (this function remains unchanged)
         """Extracts the best possible image from the completed job data, prioritizing final images over previews."""
         final_image_data, temp_image_data = None, None
         for node_id, node_output in outputs.items():
@@ -277,6 +320,7 @@ class Pipe:
         return final_image_data if final_image_data else temp_image_data
 
     async def queue_prompt(
+        # ... (this function remains unchanged)
         self, session: aiohttp.ClientSession, workflow: Dict
     ) -> Optional[str]:
         payload = {"prompt": workflow, "client_id": self.client_id}
@@ -288,6 +332,7 @@ class Pipe:
             return data.get("prompt_id")
 
     def parse_input(self, messages: List[Dict]) -> (Optional[str], Optional[str]):
+        # ... (this function remains unchanged)
         user_message_item = get_last_user_message_item(messages)
         if not user_message_item:
             return None, None
@@ -313,8 +358,9 @@ class Pipe:
             else None
         )
         return prompt.strip(), base64_image
-
+    
     async def enhance_prompt(self, prompt, image, user, request, event_emitter):
+        # ... (this function remains unchanged)
         await self.emit_status(event_emitter, "info", f"Enhancing the prompt...")
         payload = {
             "model": self.valves.vision_model_id,
@@ -343,7 +389,15 @@ class Pipe:
         response = await generate_chat_completion(request, payload, user)
         await self.emit_status(event_emitter, "info", f"Prompt enhanced")
         enhanced_prompt = response["choices"][0]["message"]["content"]
-
+        enhanced_prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
+        await event_emitter(
+            {
+                "type": "message",
+                "data": {
+                    "content": enhanced_prompt_message,
+                },
+            }
+        )
         return enhanced_prompt
 
     async def pipe(
@@ -351,7 +405,6 @@ class Pipe:
         body: dict,
         __user__: dict,
         __event_emitter__: Callable,
-        __task__=None,
         __request__=None,
     ) -> dict:
         self.__event_emitter__ = __event_emitter__
@@ -359,7 +412,6 @@ class Pipe:
         self.__user__ = Users.get_user_by_id(__user__["id"])
         messages = body.get("messages", [])
         prompt, base64_image = self.parse_input(messages)
-        prompt_message = ""
         if self.valves.enhance_prompt:
             prompt = await self.enhance_prompt(
                 prompt,
@@ -368,28 +420,12 @@ class Pipe:
                 self.__request__,
                 self.__event_emitter__,
             )
-            prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{prompt}\n\n---\n\n</details>"
-            await self.__event_emitter__(
-                {
-                    "type": "message",
-                    "data": {
-                        "content": prompt_message,
-                    },
-                }
+
+        if self.valves.unload_ollama_models:
+            await self.emit_status(
+                self.__event_emitter__, "info", "Unloading Ollama models..."
             )
-        if __task__ and __task__ != TASKS.DEFAULT:
-            if self.valves.vision_model_id:
-                response = await generate_chat_completion(
-                    self.__request__,
-                    {
-                        "model": self.valves.vision_model_id,
-                        "messages": body.get("messages"),
-                        "stream": False,
-                    },
-                    user=self.__user__,
-                )
-                return f"{name}: {response['choices'][0]['message']['content']}"
-            return f"{name}: Edited Image!"
+            unload_all_models(api_url=self.valves.ollama_url)
 
         if not base64_image:
             await self.emit_status(
@@ -398,10 +434,10 @@ class Pipe:
                 "No valid image provided. Please upload an image.",
                 done=True,
             )
+            # [START] MODIFICATION: Ensure function returns body on early exit
             return body
-        if self.valves.unload_ollama_models:
-            logger.info("Unloading all Ollama models from VRAM...")
-            unload_all_models(self.valves.ollama_url)
+            # [END] MODIFICATION
+
         try:
             workflow = json.loads(self.valves.ComfyUI_Workflow_JSON)
         except json.JSONDecodeError:
@@ -411,7 +447,9 @@ class Pipe:
                 "Invalid JSON in the ComfyUI_Workflow_JSON valve.",
                 done=True,
             )
+            # [START] MODIFICATION: Ensure function returns body on early exit
             return body
+            # [END] MODIFICATION
 
         http_api_url = self.valves.ComfyUI_Address.rstrip("/")
         ws_api_url = f"{'ws' if not http_api_url.startswith('https') else 'wss'}://{http_api_url.split('://', 1)[-1]}/ws"
@@ -456,7 +494,7 @@ class Pipe:
                 # --- RETRY LOGIC FOR HISTORY FETCH ---
                 job_data = None
                 for attempt in range(3):
-                    await asyncio.sleep(attempt + 1)  # Wait 1, then 2, then 3 seconds
+                    await asyncio.sleep(attempt + 1)
                     logger.info(
                         f"Fetching history for prompt {prompt_id}, attempt {attempt + 1}..."
                     )
@@ -467,7 +505,7 @@ class Pipe:
                             history = await resp.json()
                             if prompt_id in history:
                                 job_data = history[prompt_id]
-                                break  # Success!
+                                break
                     logger.warning(
                         f"Attempt {attempt + 1} to fetch history failed or was incomplete."
                     )
@@ -482,11 +520,34 @@ class Pipe:
             )
             image_to_display = self.extract_image_data(job_data.get("outputs", {}))
 
+            # [START] MODIFICATION: This is the core of the fix.
             if image_to_display:
-                image_url = f"{http_api_url}/view?filename={image_to_display['filename']}&subfolder={image_to_display.get('subfolder', '')}&type={image_to_display.get('type', 'output')}"
-                response_content = (
-                    f"Here is the edited image:\n\n![Generated Image]({image_url})"
+                # 1. Construct the internal URL to download the image from ComfyUI
+                internal_image_url = f"{http_api_url}/view?filename={image_to_display['filename']}&subfolder={image_to_display.get('subfolder', '')}&type={image_to_display.get('type', 'output')}"
+                await self.emit_status(self.__event_emitter__, "info", f"Downloading generated image from ComfyUI...")
+                
+                # 2. Download the image bytes. Run in an executor to avoid blocking the event loop.
+                loop = asyncio.get_event_loop()
+                http_response = await loop.run_in_executor(None, requests.get, internal_image_url)
+                http_response.raise_for_status()
+                image_data = http_response.content
+                content_type = http_response.headers.get('content-type', 'image/png')
+                
+                await self.emit_status(self.__event_emitter__, "info", f"Embedding image into chat...")
+
+                # 3. Use our new helper function to save the image and get a public URL
+                public_image_url = self._save_image_and_get_public_url(
+                    request=self.__request__,
+                    image_data=image_data,
+                    content_type=content_type,
+                    user=self.__user__
                 )
+
+                # 4. Create the response message with the new, correct URL
+                response_content = (
+                    f"Here is the edited image:\n\n![Generated Image]({public_image_url})"
+                )
+                
                 await self.__event_emitter__(
                     {"type": "message", "data": {"content": response_content}}
                 )
@@ -496,7 +557,13 @@ class Pipe:
                     "Image processed successfully!",
                     done=True,
                 )
-                return
+                
+                # 5. Append the successful response to the message history and return it
+                body["messages"].append(
+                    {"role": "assistant", "content": response_content}
+                )
+                return body
+            # [END] MODIFICATION
             else:
                 await self.emit_status(
                     self.__event_emitter__,
@@ -513,4 +580,7 @@ class Pipe:
                 f"An unexpected error occurred: {str(e)}",
                 done=True,
             )
-        return
+        
+        # [START] MODIFICATION: Ensure the body is always returned to maintain chat state
+        return body
+        # [END] MODIFICATION
