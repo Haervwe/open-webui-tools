@@ -20,6 +20,189 @@ from pydantic import BaseModel, Field
 from open_webui.config import CACHE_DIR
 
 
+def _get_model_config(model_name: str) -> Dict[str, Any]:
+    """Get model-specific configuration and preprocessing parameters."""
+    model_configs = {
+        "@cf/black-forest-labs/flux-1-schnell": {
+            "max_prompt_length": 2048,
+            "default_steps": 4,
+            "max_steps": 8,
+            "supports_negative_prompt": False,
+            "supports_size": False,
+            "supports_guidance": False,
+            "supports_seed": True,
+            "output_format": "base64",
+            "recommended_for": "fast generation, high quality",
+        },
+        "@cf/stabilityai/stable-diffusion-xl-base-1.0": {
+            "max_prompt_length": 1000,
+            "default_steps": 15,  # Optimized: quality plateaus around 15-20 steps
+            "max_steps": 20,
+            "supports_negative_prompt": True,
+            "supports_size": True,
+            "supports_guidance": True,
+            "supports_seed": True,
+            "output_format": "binary",
+            "recommended_for": "high quality, detailed images",
+            "default_guidance": 12.0,  # Optimized: lower than 7.5 default to reduce over-adherence and distortion
+            "guidance_range": "10.0-15.0",  # Sweet spot for SDXL quality without distortion
+            "recommended_negative": "blurry, low quality, distorted, unrealistic, bad anatomy, poor quality, jpeg artifacts",
+            "notes": "SDXL works best with guidance 10-15, detailed prompts, and comprehensive negative prompts",
+        },
+        "@cf/bytedance/stable-diffusion-xl-lightning": {
+            "max_prompt_length": 1000,
+            "default_steps": 4,
+            "max_steps": 8,
+            "supports_negative_prompt": True,
+            "supports_size": True,
+            "supports_guidance": True,
+            "supports_seed": True,
+            "output_format": "binary",
+            "recommended_for": "fast generation with good quality",
+        },
+        "@cf/lykon/dreamshaper-8-lcm": {
+            "max_prompt_length": 1000,
+            "default_steps": 4,  # LCM models work best with 4-8 steps
+            "max_steps": 8,  # Not 20! LCM needs fewer steps
+            "supports_negative_prompt": True,
+            "supports_size": True,
+            "supports_guidance": True,
+            "supports_seed": True,
+            "output_format": "binary",
+            "recommended_for": "photorealistic images (LCM - use 4-8 steps, lower guidance)",
+            "guidance_range": "1.0-2.0",  # LCM works better with lower guidance
+            "notes": "LCM model - requires 4-8 steps and lower guidance (1.0-2.0) for best results",
+        },
+    }
+
+    # Check for unsupported models and provide helpful error
+    unsupported_models = {
+        "@cf/runwayml/stable-diffusion-v1-5-img2img": "Image-to-image functionality is not supported in this tool. Please use text-to-image generation instead.",
+        "@cf/runwayml/stable-diffusion-v1-5-inpainting": "Image inpainting functionality is not supported in this tool. Please use text-to-image generation instead.",
+    }
+
+    if model_name in unsupported_models:
+        raise ValueError(unsupported_models[model_name])
+
+    return model_configs.get(
+        model_name, model_configs["@cf/black-forest-labs/flux-1-schnell"]
+    )
+
+
+def _preprocess_prompt(prompt: str, model_name: str) -> str:
+    """Preprocess prompt based on model requirements."""
+    config = _get_model_config(model_name)
+    max_length = config.get("max_prompt_length", 2048)
+
+    # Truncate if too long
+    if len(prompt) > max_length:
+        prompt = prompt[: max_length - 3] + "..."
+
+    # Model-specific prompt enhancements
+    if "flux" in model_name.lower():
+        # FLUX works well with detailed, artistic descriptions
+        if not any(
+            word in prompt.lower()
+            for word in ["detailed", "high quality", "masterpiece"]
+        ):
+            prompt = f"detailed, high quality, {prompt}"
+
+    elif "dreamshaper" in model_name.lower():
+        # DreamShaper excels at photorealistic content
+        if not any(
+            word in prompt.lower() for word in ["photorealistic", "realistic", "photo"]
+        ):
+            prompt = f"photorealistic, {prompt}"
+
+    elif "xl" in model_name.lower():
+        # SDXL models benefit from style descriptors and detailed prompts
+        if not any(
+            word in prompt.lower()
+            for word in [
+                "cinematic",
+                "artistic",
+                "professional",
+                "detailed",
+                "high quality",
+                "masterpiece",
+                "ultra realistic",
+            ]
+        ):
+            prompt = f"professional, cinematic, highly detailed, {prompt}"
+
+    return prompt
+
+
+def _build_request_payload(prompt: str, model_name: str, **kwargs) -> Dict[str, Any]:
+    """Build the request payload based on model capabilities."""
+    config = _get_model_config(model_name)
+    payload = {"prompt": _preprocess_prompt(prompt, model_name)}
+
+    # Add parameters based on model support
+    if config.get("supports_negative_prompt"):
+        negative_prompt = kwargs.get("negative_prompt", "")
+
+        # Auto-enhance negative prompt for SDXL if none provided
+        if (
+            "stable-diffusion-xl-base-1.0" in model_name.lower()
+            and not negative_prompt.strip()
+        ):
+            negative_prompt = config.get("recommended_negative", "")
+
+        if negative_prompt:
+            payload["negative_prompt"] = negative_prompt
+
+    if config.get("supports_size"):
+        size = kwargs.get("size", "1024x1024")
+        if "x" in size:
+            width, height = map(int, size.split("x"))
+            payload["width"] = max(256, min(2048, width))
+            payload["height"] = max(256, min(2048, height))
+
+    if config.get("supports_guidance"):
+        guidance_value = kwargs.get("guidance", config.get("default_guidance", 7.5))
+
+        # Special handling for LCM models - use lower guidance
+        if "dreamshaper-8-lcm" in model_name.lower():
+            guidance_value = min(guidance_value, 2.0)  # Cap at 2.0 for LCM
+            if guidance_value > 2.0:
+                guidance_value = 1.5  # Use 1.5 as default for LCM
+        # Special handling for SDXL - use optimized guidance range
+        elif "stable-diffusion-xl-base-1.0" in model_name.lower():
+            # Use optimized guidance range for SDXL: 10-15 for better quality
+            if guidance_value == 7.5:  # If using default, upgrade to optimized value
+                guidance_value = config.get("default_guidance", 12.0)
+            guidance_value = max(
+                10.0, min(guidance_value, 15.0)
+            )  # Clamp to optimal range
+
+        payload["guidance"] = guidance_value
+
+    if config.get("supports_seed") and kwargs.get("seed"):
+        payload["seed"] = kwargs["seed"]
+
+    # Steps configuration - use correct parameter name for each model
+    steps = kwargs.get("steps", config.get("default_steps", 4))
+    if "flux" in model_name.lower():
+        payload["steps"] = min(steps, config.get("max_steps", 8))  # FLUX uses "steps"
+    else:
+        payload["num_steps"] = min(
+            steps, config.get("max_steps", 20)
+        )  # Others use "num_steps"
+
+    # Handle image input for img2img and inpainting models
+    if config.get("supports_image_input") and kwargs.get("image_b64"):
+        payload["image_b64"] = kwargs["image_b64"]
+        if kwargs.get("strength"):
+            payload["strength"] = max(0.1, min(1.0, kwargs["strength"]))
+
+    # Handle mask for inpainting
+    if config.get("supports_mask") and kwargs.get("mask"):
+        payload["mask"] = kwargs["mask"]
+
+    return payload
+
+
 class Tools:
     def __init__(self):
         self.valves = self.Valves()
@@ -32,181 +215,6 @@ class Tools:
             "@cf/black-forest-labs/flux-1-schnell",
             description="Default image generation model (always used) - FLUX recommended over SDXL",
         )
-
-    def _get_model_config(self, model_name: str) -> Dict[str, Any]:
-        """Get model-specific configuration and preprocessing parameters."""
-        model_configs = {
-            "@cf/black-forest-labs/flux-1-schnell": {
-                "max_prompt_length": 2048,
-                "default_steps": 4,
-                "max_steps": 8,
-                "supports_negative_prompt": False,
-                "supports_size": False,
-                "supports_guidance": False,
-                "supports_seed": True,
-                "output_format": "base64",
-                "recommended_for": "fast generation, high quality",
-            },
-            "@cf/stabilityai/stable-diffusion-xl-base-1.0": {
-                "max_prompt_length": 1000,
-                "default_steps": 15,  # Optimized: quality plateaus around 15-20 steps
-                "max_steps": 20,
-                "supports_negative_prompt": True,
-                "supports_size": True,
-                "supports_guidance": True,
-                "supports_seed": True,
-                "output_format": "binary",
-                "recommended_for": "high quality, detailed images",
-                "default_guidance": 12.0,  # Optimized: lower than 7.5 default to reduce over-adherence and distortion
-                "guidance_range": "10.0-15.0",  # Sweet spot for SDXL quality without distortion
-                "recommended_negative": "blurry, low quality, distorted, unrealistic, bad anatomy, poor quality, jpeg artifacts",
-                "notes": "SDXL works best with guidance 10-15, detailed prompts, and comprehensive negative prompts"
-            },
-            "@cf/bytedance/stable-diffusion-xl-lightning": {
-                "max_prompt_length": 1000,
-                "default_steps": 4,
-                "max_steps": 8,
-                "supports_negative_prompt": True,
-                "supports_size": True,
-                "supports_guidance": True,
-                "supports_seed": True,
-                "output_format": "binary",
-                "recommended_for": "fast generation with good quality",
-            },
-            "@cf/lykon/dreamshaper-8-lcm": {
-                "max_prompt_length": 1000,
-                "default_steps": 4,  # LCM models work best with 4-8 steps
-                "max_steps": 8,      # Not 20! LCM needs fewer steps
-                "supports_negative_prompt": True,
-                "supports_size": True,
-                "supports_guidance": True,
-                "supports_seed": True,
-                "output_format": "binary",
-                "recommended_for": "photorealistic images (LCM - use 4-8 steps, lower guidance)",
-                "guidance_range": "1.0-2.0",  # LCM works better with lower guidance
-                "notes": "LCM model - requires 4-8 steps and lower guidance (1.0-2.0) for best results"
-            },
-        }
-        
-        # Check for unsupported models and provide helpful error
-        unsupported_models = {
-            "@cf/runwayml/stable-diffusion-v1-5-img2img": "Image-to-image functionality is not supported in this tool. Please use text-to-image generation instead.",
-            "@cf/runwayml/stable-diffusion-v1-5-inpainting": "Image inpainting functionality is not supported in this tool. Please use text-to-image generation instead."
-        }
-        
-        if model_name in unsupported_models:
-            raise ValueError(unsupported_models[model_name])
-        
-        return model_configs.get(
-            model_name, model_configs["@cf/black-forest-labs/flux-1-schnell"]
-        )
-
-    def _preprocess_prompt(self, prompt: str, model_name: str) -> str:
-        """Preprocess prompt based on model requirements."""
-        config = self._get_model_config(model_name)
-        max_length = config.get("max_prompt_length", 2048)
-
-        # Truncate if too long
-        if len(prompt) > max_length:
-            prompt = prompt[: max_length - 3] + "..."
-
-        # Model-specific prompt enhancements
-        if "flux" in model_name.lower():
-            # FLUX works well with detailed, artistic descriptions
-            if not any(
-                word in prompt.lower()
-                for word in ["detailed", "high quality", "masterpiece"]
-            ):
-                prompt = f"detailed, high quality, {prompt}"
-
-        elif "dreamshaper" in model_name.lower():
-            # DreamShaper excels at photorealistic content
-            if not any(
-                word in prompt.lower()
-                for word in ["photorealistic", "realistic", "photo"]
-            ):
-                prompt = f"photorealistic, {prompt}"
-
-        elif "xl" in model_name.lower():
-            # SDXL models benefit from style descriptors and detailed prompts
-            if not any(
-                word in prompt.lower()
-                for word in [
-                    "cinematic", "artistic", "professional", "detailed", 
-                    "high quality", "masterpiece", "ultra realistic"
-                ]
-            ):
-                prompt = f"professional, cinematic, highly detailed, {prompt}"
-
-        return prompt
-
-    def _build_request_payload(
-        self, prompt: str, model_name: str, **kwargs
-    ) -> Dict[str, Any]:
-        """Build the request payload based on model capabilities."""
-        config = self._get_model_config(model_name)
-        payload = {"prompt": self._preprocess_prompt(prompt, model_name)}
-
-        # Add parameters based on model support
-        if config.get("supports_negative_prompt"):
-            negative_prompt = kwargs.get("negative_prompt", "")
-            
-            # Auto-enhance negative prompt for SDXL if none provided
-            if "stable-diffusion-xl-base-1.0" in model_name.lower() and not negative_prompt.strip():
-                negative_prompt = config.get("recommended_negative", "")
-            
-            if negative_prompt:
-                payload["negative_prompt"] = negative_prompt
-
-        if config.get("supports_size"):
-            size = kwargs.get("size", "1024x1024")
-            if "x" in size:
-                width, height = map(int, size.split("x"))
-                payload["width"] = max(256, min(2048, width))
-                payload["height"] = max(256, min(2048, height))
-
-        if config.get("supports_guidance"):
-            guidance_value = kwargs.get("guidance", config.get("default_guidance", 7.5))
-            
-            # Special handling for LCM models - use lower guidance
-            if "dreamshaper-8-lcm" in model_name.lower():
-                guidance_value = min(guidance_value, 2.0)  # Cap at 2.0 for LCM
-                if guidance_value > 2.0:
-                    guidance_value = 1.5  # Use 1.5 as default for LCM
-            # Special handling for SDXL - use optimized guidance range
-            elif "stable-diffusion-xl-base-1.0" in model_name.lower():
-                # Use optimized guidance range for SDXL: 10-15 for better quality
-                if guidance_value == 7.5:  # If using default, upgrade to optimized value
-                    guidance_value = config.get("default_guidance", 12.0)
-                guidance_value = max(10.0, min(guidance_value, 15.0))  # Clamp to optimal range
-            
-            payload["guidance"] = guidance_value
-
-        if config.get("supports_seed") and kwargs.get("seed"):
-            payload["seed"] = kwargs["seed"]
-
-        # Steps configuration - use correct parameter name for each model
-        steps = kwargs.get("steps", config.get("default_steps", 4))
-        if "flux" in model_name.lower():
-            payload["steps"] = min(
-                steps, config.get("max_steps", 8)
-            )  # FLUX uses "steps"
-        else:
-            payload["num_steps"] = min(
-                steps, config.get("max_steps", 20)
-            )  # Others use "num_steps"
-
-        # Handle image input for img2img and inpainting models
-        if config.get("supports_image_input") and kwargs.get("image_b64"):
-            payload["image_b64"] = kwargs["image_b64"]
-            if kwargs.get("strength"):
-                payload["strength"] = max(0.1, min(1.0, kwargs["strength"]))
-
-        # Handle mask for inpainting
-        if config.get("supports_mask") and kwargs.get("mask"):
-            payload["mask"] = kwargs["mask"]
-
-        return payload
 
     async def generate_image(
         self,
@@ -253,10 +261,10 @@ class Tools:
 
         try:
             # Validate the default model is supported
-            config = self._get_model_config(model_name)
-            
+            config = _get_model_config(model_name)
+
             # Build request payload with model-specific preprocessing
-            payload = self._build_request_payload(
+            payload = _build_request_payload(
                 prompt=prompt,
                 model_name=model_name,
                 size=size,
@@ -405,7 +413,10 @@ class Tools:
             error_msg = str(e)
             if __event_emitter__:
                 await __event_emitter__(
-                    {"type": "status", "data": {"description": f"Error: {error_msg}", "done": True}}
+                    {
+                        "type": "status",
+                        "data": {"description": f"Error: {error_msg}", "done": True},
+                    }
                 )
             return f"Error: {error_msg}"
 
@@ -438,7 +449,7 @@ class Tools:
 
         result = "Available Cloudflare Workers AI Image Generation Models:\n\n"
         for model_id, description in models_info.items():
-            config = self._get_model_config(model_id)
+            config = _get_model_config(model_id)
             result += f"**{model_id}**\n"
             result += f"  Description: {description}\n"
             result += (
@@ -452,5 +463,5 @@ class Tools:
 
         result += f"Current default model: {self.valves.default_model}\n"
         result += "\nNote: Image-to-image and inpainting models are not supported in this tool."
-        
+
         return result
