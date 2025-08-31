@@ -3,7 +3,8 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.1.3
+version: 2.2.0
+required_open_webui_version: 0.6.26
 """
 
 import re
@@ -1648,7 +1649,6 @@ Return ONLY the enhanced template description. Do not include explanations, comm
             False,
         )
 
-        # Use LLM to categorize which actions should use lightweight context
         for action in lightweight_candidates:
             categorization_prompt = f"""
 You are an expert at analyzing whether an action should use lightweight context mode.
@@ -1711,7 +1711,7 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
             try:
                 categorization_result = await self.get_completion(
                     prompt=categorization_prompt,
-                    temperature=0.1,  # Low temperature for consistent categorization
+                    temperature=0.1,
                     action_results={},
                     action=None,
                 )
@@ -1735,7 +1735,6 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
 
             except Exception as e:
                 logger.warning(f"Failed to categorize action '{action.id}': {str(e)}")
-                # Default to not using lightweight context if categorization fails
                 continue
 
         flagged_count = len(
@@ -1774,16 +1773,14 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
             return parent_results
 
         if action.use_lightweight_context:
-            # In lightweight mode, provide only metadata and clear instructions about @action_id usage
+
             context_for_prompt = {}
             for dep in action.dependencies:
                 if dep in context:
                     dep_result = context.get(dep, {})
-                    # Extract basic metadata about the action result
                     primary_output = dep_result.get("primary_output", "")
                     supporting_details = dep_result.get("supporting_details", "")
-
-                    # Create a brief summary for context awareness
+                    
                     content_type = "unknown"
                     if primary_output:
                         if primary_output.startswith("#"):
@@ -1801,7 +1798,6 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
                         else:
                             content_type = "text content"
 
-                    # Provide lightweight context with clear instructions
                     context_for_prompt[dep] = {
                         "action_id": dep,
                         "content_type": content_type,
@@ -2155,7 +2151,6 @@ Focus ONLY on this specific step's output.
                 action.tool_results.clear()
                 return await self.execute_action(plan, action, context, step_number)
             else:
-                # Warning action was approved - clear user guidance
                 if action.params and "user_guidance" in action.params:
                     del action.params["user_guidance"]
 
@@ -2164,7 +2159,6 @@ Focus ONLY on this specific step's output.
             action.end_time = datetime.now().strftime("%H:%M:%S")
             action.output = best_output
 
-            # Clear user guidance after successful completion to avoid affecting future runs
             if action.params and "user_guidance" in action.params:
                 del action.params["user_guidance"]
 
@@ -2704,7 +2698,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             template = final_synthesis_action.description
             preview_template = template
 
-            # Get unique placeholders from template (avoid counting duplicates)
             template_placeholders = set(re.findall(r"\{([a-zA-Z0-9_]+)\}", template))
             total_placeholders = len(template_placeholders)
 
@@ -2721,7 +2714,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
             completed_placeholders = 0
 
-            # Count completed placeholders by checking which template placeholders have completed actions
             for placeholder_id in template_placeholders:
                 action = next(
                     (a for a in completed_actions if a.id == placeholder_id), None
@@ -2736,7 +2728,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                         f"✅ [{placeholder_id}]: {preview_content}",
                     )
 
-            # Handle pending placeholders
             for placeholder_id in template_placeholders:
                 action = next(
                     (a for a in pending_actions if a.id == placeholder_id), None
@@ -2825,7 +2816,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             }
         )
 
-        # Handle no response or empty response - should abort by default for safety
         if not user_response or not user_response.strip():
             await self.emit_status(
                 "warning",
@@ -2837,8 +2827,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         response_text = user_response.lower().strip()
 
         if "retry" in response_text:
-            # If user provides additional guidance beyond just "retry"
-            if len(response_text) > 6:  # More than just "retry"
+            if len(response_text) > 6:
                 if not action.params:
                     action.params = {}
                 action.params["user_guidance"] = user_response.strip()
@@ -2850,7 +2839,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         ):
             return "abort"
         else:
-            # If response doesn't contain clear instructions, treat as guidance for retry
             if not action.params:
                 action.params = {}
             action.params["user_guidance"] = user_response.strip()
@@ -2872,7 +2860,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             }
         )
 
-        # Handle no response or empty response - should abort by default for safety
         if not user_response or not user_response.strip():
             await self.emit_status(
                 "warning",
@@ -2884,8 +2871,8 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         response_text = user_response.lower().strip()
 
         if "retry" in response_text:
-            # If user provides additional guidance beyond just "retry"
-            if len(response_text) > 6:  # More than just "retry"
+
+            if len(response_text) > 6:
                 if not action.params:
                     action.params = {}
                 action.params["user_guidance"] = user_response.strip()
@@ -2897,7 +2884,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         ):
             return "abort"
         else:
-            # If response doesn't contain clear instructions, treat as guidance for retry
             if not action.params:
                 action.params = {}
             action.params["user_guidance"] = user_response.strip()
@@ -2929,7 +2915,6 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             }
         )
 
-        # Handle no response or empty response - should approve by default since action produced output
         if not user_response or not user_response.strip():
             await self.emit_status(
                 "info",
@@ -2941,8 +2926,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         response_text = user_response.lower().strip()
 
         if "retry" in response_text:
-            # If user provides additional guidance beyond just "retry"
-            if len(response_text) > 6:  # More than just "retry"
+            if len(response_text) > 6:
                 if not action.params:
                     action.params = {}
                 action.params["user_guidance"] = user_response.strip()
@@ -2954,7 +2938,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         ):
             return "approve"
         else:
-            # If response doesn't contain clear approve/retry, treat as guidance for retry
+
             if not action.params:
                 action.params = {}
             action.params["user_guidance"] = user_response.strip()
