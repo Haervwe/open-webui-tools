@@ -1,10 +1,12 @@
-# title: ComfyUI Universal Pipe
-# author: Haervwe
-# author_url: https://github.com/Haervwe/open-webui-tools
-# funding_url: https://github.com/Haervwe/open-webui-tools
-# version: 3.2.0 (Modified)
-# required_open_webui_version: 0.5.0
 
+"""
+title: ComfyUI Universal Pipe
+author: Haervwe , pupphelper
+author_url: https://github.com/Haervwe/open-webui-tools
+funding_url: https://github.com/Haervwe/open-webui-tools
+version: 3.3
+required_open_webui_version: 0.6.26
+"""
 
 import json
 import uuid
@@ -17,23 +19,22 @@ from open_webui.utils.misc import get_last_user_message_item
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.models.users import User, Users
 
+from open_webui.constants import TASKS
 import logging
 import requests
 
-# [START] MODIFICATION: Added necessary imports for file handling
 import io
 import mimetypes
 from fastapi import UploadFile
 from open_webui.routers.files import upload_file_handler
-# [END] MODIFICATION
 
-# Setup logger
+
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# --- OLLAMA VRAM Management Functions ---
-# ... (this section remains unchanged)
 def get_loaded_models(api_url: str = "http://localhost:11434") -> list:
     try:
         response = requests.get(f"{api_url.rstrip('/')}/api/ps", timeout=5)
@@ -57,8 +58,7 @@ def unload_all_models(api_url: str = "http://localhost:11434"):
     except requests.RequestException as e:
         logger.error(f"Error unloading Ollama models: {e}")
 
-# --- Default Workflow ---
-# ... (this section remains unchanged)
+
 DEFAULT_WORKFLOW_JSON = json.dumps(
     {
         "6": {
@@ -193,8 +193,11 @@ class Pipe:
         self.valves = self.Valves()
         self.client_id = str(uuid.uuid4())
 
-    # [START] MODIFICATION: Added new helper function to save image and create public URL
-    def _save_image_and_get_public_url(self, request, image_data: bytes, content_type: str, user: User) -> str:
+
+    def _save_image_and_get_public_url(
+        self, request, image_data: bytes, content_type: str, user: User
+    ) -> str:
+
         """
         Saves the image data to OpenWebUI's file storage and returns a publicly accessible URL.
         This logic is adapted from OpenWebUI's native image generation handling.
@@ -202,7 +205,7 @@ class Pipe:
         try:
             image_format = mimetypes.guess_extension(content_type)
             if not image_format:
-                # Default to .png if the content type is generic (e.g., 'application/octet-stream')
+
                 image_format = ".png"
 
             file = UploadFile(
@@ -210,24 +213,23 @@ class Pipe:
                 filename=f"generated-image{image_format}",
                 headers={"content-type": content_type},
             )
-            
-            # Use OpenWebUI's internal file handler to save the file
+
+
             file_item = upload_file_handler(
                 request=request,
                 file=file,
-                metadata={}, # Metadata is optional
+                metadata={},
                 process=False,
                 user=user,
             )
-            
-            # Construct the relative URL that OpenWebUI frontend can understand
+
+
             url = request.app.url_path_for("get_file_content_by_id", id=file_item.id)
             return url
         except Exception as e:
             logger.error(f"Error saving image to OpenWebUI: {e}", exc_info=True)
             raise
 
-    # [END] MODIFICATION
 
     async def emit_status(
         # ... (this function remains unchanged)
@@ -421,6 +423,22 @@ class Pipe:
                 self.__event_emitter__,
             )
 
+
+        if __task__ and __task__ != TASKS.DEFAULT:
+            if self.valves.vision_model_id:
+                response = await generate_chat_completion(
+                    self.__request__,
+                    {
+                        "model": self.valves.vision_model_id,
+                        "messages": body.get("messages"),
+                        "stream": False,
+                    },
+                    user=self.__user__,
+                )
+                return f"{name}: {response['choices'][0]['message']['content']}"
+            return f"{name}: Edited Image!"
+
+
         if self.valves.unload_ollama_models:
             await self.emit_status(
                 self.__event_emitter__, "info", "Unloading Ollama models..."
@@ -436,7 +454,6 @@ class Pipe:
             )
             # [START] MODIFICATION: Ensure function returns body on early exit
             return body
-            # [END] MODIFICATION
 
         try:
             workflow = json.loads(self.valves.ComfyUI_Workflow_JSON)
@@ -491,7 +508,6 @@ class Pipe:
                         "Did not receive a successful execution signal from ComfyUI."
                     )
 
-                # --- RETRY LOGIC FOR HISTORY FETCH ---
                 job_data = None
                 for attempt in range(3):
                     await asyncio.sleep(attempt + 1)
@@ -522,32 +538,36 @@ class Pipe:
 
             # [START] MODIFICATION: This is the core of the fix.
             if image_to_display:
-                # 1. Construct the internal URL to download the image from ComfyUI
+
+
                 internal_image_url = f"{http_api_url}/view?filename={image_to_display['filename']}&subfolder={image_to_display.get('subfolder', '')}&type={image_to_display.get('type', 'output')}"
-                await self.emit_status(self.__event_emitter__, "info", f"Downloading generated image from ComfyUI...")
-                
-                # 2. Download the image bytes. Run in an executor to avoid blocking the event loop.
+                await self.emit_status(
+                    self.__event_emitter__,
+                    "info",
+                    f"Downloading generated image from ComfyUI...",
+                )
+
                 loop = asyncio.get_event_loop()
-                http_response = await loop.run_in_executor(None, requests.get, internal_image_url)
+                http_response = await loop.run_in_executor(
+                    None, requests.get, internal_image_url
+                )
                 http_response.raise_for_status()
                 image_data = http_response.content
-                content_type = http_response.headers.get('content-type', 'image/png')
-                
-                await self.emit_status(self.__event_emitter__, "info", f"Embedding image into chat...")
+                content_type = http_response.headers.get("content-type", "image/png")
 
-                # 3. Use our new helper function to save the image and get a public URL
+                await self.emit_status(
+                    self.__event_emitter__, "info", f"Embedding image into chat..."
+                )
+
                 public_image_url = self._save_image_and_get_public_url(
                     request=self.__request__,
                     image_data=image_data,
                     content_type=content_type,
-                    user=self.__user__
+                    user=self.__user__,
                 )
 
-                # 4. Create the response message with the new, correct URL
-                response_content = (
-                    f"Here is the edited image:\n\n![Generated Image]({public_image_url})"
-                )
-                
+                response_content = f"Here is the edited image:\n\n![Generated Image]({public_image_url})"
+
                 await self.__event_emitter__(
                     {"type": "message", "data": {"content": response_content}}
                 )
@@ -557,13 +577,12 @@ class Pipe:
                     "Image processed successfully!",
                     done=True,
                 )
-                
-                # 5. Append the successful response to the message history and return it
+
                 body["messages"].append(
                     {"role": "assistant", "content": response_content}
                 )
                 return body
-            # [END] MODIFICATION
+
             else:
                 await self.emit_status(
                     self.__event_emitter__,
@@ -580,7 +599,7 @@ class Pipe:
                 f"An unexpected error occurred: {str(e)}",
                 done=True,
             )
-        
-        # [START] MODIFICATION: Ensure the body is always returned to maintain chat state
+
+
         return body
-        # [END] MODIFICATION
+
