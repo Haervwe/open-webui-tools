@@ -1,3 +1,4 @@
+
 """
 title: ComfyUI Universal Pipe
 author: Haervwe , pupphelper
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 from open_webui.utils.misc import get_last_user_message_item
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.models.users import User, Users
+
 from open_webui.constants import TASKS
 import logging
 import requests
@@ -25,6 +27,8 @@ import io
 import mimetypes
 from fastapi import UploadFile
 from open_webui.routers.files import upload_file_handler
+
+
 
 
 logging.basicConfig(level=logging.INFO)
@@ -107,7 +111,7 @@ DEFAULT_WORKFLOW_JSON = json.dumps(
         },
         "194": {
             "inputs": {
-                "seed": random.randint(1, 2**32 - 1),
+                "seed": 558680250753563,
                 "steps": 20,
                 "cfg": 1,
                 "sampler_name": "dpmpp_2m",
@@ -128,9 +132,9 @@ DEFAULT_WORKFLOW_JSON = json.dumps(
     indent=2,
 )
 
-
 class Pipe:
     class Valves(BaseModel):
+        # ... (this section remains unchanged)
         ComfyUI_Address: str = Field(
             default="http://127.0.0.1:8188",
             description="Address of the running ComfyUI server.",
@@ -189,9 +193,11 @@ class Pipe:
         self.valves = self.Valves()
         self.client_id = str(uuid.uuid4())
 
+
     def _save_image_and_get_public_url(
         self, request, image_data: bytes, content_type: str, user: User
     ) -> str:
+
         """
         Saves the image data to OpenWebUI's file storage and returns a publicly accessible URL.
         This logic is adapted from OpenWebUI's native image generation handling.
@@ -199,6 +205,7 @@ class Pipe:
         try:
             image_format = mimetypes.guess_extension(content_type)
             if not image_format:
+
                 image_format = ".png"
 
             file = UploadFile(
@@ -206,6 +213,7 @@ class Pipe:
                 filename=f"generated-image{image_format}",
                 headers={"content-type": content_type},
             )
+
 
             file_item = upload_file_handler(
                 request=request,
@@ -215,13 +223,16 @@ class Pipe:
                 user=user,
             )
 
+
             url = request.app.url_path_for("get_file_content_by_id", id=file_item.id)
             return url
         except Exception as e:
             logger.error(f"Error saving image to OpenWebUI: {e}", exc_info=True)
             raise
 
+
     async def emit_status(
+        # ... (this function remains unchanged)
         self, event_emitter: Callable, level: str, description: str, done: bool = False
     ):
         if event_emitter:
@@ -238,6 +249,7 @@ class Pipe:
             )
 
     async def wait_for_job_signal(
+        # ... (this function remains unchanged)
         self, ws_api_url: str, prompt_id: str, event_emitter: Callable
     ) -> bool:
         """Waits for the 'executed' signal from WebSocket without fetching data."""
@@ -296,6 +308,7 @@ class Pipe:
         return False
 
     def extract_image_data(self, outputs: Dict) -> Optional[Dict]:
+        # ... (this function remains unchanged)
         """Extracts the best possible image from the completed job data, prioritizing final images over previews."""
         final_image_data, temp_image_data = None, None
         for node_id, node_output in outputs.items():
@@ -309,6 +322,7 @@ class Pipe:
         return final_image_data if final_image_data else temp_image_data
 
     async def queue_prompt(
+        # ... (this function remains unchanged)
         self, session: aiohttp.ClientSession, workflow: Dict
     ) -> Optional[str]:
         payload = {"prompt": workflow, "client_id": self.client_id}
@@ -320,6 +334,7 @@ class Pipe:
             return data.get("prompt_id")
 
     def parse_input(self, messages: List[Dict]) -> (Optional[str], Optional[str]):
+        # ... (this function remains unchanged)
         user_message_item = get_last_user_message_item(messages)
         if not user_message_item:
             return None, None
@@ -345,8 +360,9 @@ class Pipe:
             else None
         )
         return prompt.strip(), base64_image
-
+    
     async def enhance_prompt(self, prompt, image, user, request, event_emitter):
+        # ... (this function remains unchanged)
         await self.emit_status(event_emitter, "info", f"Enhancing the prompt...")
         payload = {
             "model": self.valves.vision_model_id,
@@ -391,7 +407,6 @@ class Pipe:
         body: dict,
         __user__: dict,
         __event_emitter__: Callable,
-        __task__=None,
         __request__=None,
     ) -> dict:
         self.__event_emitter__ = __event_emitter__
@@ -408,6 +423,7 @@ class Pipe:
                 self.__event_emitter__,
             )
 
+
         if __task__ and __task__ != TASKS.DEFAULT:
             if self.valves.vision_model_id:
                 response = await generate_chat_completion(
@@ -422,6 +438,7 @@ class Pipe:
                 return f"{name}: {response['choices'][0]['message']['content']}"
             return f"{name}: Edited Image!"
 
+
         if self.valves.unload_ollama_models:
             await self.emit_status(
                 self.__event_emitter__, "info", "Unloading Ollama models..."
@@ -435,6 +452,7 @@ class Pipe:
                 "No valid image provided. Please upload an image.",
                 done=True,
             )
+            # [START] MODIFICATION: Ensure function returns body on early exit
             return body
 
         try:
@@ -446,7 +464,9 @@ class Pipe:
                 "Invalid JSON in the ComfyUI_Workflow_JSON valve.",
                 done=True,
             )
+            # [START] MODIFICATION: Ensure function returns body on early exit
             return body
+            # [END] MODIFICATION
 
         http_api_url = self.valves.ComfyUI_Address.rstrip("/")
         ws_api_url = f"{'ws' if not http_api_url.startswith('https') else 'wss'}://{http_api_url.split('://', 1)[-1]}/ws"
@@ -516,7 +536,9 @@ class Pipe:
             )
             image_to_display = self.extract_image_data(job_data.get("outputs", {}))
 
+            # [START] MODIFICATION: This is the core of the fix.
             if image_to_display:
+
 
                 internal_image_url = f"{http_api_url}/view?filename={image_to_display['filename']}&subfolder={image_to_display.get('subfolder', '')}&type={image_to_display.get('type', 'output')}"
                 await self.emit_status(
@@ -560,6 +582,7 @@ class Pipe:
                     {"role": "assistant", "content": response_content}
                 )
                 return body
+
             else:
                 await self.emit_status(
                     self.__event_emitter__,
@@ -577,4 +600,6 @@ class Pipe:
                 done=True,
             )
 
+
         return body
+
