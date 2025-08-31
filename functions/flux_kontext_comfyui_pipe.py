@@ -232,7 +232,6 @@ class Pipe:
 
 
     async def emit_status(
-        # ... (this function remains unchanged)
         self, event_emitter: Callable, level: str, description: str, done: bool = False
     ):
         if event_emitter:
@@ -249,7 +248,6 @@ class Pipe:
             )
 
     async def wait_for_job_signal(
-        # ... (this function remains unchanged)
         self, ws_api_url: str, prompt_id: str, event_emitter: Callable
     ) -> bool:
         """Waits for the 'executed' signal from WebSocket without fetching data."""
@@ -308,8 +306,7 @@ class Pipe:
         return False
 
     def extract_image_data(self, outputs: Dict) -> Optional[Dict]:
-        # ... (this function remains unchanged)
-        """Extracts the best possible image from the completed job data, prioritizing final images over previews."""
+
         final_image_data, temp_image_data = None, None
         for node_id, node_output in outputs.items():
             if "ui" in node_output and "images" in node_output.get("ui", {}):
@@ -322,7 +319,7 @@ class Pipe:
         return final_image_data if final_image_data else temp_image_data
 
     async def queue_prompt(
-        # ... (this function remains unchanged)
+
         self, session: aiohttp.ClientSession, workflow: Dict
     ) -> Optional[str]:
         payload = {"prompt": workflow, "client_id": self.client_id}
@@ -333,8 +330,8 @@ class Pipe:
             data = await response.json()
             return data.get("prompt_id")
 
-    def parse_input(self, messages: List[Dict]) -> (Optional[str], Optional[str]):
-        # ... (this function remains unchanged)
+    def parse_input(self, messages: List[Dict[str,str]]) -> (Optional[str], Optional[str]):
+
         user_message_item = get_last_user_message_item(messages)
         if not user_message_item:
             return None, None
@@ -362,7 +359,7 @@ class Pipe:
         return prompt.strip(), base64_image
     
     async def enhance_prompt(self, prompt, image, user, request, event_emitter):
-        # ... (this function remains unchanged)
+        
         await self.emit_status(event_emitter, "info", f"Enhancing the prompt...")
         payload = {
             "model": self.valves.vision_model_id,
@@ -408,6 +405,7 @@ class Pipe:
         __user__: dict,
         __event_emitter__: Callable,
         __request__=None,
+        __task__=None,
     ) -> dict:
         self.__event_emitter__ = __event_emitter__
         self.__request__ = __request__
@@ -452,7 +450,6 @@ class Pipe:
                 "No valid image provided. Please upload an image.",
                 done=True,
             )
-            # [START] MODIFICATION: Ensure function returns body on early exit
             return body
 
         try:
@@ -464,9 +461,7 @@ class Pipe:
                 "Invalid JSON in the ComfyUI_Workflow_JSON valve.",
                 done=True,
             )
-            # [START] MODIFICATION: Ensure function returns body on early exit
             return body
-            # [END] MODIFICATION
 
         http_api_url = self.valves.ComfyUI_Address.rstrip("/")
         ws_api_url = f"{'ws' if not http_api_url.startswith('https') else 'wss'}://{http_api_url.split('://', 1)[-1]}/ws"
@@ -536,7 +531,6 @@ class Pipe:
             )
             image_to_display = self.extract_image_data(job_data.get("outputs", {}))
 
-            # [START] MODIFICATION: This is the core of the fix.
             if image_to_display:
 
 
