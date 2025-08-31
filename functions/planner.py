@@ -615,17 +615,27 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                         params: dict[str, Any],
                     ) -> dict[str, Any]:
                         """Recursively resolve @action_id references in tool parameters"""
-                        logger.info(f"resolve_action_references called with params: {params}")
-                        logger.info(f"Available action_results keys: {list(action_results.keys())}")
+                        logger.info(
+                            f"resolve_action_references called with params: {params}"
+                        )
+                        logger.info(
+                            f"Available action_results keys: {list(action_results.keys())}"
+                        )
                         resolved_params: dict[str, Any] = {}
                         for key, value in params.items():
                             if isinstance(value, str):
-                                logger.info(f"Processing string parameter '{key}' with value: {value}")
-                                
+                                logger.info(
+                                    f"Processing string parameter '{key}' with value: {value}"
+                                )
+
                                 # Check if this is a pure @action_id reference (no other content)
-                                if value.startswith("@") and re.match(r"^@[a-zA-Z0-9_-]+$", value):
+                                if value.startswith("@") and re.match(
+                                    r"^@[a-zA-Z0-9_-]+$", value
+                                ):
                                     action_id = value[1:]
-                                    logger.info(f"Found direct @action_id reference: {action_id}")
+                                    logger.info(
+                                        f"Found direct @action_id reference: {action_id}"
+                                    )
                                     if action_id in action_results:
                                         resolved_params[key] = action_results[
                                             action_id
@@ -642,7 +652,9 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                                     # Look for embedded @action_id references in the string
                                     pattern = r"@([a-zA-Z0-9_-]+)"
                                     matches = re.findall(pattern, value)
-                                    logger.info(f"Looking for embedded @action_id references in '{value}', found matches: {matches}")
+                                    logger.info(
+                                        f"Looking for embedded @action_id references in '{value}', found matches: {matches}"
+                                    )
 
                                     if matches:
                                         resolved_value = value
@@ -1587,7 +1599,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
             "info", "Analyzing plan for lightweight context optimization...", False
         )
 
-        lightweight_candidates : list[Action] = []
+        lightweight_candidates: list[Action] = []
 
         for action in plan.actions:
 
@@ -1598,7 +1610,6 @@ Return ONLY the enhanced template description. Do not include explanations, comm
 
             if len(action.dependencies) == 1:
                 continue
-
 
             has_file_operations = any(
                 keyword in action.description.lower()
@@ -1618,12 +1629,7 @@ Return ONLY the enhanced template description. Do not include explanations, comm
 
             has_tools = bool(action.tool_ids)
 
-            is_candidate = (
-                has_file_operations 
-                or (
-                    has_tools and has_many_dependencies
-                )
-            )
+            is_candidate = has_file_operations or (has_tools and has_many_dependencies)
 
             if is_candidate:
                 lightweight_candidates.append(action)
@@ -1776,7 +1782,7 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
                     # Extract basic metadata about the action result
                     primary_output = dep_result.get("primary_output", "")
                     supporting_details = dep_result.get("supporting_details", "")
-                    
+
                     # Create a brief summary for context awareness
                     content_type = "unknown"
                     if primary_output:
@@ -1784,21 +1790,29 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
                             content_type = "markdown document"
                         elif primary_output.startswith("```"):
                             content_type = "code"
-                        elif "http" in primary_output and ("jpg" in primary_output or "png" in primary_output or "gif" in primary_output):
+                        elif "http" in primary_output and (
+                            "jpg" in primary_output
+                            or "png" in primary_output
+                            or "gif" in primary_output
+                        ):
                             content_type = "image URL"
                         elif primary_output.startswith("http"):
                             content_type = "URL/link"
                         else:
                             content_type = "text content"
-                    
+
                     # Provide lightweight context with clear instructions
                     context_for_prompt[dep] = {
                         "action_id": dep,
                         "content_type": content_type,
                         "content_length": len(primary_output) if primary_output else 0,
                         "has_content": bool(primary_output),
-                        "brief_description": supporting_details[:100] + "..." if len(supporting_details) > 100 else supporting_details,
-                        "usage_note": f"Use @{dep} in tool parameters to access the full content"
+                        "brief_description": (
+                            supporting_details[:100] + "..."
+                            if len(supporting_details) > 100
+                            else supporting_details
+                        ),
+                        "usage_note": f"Use @{dep} in tool parameters to access the full content",
                     }
                 else:
                     context_for_prompt[dep] = {
@@ -1807,7 +1821,7 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
                         "content_length": 0,
                         "has_content": False,
                         "brief_description": "",
-                        "usage_note": f"Use @{dep} in tool parameters to access the full content"
+                        "usage_note": f"Use @{dep} in tool parameters to access the full content",
                     }
         else:
             context_for_prompt = context
@@ -1928,7 +1942,7 @@ Focus ONLY on this specific step's output.
                         "__request__": self.__request__,
                     }
 
-                    tools: dict[str, dict[Any, Any]] = get_tools(  # type: ignore
+                    tools: dict[str, dict[Any, Any]] = await get_tools(  # type: ignore
                         self.__request__,
                         action.tool_ids or [],
                         self.__user__,
@@ -2215,6 +2229,8 @@ Critically evaluate the output based on the following criteria:
 8. **Content Quality**: Is the primary_output field clean, complete, and ready for use by subsequent steps?
 9. **Markdown integration**: Markdown format for deliverables is preferable using the embeding formats for example ![caption](<image uri>) to show image or embedable content.
 10.**Missing Tool Calls**: if tool calls werent done Ask the model to call them but do not mention Format at this step.
+11.**Missing hyperlinks in primary output**: in cases qehre the main deliverable is in the form of an hyperlink it MUST be on priparyoputput. for example for generated images , the actual uri or markdown attachement must be in the correct place.
+12. *tool resukts**: tool results are LOST if they are not explicitly attached to the primary output, any hyperlink , generated image or content wich its uri is not placed in primary output and instead leaved in the tool reuslts, is categorically lost forever.
 
 EXAMPLES OF CORRECT vs INCORRECT FIELD USAGE:
 
@@ -2523,7 +2539,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 if action.id in in_progress:
                     in_progress.remove(action.id)
 
-        await self.emit_full_state(plan, completed_summaries)
+        result_message = await self.emit_full_state(plan, completed_summaries)
 
         final_synthesis_action = next(
             (
@@ -2545,6 +2561,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             )
             await self.emit_message(formatted_output)
 
+            result_message += "\n" + formatted_output
         plan.execution_summary = {
             "total_steps": len(plan.actions),
             "completed_steps": len(
@@ -2558,7 +2575,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         }
 
         plan.metadata["execution_outputs"] = all_outputs
-        return
+        return result_message
 
     async def emit_replace_mermaid(self, plan: Plan):
         """Emit current state as Mermaid diagram, replacing the old one"""
@@ -2706,19 +2723,24 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
             # Count completed placeholders by checking which template placeholders have completed actions
             for placeholder_id in template_placeholders:
-                action = next((a for a in completed_actions if a.id == placeholder_id), None)
+                action = next(
+                    (a for a in completed_actions if a.id == placeholder_id), None
+                )
                 if action and action.output:
                     completed_placeholders += 1
                     preview_content = action.output.get("primary_output", "")
                     if len(preview_content) > 200:
                         preview_content = preview_content[:200] + "..."
                     preview_template = preview_template.replace(
-                        f"{{{placeholder_id}}}", f"✅ [{placeholder_id}]: {preview_content}"
+                        f"{{{placeholder_id}}}",
+                        f"✅ [{placeholder_id}]: {preview_content}",
                     )
 
             # Handle pending placeholders
             for placeholder_id in template_placeholders:
-                action = next((a for a in pending_actions if a.id == placeholder_id), None)
+                action = next(
+                    (a for a in pending_actions if a.id == placeholder_id), None
+                )
                 if action:
                     preview_template = preview_template.replace(
                         f"{{{placeholder_id}}}", f"⏳ [{placeholder_id}]: Pending..."
@@ -2739,6 +2761,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
 
         full_content = "\n\n".join(content_parts)
         await self.emit_replace(full_content)
+        return full_content
 
     def generate_action_summary(self, action: Action, plan: Plan) -> str:
         """Generate a detailed summary of a completed action in dropdown format"""
@@ -2987,8 +3010,8 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         await self.emit_full_state(plan, [])
 
         await self.emit_status("info", "Executing plan...", False)
-        await self.execute_plan(plan)
+        result = await self.execute_plan(plan)
 
         await self.emit_status("success", "Plan execution completed.", True)
 
-        return
+        return result
