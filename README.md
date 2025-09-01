@@ -90,7 +90,9 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 3. [Pexels Media Search Tool](#pexels-media-search-tool)
 4. [Native Image Generator](#native-image-generator)
 5. [Hugging Face Image Generator](#hugging-face-image-generator)
-6. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
+6. [Cloudflare Workers AI Image Generator](#cloudflare-workers-ai-image-generator)
+7. [SearxNG Image Search Tool](#searxng-image-search-tool)
+8. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
 7. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
 8. [Planner Agent v2](#planner-agent-v2)
 9. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
@@ -253,6 +255,64 @@ Generate high-quality images from text descriptions using Hugging Face's Stable 
 
 ![Image Generation Example](img/generate_image_hf.png)
 *Example image generated with Hugging Face tool*
+
+---
+
+### Cloudflare Workers AI Image Generator
+
+### Description
+Generate images using Cloudflare Workers AI text-to-image models, including FLUX, Stable Diffusion XL, SDXL Lightning, and DreamShaper LCM. This tool provides model-specific prompt preprocessing, parameter optimization, and direct image display in chat. It supports fast and high-quality image generation with minimal configuration.
+
+### Configuration
+- `cloudflare_api_token` (str): Your Cloudflare API Token (required)
+- `cloudflare_account_id` (str): Your Cloudflare Account ID (required)
+- `default_model` (str): Default model to use (e.g., `@cf/black-forest-labs/flux-1-schnell`)
+
+**Prerequisites**: Obtain a Cloudflare API Token and Account ID from your Cloudflare dashboard. No additional dependencies beyond `requests`.
+
+### Usage
+- **Example:**
+  ```python
+  # Generate an image with a prompt
+  await tools.generate_image(prompt="A futuristic cityscape at sunset, vibrant colors")
+  ```
+- Returns a markdown-formatted image link for immediate display in chat.
+
+### Features
+- **Multiple Models:** Supports FLUX, SDXL, SDXL Lightning, DreamShaper LCM
+- **Prompt Optimization:** Automatic prompt enhancement for best results per model
+- **Parameter Handling:** Smart handling of steps, guidance, negative prompts, and size
+- **Direct Image Display:** Returns markdown image links for chat
+- **Error Handling:** Comprehensive error and status reporting
+- **Real-time Status:** Progress updates via event emitter
+
+---
+
+### SearxNG Image Search Tool
+
+### Description
+Search and retrieve images from the web using a self-hosted [SearxNG](https://searxng.org/) instance. This tool provides privacy-respecting, multi-engine image search with direct image display in chat. Ideal for finding diverse images from multiple sources without tracking or ads.
+
+### Configuration
+- `SEARXNG_ENGINE_API_BASE_URL` (str): The base URL for the SearxNG search engine API (default: `http://searxng:4000/search`)
+- `MAX_RESULTS` (int): Maximum number of images to return per search (default: 5)
+
+**Prerequisites**: You must have a running SearxNG instance. See [SearxNG documentation](https://docs.searxng.org/) for setup instructions.
+
+### Usage
+- **Example:**
+  ```python
+  # Search for images of cats
+  await tools.search_images(query="cats", max_results=3)
+  ```
+- Returns a list of markdown-formatted image links for immediate display in chat.
+
+### Features
+- **Privacy-Respecting:** No tracking, ads, or profiling
+- **Multi-Engine:** Aggregates results from multiple search engines
+- **Direct Image Display:** Images are formatted for chat display
+- **Customizable:** Choose engines, result count, and more
+- **Error Handling:** Handles connection and search errors gracefully
 
 ---
 
