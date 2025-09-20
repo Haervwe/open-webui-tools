@@ -14,6 +14,7 @@ Transform your Open WebUI instance into a powerful AI workstation with this comp
 This repository contains **15+ specialized tools and functions** designed to enhance your Open WebUI experience:
 
 ### 🛠️ **Tools**
+
 - **arXiv Search** - Academic paper discovery (no API key required!)
 - **Perplexica Search** - Web search using Perplexica API with citations
 - **Pexels Media Search** - High-quality photos and videos from Pexels API
@@ -21,9 +22,9 @@ This repository contains **15+ specialized tools and functions** designed to enh
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI ACE Step Audio** - Advanced music generation
 - **Flux Kontext ComfyUI** - Professional image editing
-  
 
 ### 🔄 **Function Pipes**
+
 - **Planner Agent v2** - Advanced autonomous agent with specialized models, interactive guidance, and comprehensive execution management
 - **arXiv Research MCTS** - Advanced research with Monte Carlo Tree Search
 - **Multi Model Conversations** - Multi-agent discussions
@@ -33,6 +34,7 @@ This repository contains **15+ specialized tools and functions** designed to enh
 - **MCP Pipe** - Model Context Protocol integration
 
 ### 🔧 **Filters**
+
 - **Prompt Enhancer** - Automatic prompt improvement
 - **Semantic Router** - Intelligent model selection
 - **Full Document** - File processing capabilities
@@ -41,11 +43,13 @@ This repository contains **15+ specialized tools and functions** designed to enh
 ## 🚀 Quick Start
 
 ### Option 1: Open WebUI Hub (Recommended)
+
 1. Visit [https://openwebui.com/u/haervwe](https://openwebui.com/u/haervwe)
 2. Browse the collection and click "Get" for desired tools
 3. Follow the installation prompts in your Open WebUI instance
 
 ### Option 2: Manual Installation
+
 1. Copy `.py` files from `tools/`, `functions/`, or `filters/` directories
 2. Navigate to Open WebUI Workspace > Tools/Functions/Filters
 3. Paste the code, provide a name and description, then save
@@ -93,24 +97,24 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 6. [Cloudflare Workers AI Image Generator](#cloudflare-workers-ai-image-generator)
 7. [SearxNG Image Search Tool](#searxng-image-search-tool)
 8. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
-7. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-8. [Planner Agent v2](#planner-agent-v2)
-9. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-10. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-11. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-12. [Mopidy Music Controller](#mopidy-music-controller)
-13. [Letta Agent Pipe](#letta-agent-pipe)
-14. [MCP Pipe](#mcp-pipe)
-15. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-16. [Semantic Router Filter](#semantic-router-filter)
-17. [Full Document Filter](#full-document-filter)
-18. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-19. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-20. [Installation](#installation)
-21. [Contributing](#contributing)
-22. [License](#license)
-23. [Credits](#credits)
-24. [Support](#support)
+9. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+10. [Planner Agent v2](#planner-agent-v2)
+11. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+12. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+13. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+14. [Mopidy Music Controller](#mopidy-music-controller)
+15. [Letta Agent Pipe](#letta-agent-pipe)
+16. [MCP Pipe](#mcp-pipe)
+17. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+18. [Semantic Router Filter](#semantic-router-filter)
+19. [Full Document Filter](#full-document-filter)
+20. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+21. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+22. [Installation](#installation)
+23. [Contributing](#contributing)
+24. [License](#license)
+25. [Credits](#credits)
+26. [Support](#support)
 
 ---
 
@@ -119,16 +123,21 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 ### arXiv Search Tool
 
 ### Description
+
 Search arXiv.org for relevant academic papers on any topic. No API key required!
 
 ### Configuration
+
 - No configuration required. Works out of the box.
 
 ### Usage
+
 - **Example:**
+
   ```python
   Search for recent papers about "tree of thought"
   ```
+
 - Returns up to 5 most relevant papers, sorted by most recent.
 
 ![arXiv Search Example](img/arxiv_search.png)
@@ -139,9 +148,11 @@ Search arXiv.org for relevant academic papers on any topic. No API key required!
 ### Perplexica Search Tool
 
 ### Description
+
 Search the web for factual information, current events, or specific topics using the Perplexica API. This tool provides comprehensive search results with citations and sources, making it ideal for research and information gathering. [Perplexica](https://github.com/ItzCrazyKns/Perplexica) is an open-source AI-powered search engine and alternative to Perplexity AI that must be self-hosted locally. It uses advanced language models to provide accurate, contextual answers with proper source attribution.
 
 ### Configuration
+
 - `BASE_URL` (str): Base URL for the Perplexica API (default: `http://host.docker.internal:3001`)
 - `OPTIMIZATION_MODE` (str): Search optimization mode - "speed" or "balanced" (default: `balanced`)
 - `CHAT_MODEL` (str): Default chat model for search processing (default: `llama3.1:latest`)
@@ -151,15 +162,21 @@ Search the web for factual information, current events, or specific topics using
 **Prerequisites**: You must have [Perplexica](https://github.com/ItzCrazyKns/Perplexica) installed and running locally at the configured URL. Perplexica is a self-hosted open-source search engine that requires Ollama with the specified chat and embedding models. Follow the installation instructions in the Perplexica repository to set up your local instance.
 
 ### Usage
+
 - **Example:**
+
   ```python
   Search for "latest developments in AI safety research 2024"
   ```
+
 - Returns comprehensive search results with proper citations
+
 - Automatically emits citations for source tracking in Open WebUI
+
 - Provides both summary and individual source links
 
 ### Features
+
 - **Web Search Integration**: Direct access to current web information
 - **Citation Support**: Automatic citation generation for Open WebUI
 - **Model Flexibility**: Configurable chat and embedding models
@@ -171,9 +188,11 @@ Search the web for factual information, current events, or specific topics using
 ### Pexels Media Search Tool
 
 ### Description
+
 Search and retrieve high-quality photos and videos from the Pexels API. This tool provides access to Pexels' extensive collection of free stock photos and videos, with comprehensive search capabilities, automatic citation generation, and direct image display in chat. Perfect for finding professional-quality media for presentations, content creation, or creative projects.
 
 ### Configuration
+
 - `PEXELS_API_KEY` (str): Free Pexels API key from https://www.pexels.com/api/ (required)
 - `DEFAULT_PER_PAGE` (int): Default number of results per search (default: 5, recommended for LLMs)
 - `MAX_RESULTS_PER_PAGE` (int): Maximum allowed results per page (default: 15, prevents overwhelming LLMs)
@@ -183,20 +202,27 @@ Search and retrieve high-quality photos and videos from the Pexels API. This too
 **Prerequisites**: Get a free API key from [Pexels API](https://www.pexels.com/api/) and configure it in the tool's Valves settings.
 
 ### Usage
+
 - **Photo Search Example:**
+
   ```python
   Search for photos of "modern office workspace"
   ```
+
 - **Video Search Example:**
+
   ```python
   Search for videos of "ocean waves at sunset"
   ```
+
 - **Curated Photos Example:**
+
   ```python
   Get curated photos from Pexels
   ```
 
 ### Features
+
 - **Three Search Functions**: `search_photos`, `search_videos`, and `get_curated_photos`
 - **Direct Image Display**: Images are automatically formatted with markdown for immediate display in chat
 - **Advanced Filtering**: Filter by orientation, size, color, and quality
@@ -210,24 +236,32 @@ Search and retrieve high-quality photos and videos from the Pexels API. This too
 ### Native Image Generator
 
 ### Description
+
 Generate images using Open WebUI's native image generation middleware configured in admin settings. This tool leverages whatever image generation backend you have configured (such as AUTOMATIC1111, ComfyUI, or OpenAI DALL-E) through Open WebUI's built-in image generation system, with optional Ollama model management to free up VRAM when needed.
 
 ### Configuration
+
 - `unload_ollama_models` (bool): Whether to unload all Ollama models from VRAM before generating images (default: `False`)
 - `ollama_url` (str): Ollama API URL for model management (default: `http://host.docker.internal:11434`)
 
 **Prerequisites**: You must have image generation configured in Open WebUI's admin settings under Settings > Images. This tool works with any image generation backend you have set up (AUTOMATIC1111, ComfyUI, OpenAI, etc.).
 
 ### Usage
+
 - **Example:**
+
   ```python
   Generate an image of "a serene mountain landscape at sunset"
   ```
+
 - Uses whatever image generation backend is configured in Open WebUI admin settings
+
 - Automatically manages model resources if Ollama unloading is enabled
+
 - Returns markdown-formatted image links for immediate display
 
 ### Features
+
 - **Native Integration**: Uses Open WebUI's native image generation middleware without external dependencies
 - **Backend Agnostic**: Works with any image generation backend configured in admin settings (AUTOMATIC1111, ComfyUI, OpenAI, etc.)
 - **Memory Management**: Optional Ollama model unloading to optimize VRAM usage
@@ -240,17 +274,22 @@ Generate images using Open WebUI's native image generation middleware configured
 ## Hugging Face Image Generator
 
 ### Description
+
 Generate high-quality images from text descriptions using Hugging Face's Stable Diffusion models.
 
 ### Configuration
+
 - **API Key** (Required): Obtain a Hugging Face API key from your HuggingFace account and set it in the tool's configuration in Open WebUI.
 - **API URL** (Optional): Uses Stability AI's SD 3.5 Turbo model as default. Can be customized to use other HF text-to-image model endpoints.
 
 ### Usage
+
 - **Example:**
+
   ```python
   Create an image of "beautiful horse running free"
   ```
+
 - Multiple image format options: Square, Landscape, Portrait, etc.
 
 ![Image Generation Example](img/generate_image_hf.png)
@@ -261,9 +300,11 @@ Generate high-quality images from text descriptions using Hugging Face's Stable 
 ### Cloudflare Workers AI Image Generator
 
 ### Description
+
 Generate images using Cloudflare Workers AI text-to-image models, including FLUX, Stable Diffusion XL, SDXL Lightning, and DreamShaper LCM. This tool provides model-specific prompt preprocessing, parameter optimization, and direct image display in chat. It supports fast and high-quality image generation with minimal configuration.
 
 ### Configuration
+
 - `cloudflare_api_token` (str): Your Cloudflare API Token (required)
 - `cloudflare_account_id` (str): Your Cloudflare Account ID (required)
 - `default_model` (str): Default model to use (e.g., `@cf/black-forest-labs/flux-1-schnell`)
@@ -271,14 +312,18 @@ Generate images using Cloudflare Workers AI text-to-image models, including FLUX
 **Prerequisites**: Obtain a Cloudflare API Token and Account ID from your Cloudflare dashboard. No additional dependencies beyond `requests`.
 
 ### Usage
+
 - **Example:**
+
   ```python
   # Generate an image with a prompt
   await tools.generate_image(prompt="A futuristic cityscape at sunset, vibrant colors")
   ```
+
 - Returns a markdown-formatted image link for immediate display in chat.
 
 ### Features
+
 - **Multiple Models:** Supports FLUX, SDXL, SDXL Lightning, DreamShaper LCM
 - **Prompt Optimization:** Automatic prompt enhancement for best results per model
 - **Parameter Handling:** Smart handling of steps, guidance, negative prompts, and size
@@ -291,23 +336,29 @@ Generate images using Cloudflare Workers AI text-to-image models, including FLUX
 ### SearxNG Image Search Tool
 
 ### Description
+
 Search and retrieve images from the web using a self-hosted [SearxNG](https://searxng.org/) instance. This tool provides privacy-respecting, multi-engine image search with direct image display in chat. Ideal for finding diverse images from multiple sources without tracking or ads.
 
 ### Configuration
+
 - `SEARXNG_ENGINE_API_BASE_URL` (str): The base URL for the SearxNG search engine API (default: `http://searxng:4000/search`)
 - `MAX_RESULTS` (int): Maximum number of images to return per search (default: 5)
 
 **Prerequisites**: You must have a running SearxNG instance. See [SearxNG documentation](https://docs.searxng.org/) for setup instructions.
 
 ### Usage
+
 - **Example:**
+
   ```python
   # Search for images of cats
   await tools.search_images(query="cats", max_results=3)
   ```
+
 - Returns a list of markdown-formatted image links for immediate display in chat.
 
 ### Features
+
 - **Privacy-Respecting:** No tracking, ads, or profiling
 - **Multi-Engine:** Aggregates results from multiple search engines
 - **Direct Image Display:** Images are formatted for chat display
@@ -319,9 +370,11 @@ Search and retrieve images from the web using a self-hosted [SearxNG](https://se
 ### ComfyUI ACE Step Audio Tool
 
 ### Description
+
 Generate music using the ACE Step AI model via ComfyUI. This tool lets you create songs from tags and lyrics, with full control over the workflow JSON and node numbers. Designed for advanced music generation and can be customized for different genres and moods.
 
 ### Configuration
+
 - `comfyui_api_url` (str): ComfyUI API endpoint (e.g., `http://localhost:8188`)
 - `model_name` (str): Model checkpoint to use (default: `ACE_STEP/ace_step_v1_3.5b.safetensors`)
 - `workflow_json` (str): Full ACE Step workflow JSON as a string. Use `{tags}`, `{lyrics}`, and `{model_name}` as placeholders.
@@ -330,6 +383,7 @@ Generate music using the ACE Step AI model via ComfyUI. This tool lets you creat
 - `model_node` (str): Node number for the model checkpoint input (default: `"40"`)
 
 ### Usage
+
 1. **Import the ACE Step workflow:**
    - In ComfyUI, go to the workflow import section and load `extras/ace_step_api.json`.
    - Adjust nodes as needed for your setup.
@@ -340,7 +394,9 @@ Generate music using the ACE Step AI model via ComfyUI. This tool lets you creat
 3. **Generate music:**
    - Provide tags and (optionally) lyrics.
    - The tool will return a link to the generated audio file.
+
 - **Example:**
+
   ```python
   Generate a song in the style of "funk, pop, soul" with the following lyrics: "In the shadows where secrets hide..."
   ```
@@ -354,43 +410,78 @@ Generate music using the ACE Step AI model via ComfyUI. This tool lets you creat
 ### Flux Kontext ComfyUI Pipe
 
 ### Description
-Connects Open WebUI to the Flux Kontext image-to-image editing model via ComfyUI. This pipe enables advanced image editing, style transfer, and creative transformations using the Flux Kontext workflow.
+
+A pipe that connects Open WebUI to the **Flux Kontext** image-to-image editing model through ComfyUI. This integration allows for advanced image editing, style transfers, and other creative transformations using the Flux Kontext workflow.
 
 ### Configuration
-- `ComfyUI_Address` (str): Address of the running ComfyUI server (default: `http://127.0.0.1:8188`)
-- `ComfyUI_Workflow_JSON` (str): The entire ComfyUI workflow in JSON format (default provided, or use `extras/flux_context_owui_api_v1.json`)
-- `Prompt_Node_ID` (str): Node ID for the text prompt (default: `"6"`)
-- `Image_Node_ID` (str): Node ID for the input image (default: `"196"`)
-- `Seed_Node_ID` (str): Node ID for the sampler (default: `"194"`)
-- `enhance_prompt` (bool): Use a vision model to enhance the prompt based on the input image (default: `False`).
-- `vision_model_id` (str): The model ID to use for vision-based prompt enhancement (required if `enhance_prompt` is enabled).
-- `enhancer_system_prompt` (str): System prompt used to guide the vision model when enhancing the prompt. This allows you to customize the instructions given to the vision-language model for prompt engineering. By default, it provides detailed instructions for visual prompt enhancement, but you can modify it to fit your workflow or style.
-- `unload_ollama_models` (bool): Unload all Ollama models from VRAM before running (default: `False`)
-- `ollama_url` (str): Ollama API URL for unloading models (default: `http://host.docker.internal:11434`)
-- `max_wait_time` (int): Max wait time for generation in seconds (default: `1200`)
+
+| Parameter               | Type  | Description                                                  | Default                                |
+| ----------------------- | ----- | ------------------------------------------------------------ | -------------------------------------- |
+| COMFYUI_ADDRESS         | str   | Address of the running ComfyUI server.                       | `http://127.0.0.1:8188`                |
+| COMFYUI_WORKFLOW_JSON   | str   | The entire ComfyUI workflow in JSON format.                  | Default workflow JSON                  |
+| PROMPT_NODE_ID          | str   | The ID of the node that accepts the text prompt.             | `"6"`                                  |
+| IMAGE_NODE_ID           | str   | The ID of the node that accepts the Base64 image.            | `"196"`                                |
+| KSAMPLER_NODE_ID        | str   | The ID of the sampler node to apply inline parameters.       | `"194"`                                |
+| ENHANCE_PROMPT          | bool  | Use a vision model to enhance prompts based on the input image. | `False`                                |
+| VISION_MODEL_ID         | str   | Vision model to use for prompt enhancement.                  | `""`                                   |
+| ENHANCER_SYSTEM_PROMPT  | str   | System prompt guiding the vision model when enhancing prompts. | Detailed instructions included in code |
+| UNLOAD_OLLAMA_MODELS    | bool  | Unload all Ollama models from VRAM before running.           | `False`                                |
+| OLLAMA_URL              | str   | Ollama API URL for unloading models.                         | `http://host.docker.internal:11434`    |
+| MAX_WAIT_TIME           | int   | Maximum wait time for generation (in seconds).               | `1200`                                 |
+| AUTO_CHECK_MODEL_LOADER | bool  | Automatically detects model loader type for your checkpoint (.safetensors or .gguf). | `False`                                |
+| REG_EX                  | bool  | Enable inline KSampler parameter extraction from prompt using RegEx. | `False`                                |
+| KSAMPLER_MIN_STEPS      | int   | Minimum number of steps for KSampler when inline parameters are used. | `5`                                    |
+| KSAMPLER_MAX_STEPS      | int   | Maximum number of steps for KSampler when inline parameters are used. | `60`                                   |
+| KSAMPLER_MIN_CFG        | float | Minimum CFG value for KSampler when inline parameters are used. | `0.0`                                  |
+| KSAMPLER_MAX_CFG        | float | Maximum CFG value for KSampler when inline parameters are used. | `15.0`                                 |
+| KSAMPLER_MIN_DENOISE    | float | Minimum denoise value for KSampler when inline parameters are used. | `0.0`                                  |
+| KSAMPLER_MAX_DENOISE    | float | Maximum denoise value for KSampler when inline parameters are used. | `1.0`                                  |
 
 ### Usage
-1. **Import the Flux Kontext workflow:**
-   - In ComfyUI, import `extras/flux_context_owui_api_v1.json` as a workflow.
-   - Adjust node IDs if you modify the workflow.
+
+1. **Import the workflow:**
+    In ComfyUI, import `extras/flux_context_owui_api_v1.json` as a workflow. Adjust node IDs if you modify the workflow.
+
 2. **Configure the pipe in Open WebUI:**
-   - Set the `ComfyUI_Address` to your ComfyUI backend.
-   - Paste the workflow JSON into `ComfyUI_Workflow_JSON`.
-   - Set the correct node IDs for prompt, image, and sampler.
 
-3. **Edit images:**
-   - Provide a prompt and an input image.
-   - *(Optional)* Enable `enhance_prompt` and specify a `vision_model_id` to automatically improve your prompt using a vision-language model and the input image. The enhanced prompt will be used for image editing and shown in the chat.
-   - The pipe will return the edited image.
+   - Set `COMFYUI_ADDRESS` to your ComfyUI backend.
+   - Paste the workflow JSON into `COMFYUI_WORKFLOW_JSON`.
+   - Set the correct node IDs for prompt (`PROMPT_NODE_ID`), image (`IMAGE_NODE_ID`), and sampler (`KSAMPLER_NODE_ID`).
+   - Optional: Enable `ENHANCE_PROMPT` and specify a `VISION_MODEL_ID` to automatically refine prompts using a vision-language model.
 
-- **Example:**
-  ```python
-  Edit this image to look like a medieval fantasy king, preserving facial features.
-  # (If enhance_prompt is enabled, the vision model will refine this prompt based on the image)
-  ```
+3. **Using inline KSampler parameters:**
+    You can define sampler settings directly in your prompt using the following syntax:
 
-![Flux Kontext Example](img/flux_kontext.png)
-*Example of Flux Kontext ComfyUI Pipe output*
+   ```
+   {seed=1234, steps=20, cfg=1.7, sampler_name=euler, scheduler=simple, denoise=0.8}
+   ```
+
+   This allows dynamic adjustment of seed, steps, CFG, sampler type, scheduler, and denoise without changing the workflow configuration. Make sure `REG_EX` is enabled to extract these parameters.
+
+4. **Editing images:**
+
+   - Provide a text prompt and an input image.
+   - The pipe will automatically validate KSampler steps, CFG, and denoise values to prevent invalid or overloaded settings.
+   - If `ENHANCE_PROMPT` is enabled, the vision model analyzes the input image and refines the prompt for better results.
+   - RAM can be managed by enabling `UNLOAD_OLLAMA_MODELS` to free memory before generation.
+   - VRAM can be managed with the `Clean VRAM` node in ComfyUI. The default workflow includes it by default.
+
+
+**Example 1 - Basic edit:**
+
+```
+Prompt: "Edit this image to look like a medieval fantasy king, preserving facial features."
+```
+![Flux Kontext Example](img/flux_kontext_without_parameters.png)
+
+**Example 2 - Using inline KSampler parameters:**
+
+```
+Prompt: "Colorize this black-and-white photo of Albert Einstein, keeping his facial features realistic and natural. Add a stylish pair of glasses on his face, ensuring they fit proportionally and complement his expression. Preserve the original lighting, texture, and details of the image. {seed=3141879, steps=30}"
+```
+
+![Flux Kontext Example](img/flux_kontext_with_parameters.png)
+
 
 ---
 
@@ -415,12 +506,14 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 ### ⚙️ Configuration
 
 **Core Models:**
+
 - `MODEL`: Main planning LLM
 - `ACTION_MODEL`: Tool-based actions and general tasks  
 - `WRITER_MODEL`: Creative writing and documentation
 - `CODER_MODEL`: Code generation and development
 
 **Temperature Controls:**
+
 - `PLANNING_TEMPERATURE` (0.8): Planning creativity
 - `ACTION_TEMPERATURE` (0.7): Tool execution precision
 - `WRITER_TEMPERATURE` (0.9): Creative writing freedom
@@ -428,6 +521,7 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 - `ANALYSIS_TEMPERATURE` (0.4): Output analysis precision
 
 **Execution Settings:**
+
 - `MAX_RETRIES` (3): Retry attempts per action
 - `CONCURRENT_ACTIONS` (1): Parallel processing limit
 - `ACTION_TIMEOUT` (300): Individual action timeout
@@ -438,6 +532,7 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 
 
 **Multi-Media Content:**
+
 ```
 search the latest AI news and create a song based on that, with that , search for stock images to use a “album cover” and create a mockup of the spotify in a plain html file with vanilla js layout using those assets embeded for interactivity
 ```
@@ -447,6 +542,7 @@ search the latest AI news and create a song based on that, with that , search fo
 
 
 **Creative Writing:**
+
 ```
 create an epic sci fi Adult novel based on the current trends on academia news and social media about AI and other trending topics, with at least 10 chapters, well crafter world with rich characters , save each chapter in a folter named as the novel in obsidian with an illustration
 ```
@@ -475,6 +571,7 @@ or decide whether to continue with the current output.
 
 
 **Technical Development:**
+
 ```
 Create a fully-featured Conway's Game of Life SPA with responsive UI, game controls, and pattern presets using vanilla HTML/CSS/JS
 ```
@@ -487,9 +584,11 @@ Create a fully-featured Conway's Game of Life SPA with responsive UI, game contr
 ### arXiv Research MCTS Pipe
 
 ### Description
+
 Search arXiv.org for relevant academic papers and iteratively refine a research summary using a Monte Carlo Tree Search (MCTS) approach.
 
 ### Configuration
+
 - `model`: The model ID from your LLM provider
 - `tavily_api_key`: Required. Obtain your API key from tavily.com
 - `max_web_search_results`: Number of web search results to fetch per query
@@ -503,7 +602,9 @@ Search arXiv.org for relevant academic papers and iteratively refine a research 
 - `minimum_temperature`: Final LLM temperature at max tree depth (default 0.5)
 
 ### Usage
+
 - **Example:**
+
   ```python
   Do a research summary on "DPO laser LLM training"
   ```
@@ -516,9 +617,11 @@ Search arXiv.org for relevant academic papers and iteratively refine a research 
 ### Multi Model Conversations Pipe
 
 ### Description
+
 Simulate conversations between multiple language models, each acting as a distinct character. Configure up to 5 participants.
 
 ### Configuration
+
 - `number_of_participants`: Set the number of participants (1-5)
 - `rounds_per_user_message`: How many rounds of replies before the user can send another message
 - `participant_[1-5]_model`: Model for each participant
@@ -528,7 +631,9 @@ Simulate conversations between multiple language models, each acting as a distin
 - `temperature`, `top_k`, `top_p`: Standard model parameters
 
 ### Usage
+
 - **Example:**
+
   ```python
   Start a conversation between three AI agents about climate change.
   ```
@@ -541,9 +646,11 @@ Simulate conversations between multiple language models, each acting as a distin
 ### Resume Analyzer Pipe
 
 ### Description
+
 Analyze resumes and provide tags, first impressions, adversarial analysis, potential interview questions, and career advice.
 
 ### Configuration
+
 - `model`: The model ID from your LLM provider
 - `dataset_path`: Local path to the resume dataset CSV file
 - `rapidapi_key` (optional): For job search functionality
@@ -551,11 +658,13 @@ Analyze resumes and provide tags, first impressions, adversarial analysis, poten
 - `prompt_templates`: Customizable templates for all steps
 
 ### Usage
+
 1. **Requires the Full Document Filter** (see below) to work with attached files.
 2. **Example:**
+
   ```python
-  Analyze this resume:
-  [Attach resume file]
+Analyze this resume:
+[Attach resume file]
   ```
 
 ![Resume Analyzer Example 1](img/resume_1.png)
@@ -568,9 +677,11 @@ Analyze resumes and provide tags, first impressions, adversarial analysis, poten
 ### Mopidy Music Controller
 
 ### Description
+
 Control your Mopidy music server to play songs from the local library or YouTube, manage playlists, and handle various music commands.
 
 ### Configuration
+
 - `model`: The model ID from your LLM provider
 - `mopidy_url`: URL for the Mopidy JSON-RPC API endpoint (default: `http://localhost:6680/mopidy/rpc`)
 - `youtube_api_key`: YouTube Data API key for search
@@ -580,10 +691,13 @@ Control your Mopidy music server to play songs from the local library or YouTube
 - `system_prompt`: System prompt for request analysis
 
 ### Usage
+
 - **Example:**
+
   ```python
   Play the song "Imagine" by John Lennon
   ```
+
 - Quick text commands: stop, halt, play, start, resume, continue, next, skip, pause
 
 ![Mopidy Example](img/Mopidy.png)
@@ -594,9 +708,11 @@ Control your Mopidy music server to play songs from the local library or YouTube
 ### Letta Agent Pipe
 
 ### Description
+
 Connect with Letta agents, enabling seamless integration of autonomous agents into Open WebUI conversations. Supports task-specific processing and maintains conversation context while communicating with the agent API.
 
 ### Configuration
+
 - `agent_id`: The ID of the Letta agent to communicate with
 - `api_url`: Base URL for the Letta agent API (default: `http://localhost:8283`)
 - `api_token`: Bearer token for API authentication
@@ -605,7 +721,9 @@ Connect with Letta agents, enabling seamless integration of autonomous agents in
 - `timeout`: Timeout to wait for Letta agent response in seconds (default: 400)
 
 ### Usage
+
 - **Example:**
+
   ```python
   Chat with the built in Long Term memory Letta MemGPT agent.
   ```
@@ -618,9 +736,11 @@ Connect with Letta agents, enabling seamless integration of autonomous agents in
 ### MCP Pipe
 
 ### Description
+
 The MCP Pipe integrates the Model Context Protocol (MCP) into Open WebUI, enabling seamless connections between AI assistants and various data sources, tools, and development environments. **Note: This implementation only works with Python-based MCP servers. NPX or other server types are not supported by default.**
 
 MCP is a universal, open standard that replaces fragmented integrations with a single protocol for connecting AI systems with data sources. This allows you to:
+
 - Connect to multiple MCP servers simultaneously (Python servers only)
 - Access tools and prompts from connected servers
 - Process queries using context-aware tools
@@ -630,18 +750,25 @@ MCP is a universal, open standard that replaces fragmented integrations with a s
 - Maintain conversation context across different data sources
 
 ### Prerequisites
+
 - **Open WebUI**: Make sure you are running a compatible version (0.5.0+ recommended)
 - **Python MCP servers**: You must have one or more MCP-compatible servers installed and accessible (see [open-webui/openapi-servers](https://github.com/open-webui/openapi-servers) for examples)
 - **MCP configuration file**: A `config.json` file must be placed in the `/data/` folder inside your Open WebUI installation
 - **Python environment**: Any additional MCP servers you add must be installed in the Open WebUI Python environment
 
 ### Step-by-Step Setup
+
 1. **Install or set up your MCP servers**
+
    - Example: [mcp_server_time](https://github.com/open-webui/openapi-servers) for time and timezone conversion, [mcp_server_tavily](https://github.com/open-webui/openapi-servers) for web search
    - Install via pip or clone and install as needed
+
 2. **Create the MCP configuration file**
+
    - Place a `config.json` file in the `/data/` directory of your Open WebUI installation
+
    - Example `config.json`:
+
      ```json
      {
          "mcpServers": {
@@ -658,17 +785,26 @@ MCP is a universal, open standard that replaces fragmented integrations with a s
          }
      }
      ```
+
    - Replace `tvly-xxx` with your actual Tavily API key
+
    - Add additional servers as needed, following the same structure
+
 3. **Install any required MCP servers**
+
    - For each server listed in your config, ensure it is installed in the Open WebUI Python environment
    - Example: `pip install mcp_server_time` or clone and install from source
+
 4. **Restart Open WebUI**
+
    - This ensures the new configuration and servers are loaded
+
 5. **Configure the MCP Pipe in Open WebUI**
+
    - Set the valves as needed (see below)
 
 ### Configuration Valves
+
 - `MODEL`: (default: "Qwen2_5_16k:latest") The LLM model to use for MCP queries
 - `OPENAI_API_KEY`: Your OpenAI API key for API access (if using OpenAI-compatible models)
 - `OPENAI_API_BASE`: (default: "http://0.0.0.0:11434/v1") Base URL for API requests
@@ -679,6 +815,7 @@ MCP is a universal, open standard that replaces fragmented integrations with a s
 - `FREQUENCY_PENALTY`: (default: 0.8) Penalty for repeating tokens
 
 ### Example Usage
+
 ```python
 # Example usage in your prompt
 Use the time_server to get the current time in New York.
@@ -688,6 +825,7 @@ Use the time_server to get the current time in New York.
 - The MCP Pipe will automatically discover available tools and prompts from all configured servers.
 
 ### Troubleshooting & Tips
+
 - **Python servers only**: This pipe does not support NPX or non-Python MCP servers. For NPX support, see the advanced MCP Pipeline below.
 - **Server not found**: Make sure the MCP server is installed and accessible in the Python environment used by Open WebUI
 - **Config file not loaded**: Double-check the location (`/data/config.json`) and syntax of your config file
@@ -696,6 +834,7 @@ Use the time_server to get the current time in New York.
 - **Logs**: Check Open WebUI logs for errors related to MCP server startup or communication
 
 ### Reference: Advanced MCP Pipeline
+
 If you need more advanced features, such as NPX server support, see the documentation in `Pipelines/MCP_Pipeline/README_MCP_Pipeline.md` in this repository.
 
 ---
@@ -705,15 +844,18 @@ If you need more advanced features, such as NPX server support, see the document
 ### Prompt Enhancer Filter
 
 ### Description
+
 Uses an LLM to automatically improve the quality of your prompts before they are sent to the main language model.
 
 ### Configuration
+
 - `user_customizable_template`: Tailor the instructions given to the prompt-enhancing LLM
 - `show_status`: Displays status updates during the enhancement process
 - `show_enhanced_prompt`: Outputs the enhanced prompt to the chat window
 - `model_id`: Select the specific model to use for prompt enhancement
 
 ### Usage
+
 - Enable in your model configuration's filters section.
 - The filter will automatically process each user message before it's sent to the main LLM.
 
@@ -725,12 +867,15 @@ Uses an LLM to automatically improve the quality of your prompts before they are
 ### Semantic Router Filter
 
 ### Description
+
 Acts as a model router. Analyzes the user's message and available models, then automatically selects the most appropriate model, pipe, or preset for the task.
 
 ### Configuration
+
 - Configure banned models, vision model routing, and whether to show the selection reasoning in chat.
 
 ### Usage
+
 - Enable in your model configuration's filters section.
 
 ![Mopidy Example](img/semantic_router.png)
@@ -741,20 +886,28 @@ Acts as a model router. Analyzes the user's message and available models, then a
 ### Full Document Filter
 
 ### Description
+
 Allows Open WebUI to process entire attached files (such as resumes or documents) as part of the conversation. Cleans and prepends the file content to the first user message, ensuring the LLM receives the full context.
 
 ### Configuration
+
 - `priority` (int): Priority level for the filter operations (default: `0`)
 - `max_turns` (int): Maximum allowable conversation turns for a user (default: `8`)
 
 #### User Valves
+
 - `max_turns` (int): Maximum allowable conversation turns for a user (default: `4`)
 
 ### Usage
+
 - Enable the filter in your model configuration.
+
 - When you attach a file in Open WebUI, the filter will automatically clean and inject the file content into your message.
+
 - No manual configuration is needed for most users.
+
 - **Example:**
+
   ```python
   Analyze this resume:
   [Attach resume file]
@@ -766,12 +919,15 @@ Allows Open WebUI to process entire attached files (such as resumes or documents
 ## Clean Thinking Tags Filter
 
 ### Description
+
 Checks if an assistant's message ends with an unclosed or incomplete "thinking" tag. If so, it extracts the unfinished thought and presents it as a user-visible message.
 
 ### Configuration
+
 - No configuration required.
 
 ### Usage
+
 - Works automatically when enabled.
 
 ---
@@ -780,6 +936,7 @@ Checks if an assistant's message ends with an unclosed or incomplete "thinking" 
 ## 🎨 Using the Provided ComfyUI Workflows
 
 ### Importing a Workflow
+
 1. Open ComfyUI.
 2. Click the "Load Workflow" or "Import" button.
 3. Select the provided JSON file (e.g., `ace_step_api.json` or `flux_context_owui_api_v1.json`).
@@ -787,11 +944,13 @@ Checks if an assistant's message ends with an unclosed or incomplete "thinking" 
 5. Use the node numbers in your Open WebUI tool configuration.
 
 ### Best Practices
+
 - Always check node numbers after importing, as they may change if you modify the workflow.
 - You can create and share your own workflows by exporting them from ComfyUI.
 
 
 ### Why this matters
+
 This approach allows you to leverage state-of-the-art image and music generation/editing models with full control and customization, directly from Open WebUI.
 
 ---
@@ -799,11 +958,13 @@ This approach allows you to leverage state-of-the-art image and music generation
 ## 📦 Installation
 
 ### From Open WebUI Hub (Recommended)
+
 - Visit [https://openwebui.com/u/haervwe](https://openwebui.com/u/haervwe)
 - Click "Get" for desired tool/pipe/filter.
 - Follow prompts in your Open WebUI instance.
 
 ### Manual Installation
+
 - Copy `.py` files from `tools/`, `functions/`, or `filters/` into Open WebUI via the Workspace > Tools/Functions/Filters section.
 - Provide a name and description, then save.
 
@@ -812,6 +973,7 @@ This approach allows you to leverage state-of-the-art image and music generation
 ## 🤝 Contributing
 
 Feel free to contribute to this project by:
+
 1. Forking the repository
 2. Creating your feature branch
 3. Committing your changes
@@ -838,6 +1000,7 @@ MIT License
 ## 🎯 Usage Examples
 
 ### Academic Research
+
 ```python
 # Search for recent papers on a topic
 Search for recent papers about "large language model training"
@@ -847,6 +1010,7 @@ Do a research summary on "DPO laser LLM training"
 ```
 
 ### Creative Projects
+
 ```python
 # Generate images
 Create an image of "beautiful horse running free"
@@ -859,6 +1023,7 @@ Edit this image to look like a medieval fantasy king, preserving facial features
 ```
 
 ### Productivity
+
 ```python
 # Analyze documents
 Analyze this resume: [Attach resume file]
@@ -868,6 +1033,7 @@ Create a fully-featured Single Page Application (SPA) for Conway's Game of Life
 ```
 
 ### Multi-Agent Conversations
+
 ```python
 # Start group discussions
 Start a conversation between three AI agents about climate change
