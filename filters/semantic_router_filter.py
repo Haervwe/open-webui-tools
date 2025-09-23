@@ -20,7 +20,7 @@ from open_webui.utils.chat import (
     generate_chat_completion,
 )
 from open_webui.utils.misc import get_last_user_message
-from open_webui.models.users import User ,Users
+from open_webui.models.users import User, Users
 from open_webui.routers.models import get_models, get_base_models
 from open_webui.models.files import Files
 
@@ -66,6 +66,9 @@ class Filter:
         banned_models: List[str] = Field(
             default_factory=list, description="Models to exclude"
         )
+        allowed_models: List[str] = Field(
+            default_factory=list, description="Models to include"
+        )
         system_prompt: str = Field(
             default=(
                 "You are a model router assistant. Analyze the user's message and select the most appropriate model.\n"
@@ -101,6 +104,10 @@ class Filter:
             model_dict = model.model_dump() if hasattr(model, "model_dump") else model
             model_id = model_dict.get("id")
             meta = model_dict.get("meta", {})
+            # if included models are defined, only allow those
+            if self.valves.allowed_models and model_id not in self.valves.allowed_models:
+                continue
+            
             if (
                 model_id
                 and model_id not in self.valves.banned_models
@@ -122,13 +129,14 @@ class Filter:
             if self.valves.disable_qwen_thinking
             else self.valves.system_prompt
         )
-        models_data = available_models.copy() + [
-            {
-                "id": body["model"],
-                "name": "Base Model",
-                "description": "General-purpose language model suitable for various tasks",
-            }
-        ]
+        models_data = available_models
+        # models_data = available_models.copy() + [
+        #     {
+        #         "id": body["model"],
+        #         "name": "Base Model",
+        #         "description": "General-purpose language model suitable for various tasks",
+        #     }
+        # ]
         _temp_body = body.copy()
         if body["messages"][0]["role"] == "system":
             messages = (
@@ -173,15 +181,72 @@ class Filter:
                 "preset": True,
                 "user_id": self.__user__.id if self.__user__ else None,
             },
-            "files": [],
-            "tool_ids": [],
         }
         response = await generate_chat_completion(
             self.__request__, payload, user=self.__user__, bypass_filter=True
         )
-        result = clean_thinking_tags(response["choices"][0]["message"]["content"])
-        print(result)
-        return json.loads(result)
+        
+        # Handle JSONResponse object by extracting the body content
+        if hasattr(response, 'body'):
+            response_data = json.loads(response.body.decode('utf-8'))
+        elif hasattr(response, 'json'):
+            response_data = await response.json() if callable(response.json) else response.json
+        else:
+            # Assume it's already a dict
+            response_data = response
+        
+        # Check for API errors first
+        if isinstance(response_data, dict) and "error" in response_data:
+            error_msg = response_data["error"].get("message", "Unknown API error")
+            logger.error(f"API error in model recommendation: {error_msg}")
+            raise Exception(f"API error: {error_msg}")
+        
+        # Handle different response structures
+        content = None
+        if isinstance(response_data, dict):
+            if "choices" in response_data:
+                # Standard OpenAI format
+                content = response_data["choices"][0]["message"]["content"]
+            elif "message" in response_data:
+                # Direct message format
+                content = response_data["message"]["content"]
+            elif "content" in response_data:
+                # Direct content format
+                content = response_data["content"]
+            elif "response" in response_data:
+                # Response wrapper format
+                content = response_data["response"]
+            else:
+                # If no recognized structure, convert to string
+                content = str(response_data)
+        else:
+            # If it's not a dict, convert to string
+            content = str(response_data)
+            
+        if not content:
+            raise Exception("No content found in API response")
+            
+        result = clean_thinking_tags(content)
+        
+        # Try to parse JSON, with fallback handling
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON response: {result}")
+            # Fallback: try to extract JSON from the text
+            import re
+            json_match = re.search(r'\{.*\}', result, re.DOTALL)
+            if json_match:
+                try:
+                    return json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    pass
+            # Final fallback: return a default response
+            logger.warning("Using fallback model selection")
+            return {
+                "selected_model_id": body["model"],
+                "reasoning": "Fallback to original model due to parsing error"
+            }
 
     def _process_files_for_model(self, files_data):
         collections = {}
@@ -399,7 +464,7 @@ class Filter:
     ) -> dict:
         self.__request__ = __request__
         self.__model__ = __model__
-        self.__user__ =  Users.get_user_by_id(__user__["id"]) if __user__ else None
+        self.__user__ = Users.get_user_by_id(__user__["id"]) if __user__ else None
 
         original_config = {
             "stream": body.get("stream", False),
