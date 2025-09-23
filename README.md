@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/haervwe-open-webui-tools-badge.png)](https://mseep.ai/app/haervwe-open-webui-tools)
+
 # Open WebUI Tools Collection
 
 [![Open WebUI](https://img.shields.io/badge/Open%20WebUI-Compatible-blue?style=flat-square&logo=github)](https://github.com/open-webui/open-webui)
