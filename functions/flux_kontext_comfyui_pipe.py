@@ -93,7 +93,7 @@ DEFAULT_WORKFLOW_JSON = json.dumps(
         },
         "194": {
             "inputs": {
-                "seed": 241782050172708,
+                "seed": random.randint(0, 2**32 - 1),
                 "steps": 20,
                 "cfg": 1,
                 "sampler_name": "euler",
