@@ -9,7 +9,7 @@ version: 0.2.2
 
 import json
 import random
-from typing import Optional, Dict, Any, Callable, Awaitable
+from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union
 import aiohttp
 import asyncio
 import uuid
@@ -26,7 +26,7 @@ async def wait_for_completion_ws(
     client_id: str,
     max_wait_time: int,
     event_emitter: Optional[Callable[[Any], Awaitable[None]]] = None,
-) -> Dict:
+) -> Dict[str, Any]:
     """
     Waits for ComfyUI job completion using WebSocket for real-time updates.
     Returns the job output data upon successful execution.
@@ -36,18 +36,9 @@ async def wait_for_completion_ws(
 
     try:
         async with aiohttp.ClientSession().ws_connect(
-            f"{comfyui_ws_url}?clientId={client_id}", timeout=max_wait_time
+            f"{comfyui_ws_url}?clientId={client_id}"
         ) as ws:
-            if event_emitter:
-                await event_emitter(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "👂 Listening for ComfyUI via WebSocket...",
-                            "done": False,
-                        },
-                    }
-                )
+            # Suppress noisy status emissions: UI now logs each message; keep silent during progress
 
             async for msg in ws:
                 if asyncio.get_event_loop().time() - start_time > max_wait_time:
@@ -64,82 +55,36 @@ async def wait_for_completion_ws(
                         data = message.get("data", {})
 
                         if msg_type == "status":
-                            q_status = data.get("status", {}).get("exec_info", {})
-                            q_remaining = q_status.get("queue_remaining", "N/A")
-                            if event_emitter:
-                                await event_emitter(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"ℹ️ ComfyUI Queue: {q_remaining} remaining.",
-                                            "done": False,
-                                        },
-                                    }
-                                )
+                            # Ignore queue status updates to reduce UI clutter
+                            pass
 
                         elif (
                             msg_type == "execution_start"
                             and data.get("prompt_id") == prompt_id
                         ):
-                            if event_emitter:
-                                await event_emitter(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": "🚀 ComfyUI job started execution.",
-                                            "done": False,
-                                        },
-                                    }
-                                )
+                            # Suppress execution start notification
+                            pass
 
                         elif (
                             msg_type == "executing"
                             and data.get("prompt_id") == prompt_id
                         ):
-                            node_id = data.get("node")
-                            if event_emitter and node_id:
-                                await event_emitter(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"🔄 Executing node {node_id}...",
-                                            "done": False,
-                                        },
-                                    }
-                                )
+                            # Suppress per-node executing updates
+                            pass
 
                         elif (
                             msg_type == "progress"
                             and data.get("prompt_id") == prompt_id
                         ):
-                            node_id = data.get("node")
-                            progress = data.get("value", 0)
-                            maximum = data.get("max", 0)
-                            if event_emitter and maximum > 0:
-                                await event_emitter(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"⏳ Progress for node {node_id}: {progress}/{maximum}",
-                                            "done": False,
-                                        },
-                                    }
-                                )
+                            # Suppress progress updates
+                            pass
 
                         elif (
                             msg_type == "execution_cached"
                             and data.get("prompt_id") == prompt_id
                         ):
-                            if event_emitter:
-                                await event_emitter(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": "✅ Job used cached results.",
-                                            "done": False,
-                                        },
-                                    }
-                                )
+                            # Suppress cached notice
+                            pass
 
                             async with aiohttp.ClientSession() as http_session:
                                 async with http_session.get(
@@ -157,16 +102,7 @@ async def wait_for_completion_ws(
                             msg_type == "executed"
                             and data.get("prompt_id") == prompt_id
                         ):
-                            if event_emitter:
-                                await event_emitter(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": "🎉 Job executed successfully.",
-                                            "done": False,
-                                        },
-                                    }
-                                )
+                            # Defer success messaging to caller
                             job_data_output = data.get("output", {})
                             async with aiohttp.ClientSession() as http_session:
                                 async with http_session.get(
@@ -178,7 +114,7 @@ async def wait_for_completion_ws(
                                             return history[prompt_id]
 
                             if job_data_output:
-                                return {"outputs": job_data_output}
+                                    return {"outputs": job_data_output}  # type: ignore[return-value]
                             raise Exception(
                                 "Job executed, but failed to retrieve output from WebSocket or history."
                             )
@@ -193,42 +129,17 @@ async def wait_for_completion_ws(
                             node_id = data.get("node_id", "N/A")
                             node_type = data.get("node_type", "N/A")
                             error_str = f"ComfyUI job failed on node {node_id} ({node_type}). Error: {error_details}"
-                            if event_emitter:
-                                await event_emitter(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"❌ {error_str}",
-                                            "done": True,
-                                        },
-                                    }
-                                )
+                            # Defer failure messaging to caller
                             raise Exception(error_str)
 
                     except json.JSONDecodeError:
-                        if event_emitter:
-                            await event_emitter(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": "⚠️ Received non-JSON WebSocket message.",
-                                        "done": False,
-                                    },
-                                }
-                            )
+                        # Silence non-JSON WS messages
+                        pass
                     except Exception as e:
                         if "ComfyUI job" in str(e) or isinstance(e, TimeoutError):
                             raise
-                        if event_emitter:
-                            await event_emitter(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": f"⚠️ Error processing WebSocket message: {e}",
-                                        "done": False,
-                                    },
-                                }
-                            )
+                        # Suppress intermediate WS processing errors
+                        pass
 
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     raise Exception(f"WebSocket connection error: {ws.exception()}")
@@ -252,12 +163,13 @@ async def wait_for_completion_ws(
         raise Exception(f"Error during WebSocket communication: {e}")
 
 
-def extract_audio_files(job_data: Dict) -> list:
+def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
     """Extract audio file paths from completed job data."""
-    audio_files = []
-    node_outputs_dict = job_data.get("outputs", {})
+    audio_files: list[Dict[str, str]] = []
+    node_outputs_dict = cast(Dict[str, Any], job_data.get("outputs", {}))
     for _node_id, node_output_content in node_outputs_dict.items():
         if isinstance(node_output_content, dict):
+            node_output_dict: Dict[str, Any] = cast(Dict[str, Any], node_output_content)
             for key_holding_files in [
                 "audio",
                 "files",
@@ -265,21 +177,27 @@ def extract_audio_files(job_data: Dict) -> list:
                 "output",
                 "outputs",
             ]:
-                if key_holding_files in node_output_content:
-                    potential_files = node_output_content[key_holding_files]
-                    if isinstance(potential_files, list):
-                        for file_info_item in potential_files:
+                if key_holding_files in node_output_dict:
+                    potential_files_raw: Any = node_output_dict.get(key_holding_files)
+                    if isinstance(potential_files_raw, list):
+                        potential_files_list: list[Union[Dict[str, Any], str]] = cast(
+                            list[Union[Dict[str, Any], str]], potential_files_raw
+                        )
+                        for file_info_item in potential_files_list:
                             filename = None
                             subfolder = ""
                             if isinstance(file_info_item, dict):
-                                filename = file_info_item.get("filename")
-                                subfolder = file_info_item.get("subfolder", "")
-                            elif isinstance(file_info_item, str):
-                                filename = file_info_item
+                                file_info_dict: Dict[str, Any] = file_info_item
+                                fn_val: Any = file_info_dict.get("filename")
+                                filename = fn_val if isinstance(fn_val, str) else None
+                                subfolder_val: Any = file_info_dict.get("subfolder", "")
+                                subfolder = str(subfolder_val) if subfolder_val is not None else ""
+                            else:
+                                # Treat any non-dict entry as a filename string
+                                filename = str(file_info_item)
 
                             if (
-                                filename
-                                and isinstance(filename, str)
+                                filename is not None
                                 and filename.lower().endswith(
                                     (".wav", ".mp3", ".flac", ".ogg")
                                 )
@@ -339,27 +257,28 @@ async def download_audio_to_cache(
         return None
 
 
-def get_loaded_models(api_url: str = "http://localhost:11434") -> list:
+def get_loaded_models(api_url: str = "http://localhost:11434") -> list[Dict[str, Any]]:
     """Get all currently loaded models in VRAM"""
     try:
         response = requests.get(f"{api_url.rstrip('/')}/api/ps")
         response.raise_for_status()
-        return response.json().get("models", [])
+        models = response.json().get("models", [])
+        return cast(list[Dict[str, Any]], models)
     except requests.RequestException as e:
         print(f"Error fetching loaded models: {e}")
         raise
 
 
-def unload_all_models(api_url: str = "http://localhost:11434") -> Dict[str, bool]:
+def unload_all_models(api_url: str = "http://localhost:11434") -> dict[str, bool]:
     """Unload all currently loaded models from VRAM"""
     try:
         loaded_models = get_loaded_models(api_url)
-        results = {}
+        results: Dict[str, bool] = {}
 
         for model in loaded_models:
             model_name = model.get("name", model.get("model", ""))
             if model_name:
-                payload = {"model": model_name, "keep_alive": 0}
+                payload: Dict[str, Any] = {"model": model_name, "keep_alive": 0}
                 response = requests.post(
                     f"{api_url.rstrip('/')}/api/generate", json=payload
                 )
@@ -418,7 +337,7 @@ class Tools:
         self,
         tags: str,
         lyrics: Optional[str] = None,
-        __user__: dict = {},
+        __user__: Dict[str, Any] = {},
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> str:
         """
@@ -490,16 +409,7 @@ class Tools:
         """
 
         if self.valves.unload_ollama_models:
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "Unloading Ollama models...",
-                            "done": False,
-                        },
-                    }
-                )
+            # Avoid emitting unload progress; silently perform action
             unload_all_models(api_url=self.valves.ollama_url)
 
         if not self.valves.workflow_json:
@@ -515,7 +425,9 @@ class Tools:
             workflow_template = json.loads(self.valves.workflow_json)
             active_workflow = json.loads(json.dumps(workflow_template))
 
-            def safe_set_input(wf_dict, node_id, input_name, value_to_set):
+            def safe_set_input(
+                wf_dict: Dict[str, Any], node_id: str, input_name: str, value_to_set: Any
+            ) -> bool:
                 if node_id in wf_dict and "inputs" in wf_dict[node_id]:
                     wf_dict[node_id]["inputs"][input_name] = value_to_set
                     return True
@@ -541,14 +453,14 @@ class Tools:
                 1, 2**32 - 1
             )
             client_id = str(uuid.uuid4())
-            payload = {"prompt": active_workflow, "client_id": client_id}
+            payload: Dict[str, Any] = {"prompt": active_workflow, "client_id": client_id}
 
             if __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": "🎵 Submitting song generation...",
+                            "description": "🎵 Generating song...",
                             "done": False,
                         },
                     }
@@ -556,7 +468,7 @@ class Tools:
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{http_api_url}/prompt", json=payload, timeout=30
+                    f"{http_api_url}/prompt", json=payload, timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     if resp.status != 200:
                         return f"ComfyUI API error on submission ({resp.status}): {await resp.text()}"
@@ -565,25 +477,17 @@ class Tools:
                     if not prompt_id:
                         return f"Error: No prompt_id from ComfyUI. Response: {json.dumps(result)}"
 
+            # Suppress granular WS updates; only emit consolidated messages from here
             job_data = await wait_for_completion_ws(
                 ws_api_url,
                 http_api_url,
                 prompt_id,
                 client_id,
                 self.valves.max_wait_time,
-                __event_emitter__,
+                None,
             )
 
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "✅ Job complete. Processing results...",
-                            "done": False,
-                        },
-                    }
-                )
+            # No intermediate processing message
 
             audio_files = extract_audio_files(job_data)
 
@@ -602,7 +506,7 @@ class Tools:
                                 {
                                     "type": "status",
                                     "data": {
-                                        "description": "🎉 Song generated and saved locally!",
+                                        "description": "🎉 Song generated successfully!",
                                         "done": True,
                                     },
                                 }
@@ -619,7 +523,7 @@ class Tools:
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": "🎉 Song generated and saved on Comfyui!",
+                                    "description": "🎉 Song generated successfully!",
                                     "done": True,
                                 },
                             }
@@ -628,16 +532,68 @@ class Tools:
                     return f"Song generated successfully! The audio is embedded above and can be downloaded from: {comfyui_url} please show it to the user, this output is only shown to you, please provide the markdown url to the user &type=output and ALL parts of the URI are necessary do not modify or truncate it"
             else:
                 outputs_json = json.dumps(job_data.get("outputs", {}), indent=2)
+                if __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": "❌ Song generation finished without audio output.",
+                                "done": True,
+                            },
+                        }
+                    )
                 return (
                     f"Generation completed (Job: {prompt_id}) but no audio files found. "
                     f"Job outputs: ```json\n{outputs_json}\n```"
                 )
 
         except TimeoutError as e:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"❌ Song generation failed: {str(e)}",
+                            "done": True,
+                        },
+                    }
+                )
             return f"⏰ Generation process timed out: {str(e)}"
         except json.JSONDecodeError as e:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"❌ Song generation failed: {str(e)}",
+                            "done": True,
+                        },
+                    }
+                )
             return f"❌ Invalid workflow JSON in tool valves: {str(e)}."
         except aiohttp.ClientConnectorError as e:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"❌ Song generation failed: {str(e)}",
+                            "done": True,
+                        },
+                    }
+                )
             return f"❌ Connection Error to ComfyUI ({self.valves.comfyui_api_url} or {ws_api_url}): {str(e)}"
         except Exception as e:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"❌ Song generation failed: {str(e)}",
+                            "done": True,
+                        },
+                    }
+                )
             return f"❌ An unexpected error occurred: {str(e)}"
+        # Fallback: should not reach
+        return "❌ Song generation failed due to an unknown error."
