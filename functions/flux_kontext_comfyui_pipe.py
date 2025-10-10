@@ -262,7 +262,7 @@ class Pipe:
         KSAMPLER_SEED: Optional[int] = Field(
             title="KSampler Seed (optional)",
             default=None,
-            description="Seed for the sampler. Leave empty to randomize each run.",
+            description="Seed for the sampler. Leave empty or use -1 to randomize each run.",
         )
         KSAMPLER_STEPS: Optional[int] = Field(
             title="KSampler Steps (optional)",
@@ -372,7 +372,7 @@ class Pipe:
             "denoise": None,
         }
 
-        if self.valves.KSAMPLER_SEED is not None:
+        if self.valves.KSAMPLER_SEED is not None and self.valves.KSAMPLER_SEED != -1:
             ksampler_options["seed"] = int(self.valves.KSAMPLER_SEED)
         if self.valves.KSAMPLER_STEPS is not None:
             ksampler_options["steps"] = int(self.valves.KSAMPLER_STEPS)
@@ -814,7 +814,7 @@ class Pipe:
         sampler_s = await self._ask_input(self.__event_call__, "Sampler Name", "Enter sampler name (leave blank to keep)", str(eff["sampler_name"]), str(eff["sampler_name"]))
         scheduler_s = await self._ask_input(self.__event_call__, "Scheduler", "Enter scheduler (leave blank to keep)", str(eff["scheduler"]), str(eff["scheduler"]))
         denoise_s = await self._ask_input(self.__event_call__, "Denoise", "Enter denoise (leave blank to keep)", str(eff["denoise"]), str(eff["denoise"]))
-        seed_s = await self._ask_input(self.__event_call__, "Seed", "Enter seed (leave blank to keep or clear)", str(eff["seed"]) if eff["seed"] is not None else "", str(eff["seed"]) if eff["seed"] is not None else "")
+        seed_s = await self._ask_input(self.__event_call__, "Seed", "Enter seed (-1 for random, leave blank to keep or clear)", str(eff["seed"]) if eff["seed"] is not None else "", str(eff["seed"]) if eff["seed"] is not None else "")
         clip1_s = await self._ask_input(self.__event_call__, "CLIP 1 Filename", "Enter CLIP 1 filename (leave blank to keep)", self.valves.CLIP_NAME_1 or "", self.valves.CLIP_NAME_1 or "")
         clip2_s = await self._ask_input(self.__event_call__, "CLIP 2/T5 Filename", "Enter CLIP 2/T5 filename (leave blank to keep)", self.valves.CLIP_NAME_2 or "", self.valves.CLIP_NAME_2 or "")
         unet_s = await self._ask_input(self.__event_call__, "UNet/Diffusion Filename", "Enter UNet/Diffusion filename (leave blank to keep)", self.valves.UNET_MODEL_NAME or "", self.valves.UNET_MODEL_NAME or "")
