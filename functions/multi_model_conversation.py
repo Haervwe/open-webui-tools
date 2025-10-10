@@ -3,7 +3,7 @@ title: Multi Model Conversations
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.7.1
+version: 0.8.1
 """
 
 import logging
@@ -43,6 +43,12 @@ class Pipe:
     __model__: str
 
     class Valves(BaseModel):
+        priority: int = Field(
+            default=0,
+            description="Priority level for the pipe operations.",
+        )
+
+    class UserValves(BaseModel):
         NUM_PARTICIPANTS: int = Field(
             default=1,
             description="Number of participants in the conversation (1-5)",
@@ -121,7 +127,6 @@ class Pipe:
 
     def __init__(self):
         self.type = "manifold"
-        self.conversation_history = []
         self.valves = self.Valves()
 
     def pipes(self) -> list[dict[str, str]]:
@@ -131,15 +136,16 @@ class Pipe:
         self,
         messages,
         model: str,
+        valves,
     ):
         try:
             form_data = {
                 "model": model,
                 "messages": messages,
                 "stream": True,
-                "temperature": self.valves.Temperature,
-                "top_k": self.valves.Top_k,
-                "top_p": self.valves.Top_p,
+                "temperature": valves.Temperature,
+                "top_k": valves.Top_k,
+                "top_p": valves.Top_p,
             }
             response = await generate_chat_completions(
                 self.__request__,
@@ -205,22 +211,31 @@ class Pipe:
         self.__user__ = Users.get_user_by_id(__user__["id"])
         self.__model__ = __model__
         self.__request__ = __request__
+        
+        # Access user valves from __user__["valves"] if available, otherwise use defaults
+        valves = __user__.get("valves", self.UserValves())
+        
+        # Use conversation history from the body directly
+        conversation_history = body.get("messages", [])
+        
+        if not conversation_history:
+            return "Error: No message history found."
+
         if __task__ and __task__ != TASKS.DEFAULT:
-            model = self.valves.Participant1Model or self.__model__
+            model = valves.Participant1Model or self.__model__
             response = await generate_chat_completions(
                 self.__request__,
-                {"model": model, "messages": body.get("messages"), "stream": False},
+                {"model": model, "messages": conversation_history, "stream": False},
                 user=self.__user__,
             )
             return f"{name}: {response['choices'][0]['message']['content']}"
 
-        user_message = body.get("messages", [])[-1].get("content", "").strip()
-        num_participants = self.valves.NUM_PARTICIPANTS
+        num_participants = valves.NUM_PARTICIPANTS
         participants = []
         for i in range(1, num_participants + 1):
-            model = getattr(self.valves, f"Participant{i}Model", "")
-            alias = getattr(self.valves, f"Participant{i}Alias", "") or model
-            system_message = getattr(self.valves, f"Participant{i}SystemMessage", "")
+            model = getattr(valves, f"Participant{i}Model", "")
+            alias = getattr(valves, f"Participant{i}Alias", "") or model
+            system_message = getattr(valves, f"Participant{i}SystemMessage", "")
             if not model:
                 logger.warning(f"No model set for Participant {i}, skipping.")
                 continue
@@ -232,32 +247,30 @@ class Pipe:
             await self.emit_status("error", "No valid participants configured.", True)
             return "Error: No participants configured. Please set at least one participant's model in the valves."
 
-        self.conversation_history.append({"role": "user", "content": user_message})
         last_speaker = None
 
-        for round_num in range(self.valves.ROUNDS_PER_CONVERSATION):
-            if self.valves.UseGroupChatManager:
+        for round_num in range(valves.ROUNDS_PER_CONVERSATION):
+            if valves.UseGroupChatManager:
                 participant_aliases = [p["alias"] for p in participants]
                 history_str = "\n".join(
-                    f"{msg['role']}: {msg['content']}"
-                    for msg in self.conversation_history
+                    f"{msg['role']}: {msg['content']}" for msg in conversation_history
                 )
 
-                manager_prompt = self.valves.ManagerSelectionPrompt.format(
+                manager_prompt = valves.ManagerSelectionPrompt.format(
                     history=history_str,
                     last_speaker=last_speaker or "None",
                     participant_list=", ".join(participant_aliases),
                 )
 
                 manager_messages = [
-                    {"role": "system", "content": self.valves.ManagerSystemMessage},
+                    {"role": "system", "content": valves.ManagerSystemMessage},
                     {"role": "user", "content": manager_prompt},
                 ]
 
                 manager_response = await generate_chat_completions(
                     self.__request__,
                     {
-                        "model": self.valves.ManagerModel,
+                        "model": valves.ManagerModel,
                         "messages": manager_messages,
                         "stream": False,
                     },
@@ -302,15 +315,16 @@ class Pipe:
             for participant in participants_to_run:
                 model = participant["model"]
                 alias = participant["alias"]
-                system_message = participant["system_message"]
+                
+                # FIX - Combine character sheet and appended message into one system prompt.
+                # This creates a cleaner, more compliant message history for the model.
+                system_prompt = f"{participant['system_message']}\n\n{valves.AllParticipantsApendedMessage} {alias}"
 
+                # FIX - Construct the message list cleanly.
+                # No more artificial 'user' message at the end.
                 messages = [
-                    {"role": "system", "content": system_message},
-                    *self.conversation_history,
-                    {
-                        "role": "user",
-                        "content": f"{self.valves.AllParticipantsApendedMessage} {alias}",
-                    },
+                    {"role": "system", "content": system_prompt},
+                    *conversation_history,
                 ]
 
                 await self.emit_status(
@@ -320,13 +334,13 @@ class Pipe:
                     await self.emit_model_title(alias)
                     full_response = ""
                     async for chunk in self.get_streaming_completion(
-                        messages, model=model
+                        messages, model=model, valves=valves
                     ):
                         full_response += chunk
                         await self.emit_message(chunk)
 
                     cleaned_response = full_response.strip()
-                    self.conversation_history.append(
+                    conversation_history.append(
                         {"role": "assistant", "content": cleaned_response}
                     )
                     logger.debug(f"History updated with response from {alias}")
