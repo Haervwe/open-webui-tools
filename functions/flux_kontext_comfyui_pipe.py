@@ -145,6 +145,7 @@ DEFAULT_WORKFLOW_JSON = json.dumps(
     indent=2,
 )
 
+
 class Pipe:
     class Valves(BaseModel):
         COMFYUI_ADDRESS: str = Field(
@@ -160,8 +161,8 @@ class Pipe:
         )
         PROMPT_NODE_ID: str = Field(
             title="Prompt Node ID",
-            default="6", 
-            description="The ID of the node that accepts the text prompt."
+            default="6",
+            description="The ID of the node that accepts the text prompt.",
         )
         IMAGE_NODE_ID: str = Field(
             title="Image Node ID",
@@ -175,13 +176,13 @@ class Pipe:
         )
         ENHANCE_PROMPT: bool = Field(
             title="Enhance Prompt",
-            default=False, 
-            description="Use vision model to enhance prompt"
+            default=False,
+            description="Use vision model to enhance prompt",
         )
         VISION_MODEL_ID: str = Field(
             title="Vision Model ID",
-            default="", 
-            description="Vision model to be used as prompt enhancer"
+            default="",
+            description="Vision model to be used as prompt enhancer",
         )
         ENHANCER_SYSTEM_PROMPT: str = Field(
             title="Enhancer System Prompt",
@@ -212,10 +213,10 @@ class Pipe:
         )
         MAX_WAIT_TIME: int = Field(
             title="Max Wait Time",
-            default=1200, 
-            description="Max wait time for generation (seconds)."
+            default=1200,
+            description="Max wait time for generation (seconds).",
         )
-        
+
         AUTO_CHECK_MODEL_LOADER: bool = Field(
             title="Auto Check Model Loader",
             default=False,
@@ -272,40 +273,44 @@ class Pipe:
             default=None,
             description="Denoise strength. Leave empty to use workflow default.",
         )
-        
+
     def __init__(self):
         self.valves = self.Valves()
         self.client_id = str(uuid.uuid4())
 
-
-
-    def setup_inputs(self, messages: List[Dict[str, str]]) -> tuple[Optional[str], Optional[str], Dict[str, Optional[Union[int, float, str]]]]:
+    def setup_inputs(
+        self, messages: List[Dict[str, str]]
+    ) -> tuple[
+        Optional[str], Optional[str], Dict[str, Optional[Union[int, float, str]]]
+    ]:
         prompt: str = ""
         base64_image: Optional[str] = None
 
         ksampler_options: Dict[str, Optional[Union[int, float, str]]] = {
-            'seed': random.randint(0, 2**32 - 1),
-            'steps': None,
-            'cfg': None,
-            'sampler_name': None,
-            'scheduler': None,
-            'denoise': None,
+            "seed": random.randint(0, 2**32 - 1),
+            "steps": None,
+            "cfg": None,
+            "sampler_name": None,
+            "scheduler": None,
+            "denoise": None,
         }
 
         if self.valves.KSAMPLER_SEED is not None:
-            ksampler_options['seed'] = int(self.valves.KSAMPLER_SEED)
+            ksampler_options["seed"] = int(self.valves.KSAMPLER_SEED)
         if self.valves.KSAMPLER_STEPS is not None:
-            ksampler_options['steps'] = int(self.valves.KSAMPLER_STEPS)
+            ksampler_options["steps"] = int(self.valves.KSAMPLER_STEPS)
         if self.valves.KSAMPLER_CFG is not None:
-            ksampler_options['cfg'] = float(self.valves.KSAMPLER_CFG)
+            ksampler_options["cfg"] = float(self.valves.KSAMPLER_CFG)
         if self.valves.KSAMPLER_SAMPLER_NAME is not None:
-            ksampler_options['sampler_name'] = str(self.valves.KSAMPLER_SAMPLER_NAME)
+            ksampler_options["sampler_name"] = str(self.valves.KSAMPLER_SAMPLER_NAME)
         if self.valves.KSAMPLER_SCHEDULER is not None:
-            ksampler_options['scheduler'] = str(self.valves.KSAMPLER_SCHEDULER)
+            ksampler_options["scheduler"] = str(self.valves.KSAMPLER_SCHEDULER)
         if self.valves.KSAMPLER_DENOISE is not None:
-            ksampler_options['denoise'] = float(self.valves.KSAMPLER_DENOISE)
+            ksampler_options["denoise"] = float(self.valves.KSAMPLER_DENOISE)
 
-        user_message_item = cast(Optional[Dict[str, Any]], get_last_user_message_item(messages))
+        user_message_item = cast(
+            Optional[Dict[str, Any]], get_last_user_message_item(messages)
+        )
         if not user_message_item:
             return None, None, ksampler_options
 
@@ -316,7 +321,9 @@ class Pipe:
             for item in cast(List[Dict[str, Any]], content):
                 if item.get("type") == "text":
                     prompt += cast(str, item.get("text", ""))
-                elif item.get("type") == "image_url" and item.get("image_url", {}).get("url"):
+                elif item.get("type") == "image_url" and item.get("image_url", {}).get(
+                    "url"
+                ):
                     image_url = cast(str, item["image_url"]["url"])
         elif isinstance(content, str):
             prompt = content
@@ -324,7 +331,6 @@ class Pipe:
         try:
             if image_url:
                 try:
-                    # 'base64,' marker
                     if "base64," in image_url:
                         base64_image = image_url.split("base64,", 1)[1]
                     elif image_url.startswith("data:") and "," in image_url:
@@ -349,13 +355,18 @@ class Pipe:
         except Exception as e:
             logger.warning(f"Unexpected error while extracting base64: {e}")
 
-
         prompt = re.sub(r"\s+", " ", prompt).strip()
 
         return prompt, base64_image, ksampler_options
 
-
-    async def enhance_prompt(self, prompt: str, image: str, user: User, request: Any, event_emitter: Callable[..., Any]) -> str:
+    async def enhance_prompt(
+        self,
+        prompt: str,
+        image: str,
+        user: User,
+        request: Any,
+        event_emitter: Callable[..., Any],
+    ) -> str:
         try:
             await self.emit_status(event_emitter, "info", "Enhancing the prompt...")
 
@@ -386,12 +397,12 @@ class Pipe:
                 "stream": False,
             }
 
-            resp_data: Dict[str, Any] = cast(Dict[str, Any], await generate_chat_completion(request, payload, user))
+            resp_data: Dict[str, Any] = cast(
+                Dict[str, Any], await generate_chat_completion(request, payload, user)
+            )
             await self.emit_status(event_emitter, "info", "Prompt enhanced")
             enhanced_prompt: str = str(resp_data["choices"][0]["message"]["content"])
-            enhanced_prompt_message = (
-                f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
-            )
+            enhanced_prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
             await event_emitter(
                 {
                     "type": "message",
@@ -404,13 +415,21 @@ class Pipe:
 
             return prompt
 
-    def prepare_workflow(self, workflow: Dict[str, Any], prompt: str, base64_image: Optional[str], ksampler_options: Dict[str, Optional[Union[int, float, str]]]) -> Dict[str, Any]:
+    def prepare_workflow(
+        self,
+        workflow: Dict[str, Any],
+        prompt: str,
+        base64_image: Optional[str],
+        ksampler_options: Dict[str, Optional[Union[int, float, str]]],
+    ) -> Dict[str, Any]:
         prompt_node = self.valves.PROMPT_NODE_ID
         image_node = self.valves.IMAGE_NODE_ID
         ksampler_node = self.valves.KSAMPLER_NODE_ID
 
         if prompt_node in workflow and "inputs" in workflow[prompt_node]:
-            workflow[prompt_node]["inputs"]["text"] = prompt or "A beautiful, high-quality image"
+            workflow[prompt_node]["inputs"]["text"] = (
+                prompt or "A beautiful, high-quality image"
+            )
         else:
             logger.warning(f"Prompt node '{prompt_node}' not found in workflow.")
 
@@ -445,14 +464,22 @@ class Pipe:
         except Exception as e:
             logger.warning(f"Failed to apply CLIP/UNet valve overrides: {e}")
 
-        _workflow = auto_check_model_loader(workflow) if self.valves.AUTO_CHECK_MODEL_LOADER else workflow
+        _workflow = (
+            auto_check_model_loader(workflow)
+            if self.valves.AUTO_CHECK_MODEL_LOADER
+            else workflow
+        )
 
         return _workflow
 
-    async def queue_prompt(self, session: aiohttp.ClientSession, workflow: Dict[str, Any]) -> Optional[str]:
+    async def queue_prompt(
+        self, session: aiohttp.ClientSession, workflow: Dict[str, Any]
+    ) -> Optional[str]:
 
         payload: Dict[str, Any] = {"prompt": workflow, "client_id": self.client_id}
-        async with session.post(f"{self.valves.COMFYUI_ADDRESS.rstrip('/')}/prompt", json=payload) as response:
+        async with session.post(
+            f"{self.valves.COMFYUI_ADDRESS.rstrip('/')}/prompt", json=payload
+        ) as response:
             text = await response.text()
             logger.info(f"Queue prompt HTTP {response.status}: {text}")
             response.raise_for_status()
@@ -460,13 +487,22 @@ class Pipe:
             logger.info(f"Queue prompt JSON response: {data}")
             return data.get("prompt_id")
 
-    async def wait_for_job_signal(self, ws_api_url: str, prompt_id: str, event_emitter: Callable[..., Any]) -> bool:
+    async def wait_for_job_signal(
+        self, ws_api_url: str, prompt_id: str, event_emitter: Callable[..., Any]
+    ) -> bool:
         start_time = asyncio.get_event_loop().time()
         try:
-            async with aiohttp.ClientSession().ws_connect(f"{ws_api_url}?clientId={self.client_id}") as ws:
+            async with aiohttp.ClientSession().ws_connect(
+                f"{ws_api_url}?clientId={self.client_id}"
+            ) as ws:
                 async for msg in ws:
-                    if (asyncio.get_event_loop().time() - start_time > self.valves.MAX_WAIT_TIME):
-                        raise TimeoutError(f"WebSocket wait timed out after {self.valves.MAX_WAIT_TIME}s")
+                    if (
+                        asyncio.get_event_loop().time() - start_time
+                        > self.valves.MAX_WAIT_TIME
+                    ):
+                        raise TimeoutError(
+                            f"WebSocket wait timed out after {self.valves.MAX_WAIT_TIME}s"
+                        )
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         logger.debug(f"WS raw msg: {msg.data}")
                     message = json.loads(msg.data)
@@ -506,7 +542,6 @@ class Pipe:
             raise e
         return False
 
-
     def extract_image_data(self, outputs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         final_image_data: Optional[Dict[str, Any]]
         temp_image_data: Optional[Dict[str, Any]]
@@ -520,8 +555,6 @@ class Pipe:
                 if node_output["images"]:
                     temp_image_data = node_output["images"][0]
         return final_image_data if final_image_data else temp_image_data
-
-
 
     def _save_image_and_get_public_url(
         self, request: Any, image_data: bytes, content_type: str, user: User
@@ -539,17 +572,20 @@ class Pipe:
                 filename=f"generated-image{image_format}",
             )
 
-            file_item = cast(Any, upload_file_handler(
-                request=request,
-                file=file,
-                metadata={},
-                process=False,
-                user=user,
-            ))
+            file_item = cast(
+                Any,
+                upload_file_handler(
+                    request=request,
+                    file=file,
+                    metadata={},
+                    process=False,
+                    user=user,
+                ),
+            )
             if not file_item:
                 logger.error("Failed to save image to OpenWebUI")
                 raise Exception("Failed to save image to OpenWebUI")
-            
+
             file_id = str(getattr(file_item, "id", ""))
             url = request.app.url_path_for("get_file_content_by_id", id=file_id)
             return str(url)
@@ -558,7 +594,11 @@ class Pipe:
             raise e
 
     async def emit_status(
-        self, event_emitter: Callable[..., Any], level: str, description: str, done: bool = False
+        self,
+        event_emitter: Callable[..., Any],
+        level: str,
+        description: str,
+        done: bool = False,
     ) -> None:
         await event_emitter(
             {
@@ -572,7 +612,14 @@ class Pipe:
             }
         )
 
-    async def pipe(self,body: Dict[str, Any], __user__: Dict[str, Any], __event_emitter__: Callable[..., Any], __request__: Any = None, __task__: Any = None,) -> Union[Dict[str, Any], str]:
+    async def pipe(
+        self,
+        body: Dict[str, Any],
+        __user__: Dict[str, Any],
+        __event_emitter__: Callable[..., Any],
+        __request__: Any = None,
+        __task__: Any = None,
+    ) -> Union[Dict[str, Any], str]:
         """
         Main function of the Pipe class.
         Handles prompt enhancement, vision tasks, Ollama unloading, workflow execution, etc...
@@ -583,7 +630,7 @@ class Pipe:
         messages = body.get("messages", [])
         prompt, base64_image, ksampler_options = self.setup_inputs(messages)
         prompt = prompt or ""
-        
+
         if not base64_image:
             await self.emit_status(
                 self.__event_emitter__,
@@ -592,7 +639,7 @@ class Pipe:
                 done=True,
             )
             return body
-        
+
         if self.valves.ENHANCE_PROMPT:
             prompt = await self.enhance_prompt(
                 prompt,
@@ -604,15 +651,18 @@ class Pipe:
 
         if __task__ and __task__ != TASKS.DEFAULT:
             if self.valves.VISION_MODEL_ID:
-                resp_data2: Dict[str, Any] = cast(Dict[str, Any], await generate_chat_completion(
-                    self.__request__,
-                    {
-                        "model": self.valves.VISION_MODEL_ID,
-                        "messages": body.get("messages"),
-                        "stream": False,
-                    },
-                    user=self.__user__,
-                ))
+                resp_data2: Dict[str, Any] = cast(
+                    Dict[str, Any],
+                    await generate_chat_completion(
+                        self.__request__,
+                        {
+                            "model": self.valves.VISION_MODEL_ID,
+                            "messages": body.get("messages"),
+                            "stream": False,
+                        },
+                        user=self.__user__,
+                    ),
+                )
                 return f"{resp_data2['choices'][0]['message']['content']}"
             return "No vision model set for this task."
 
@@ -633,7 +683,9 @@ class Pipe:
         http_api_url = self.valves.COMFYUI_ADDRESS.rstrip("/")
         ws_api_url = f"{'wss' if http_api_url.startswith('https') else 'ws'}://{http_api_url.split('://', 1)[-1]}/ws"
 
-        workflow = self.prepare_workflow(workflow, prompt, base64_image, ksampler_options)
+        workflow = self.prepare_workflow(
+            workflow, prompt, base64_image, ksampler_options
+        )
         logger.info(f"Generated workflow: {workflow}")
 
         try:
@@ -704,7 +756,9 @@ class Pipe:
                     async with session.get(internal_image_url) as http_response:
                         http_response.raise_for_status()
                         image_data = await http_response.read()
-                        content_type = http_response.headers.get("content-type", "image/png")
+                        content_type = http_response.headers.get(
+                            "content-type", "image/png"
+                        )
 
                     await self.emit_status(
                         self.__event_emitter__, "info", "Embedding image into chat..."
@@ -717,7 +771,9 @@ class Pipe:
                         user=self.__user__,
                     )
 
-                    alt_text = prompt if prompt else "Edited image generated by Flux Kontext"
+                    alt_text = (
+                        prompt if prompt else "Edited image generated by Flux Kontext"
+                    )
                     response_content = f"Here is the edited image:\n\n![{alt_text}]({public_image_url})"
 
                     await self.__event_emitter__(
