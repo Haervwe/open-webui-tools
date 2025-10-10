@@ -1,7 +1,7 @@
 {
   "6": {
     "inputs": {
-      "text": "Re draw this man as an cyberpunk anime character, preserving the facial features , hair and eyes color",
+      "text": "Transform the man with the dark, curly hair and full dark beard into a powerful wizard. Change his dark hair and beard to long, flowing silver-white hair and a matching majestic silver-white beard, maintaining the same volume and texture. Make his facial expression more serious and wise, removing the nose ring. Replace his dark grey speckled zip-up sweater with flowing, deep sapphire blue wizard robes with silver embroidery, a high collar, and wide sleeves. Add a tall, pointed dark blue wizard hat adorned with a crescent moon emblem. Place a gnarled, glowing wooden staff in his right hand, emitting a soft mystical blue light. Add a faint magical aura around the man, and change the background to a mystical, dimly lit ancient library filled with arcane scrolls and glowing magical artifacts. Keep the same composition and lighting on the man's face.",
       "speak_and_recognation": {
         "__value__": [
           false,
@@ -15,7 +15,7 @@
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
-      "title": "Codificar Texto CLIP (Prompt)"
+      "title": "CLIP Text Encode (Prompt)"
     }
   },
   "35": {
@@ -31,22 +31,12 @@
       "title": "FluxGuidance"
     }
   },
-  "37": {
-    "inputs": {
-      "unet_name": "flux-kontext/flux1-dev-kontext_fp8_scaled.safetensors",
-      "weight_dtype": "fp8_e4m3fn_fast"
-    },
-    "class_type": "UNETLoader",
-    "_meta": {
-      "title": "Cargar Modelo de Difusión"
-    }
-  },
   "38": {
     "inputs": {
       "clip_name1": "clip_l.safetensors",
       "clip_name2": "flux/t5xxl_fp8_e4m3fn_scaled.safetensors",
       "type": "flux",
-      "device": "default"
+      "device": "cpu"
     },
     "class_type": "DualCLIPLoader",
     "_meta": {
@@ -59,7 +49,7 @@
     },
     "class_type": "VAELoader",
     "_meta": {
-      "title": "Cargar VAE"
+      "title": "Load VAE"
     }
   },
   "42": {
@@ -74,22 +64,6 @@
       "title": "FluxKontextImageScale"
     }
   },
-  "124": {
-    "inputs": {
-      "pixels": [
-        "42",
-        0
-      ],
-      "vae": [
-        "39",
-        0
-      ]
-    },
-    "class_type": "VAEEncode",
-    "_meta": {
-      "title": "VAE Codificar"
-    }
-  },
   "135": {
     "inputs": {
       "conditioning": [
@@ -99,20 +73,7 @@
     },
     "class_type": "ConditioningZeroOut",
     "_meta": {
-      "title": "Acondicionamiento Cero"
-    }
-  },
-  "136": {
-    "inputs": {
-      "filename_prefix": "ComfyUI_FLUX_Edit",
-      "images": [
-        "194",
-        5
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Guardar Imagen"
+      "title": "ConditioningZeroOut"
     }
   },
   "177": {
@@ -122,7 +83,7 @@
         0
       ],
       "latent": [
-        "124",
+        "208",
         0
       ]
     },
@@ -133,7 +94,7 @@
   },
   "194": {
     "inputs": {
-      "seed": 438523942,
+      "seed": 4227512082,
       "steps": 20,
       "cfg": 1,
       "sampler_name": "euler",
@@ -142,7 +103,7 @@
       "preview_method": "none",
       "vae_decode": "true (tiled)",
       "model": [
-        "37",
+        "197",
         0
       ],
       "positive": [
@@ -154,7 +115,7 @@
         0
       ],
       "latent_image": [
-        "124",
+        "208",
         0
       ],
       "optional_vae": [
@@ -169,11 +130,90 @@
   },
   "196": {
     "inputs": {
-      "image": ""
+      "data": ""
     },
-    "class_type": "ETN_LoadImageBase64",
+    "class_type": "LoadImageFromBase64",
     "_meta": {
       "title": "Load Image (Base64)"
+    }
+  },
+  "197": {
+    "inputs": {
+      "unet_name": "flux-kontext/flux1-dev-kontext_fp8_scaled.safetensors",
+      "weight_dtype": "fp8_e4m3fn_fast"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  },
+  "205": {
+    "inputs": {
+      "filename_prefix": "ComfyUI_FLUX_KONTEXT",
+      "images": [
+        "209",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "206": {
+    "inputs": {
+      "anything": [
+        "194",
+        5
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  },
+  "208": {
+    "inputs": {
+      "pixels": [
+        "42",
+        0
+      ],
+      "vae": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "209": {
+    "inputs": {
+      "value": [
+        "206",
+        0
+      ],
+      "model": [
+        "197",
+        0
+      ]
+    },
+    "class_type": "UnloadModel",
+    "_meta": {
+      "title": "UnloadModel"
+    }
+  },
+  "210": {
+    "inputs": {
+      "images": [
+        "196",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Vista previa de imagen"
     }
   }
 }

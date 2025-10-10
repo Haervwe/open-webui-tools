@@ -26,11 +26,12 @@ Instructions:
 """
 
 import json
+import os
 import uuid
 import aiohttp
 import asyncio
 import random
-from typing import List, Dict, Callable, Optional, Union, Any, cast
+from typing import List, Dict, Callable, Optional, Union, Any, cast, Awaitable
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import get_last_user_message_item  # type: ignore
 from open_webui.utils.chat import generate_chat_completion  # type: ignore
@@ -148,6 +149,21 @@ DEFAULT_WORKFLOW_JSON = json.dumps(
 
 class Pipe:
     class Valves(BaseModel):
+        ENABLE_SETUP_FORM: bool = Field(
+            title="Enable /setup form",
+            default=True,
+            description="If disabled, the /setup command is ignored.",
+        )
+        ENABLE_CONFIG_OVERRIDE: bool = Field(
+            title="Enable config override",
+            default=True,
+            description="Load backend config.json and override valves values when present.",
+        )
+        CONFIG_BACKEND_PATH: str = Field(
+            title="Backend config path",
+            default="auto",
+            description="Path to persist settings. Use 'auto' to store next to this pipe as flux_kontext_comfyui_config.json",
+        )
         COMFYUI_ADDRESS: str = Field(
             title="ComfyUI Address",
             default="http://127.0.0.1:8188",
@@ -277,6 +293,67 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
         self.client_id = str(uuid.uuid4())
+        # Attempt to pre-load config on construction (best-effort)
+        try:
+            self._load_config_and_apply()
+        except Exception:
+            pass
+
+    # ---------------------------
+    # Backend config persistence
+    # ---------------------------
+    def _get_config_path(self) -> str:
+        if getattr(self.valves, "CONFIG_BACKEND_PATH", "auto") and self.valves.CONFIG_BACKEND_PATH != "auto":
+            return self.valves.CONFIG_BACKEND_PATH
+        # Default to a file next to this module
+        return os.path.join(os.path.dirname(__file__), "flux_kontext_comfyui_config.json")
+
+    def _load_config_and_apply(self) -> None:
+        """Load config.json and apply overrides to valves (takes precedence)."""
+        if not getattr(self.valves, "ENABLE_CONFIG_OVERRIDE", True):
+            return
+        cfg_path = self._get_config_path()
+        if not os.path.exists(cfg_path):
+            return
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = cast(Dict[str, Any], json.load(f))
+            # Only apply known fields
+            for k, v in data.items():
+                if hasattr(self.valves, k):
+                    try:
+                        setattr(self.valves, k, v)
+                    except Exception:
+                        logger.warning(f"Failed to apply config key '{k}' with value '{v}'")
+            logger.info(f"Applied settings from backend config at {cfg_path}")
+        except Exception as e:
+            logger.error(f"Failed to load config from {cfg_path}: {e}")
+
+    def _save_config(self, values: Dict[str, Any]) -> str:
+        """Persist provided values to backend config.json (only known valves). Returns path."""
+        cfg_path = self._get_config_path()
+        try:
+            os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+            # Load existing to merge
+            existing: Dict[str, Any] = {}
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        existing = json.load(f) or {}
+                except Exception:
+                    existing = {}
+            # Keep only known fields
+            for k in list(values.keys()):
+                if not hasattr(self.valves, k):
+                    values.pop(k, None)
+            merged = {**existing, **values}
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(merged, f, indent=2)
+            logger.info(f"Saved settings to backend config at {cfg_path}")
+            return cfg_path
+        except Exception as e:
+            logger.error(f"Failed to save config at {cfg_path}: {e}")
+            raise
 
     def setup_inputs(
         self, messages: List[Dict[str, str]]
@@ -612,6 +689,244 @@ class Pipe:
             }
         )
 
+    async def _emit_setup_prompt(self, event_emitter: Callable[..., Any]) -> None:
+        """Emit a planner-style input modal prompting the admin to paste a JSON payload for /setup save."""
+        v = self.valves
+        def _num(val: Optional[Union[int, float]], default: Union[int, float]) -> Union[int, float]:
+            return default if val is None else val
+        example: Dict[str, Any] = {
+            "KSAMPLER_STEPS": _num(v.KSAMPLER_STEPS, 20),
+            "KSAMPLER_CFG": _num(v.KSAMPLER_CFG, 1.0),
+            "KSAMPLER_SAMPLER_NAME": v.KSAMPLER_SAMPLER_NAME or "euler",
+            "KSAMPLER_SCHEDULER": v.KSAMPLER_SCHEDULER or "simple",
+            "KSAMPLER_DENOISE": _num(v.KSAMPLER_DENOISE, 1.0),
+            "KSAMPLER_SEED": v.KSAMPLER_SEED,
+            "CLIP_NAME_1": v.CLIP_NAME_1 or "",
+            "CLIP_NAME_2": v.CLIP_NAME_2 or "",
+            "UNET_MODEL_NAME": v.UNET_MODEL_NAME or "",
+            "VAE_NAME": v.VAE_NAME or "",
+            "save_to_backend": True
+        }
+        placeholder = f"/setup save {json.dumps(example)}"
+        await event_emitter(
+            {
+                "type": "input",
+                "data": {
+                    "title": "Flux Kontext - Setup",
+                    "message": (
+                        "Paste a JSON payload to configure sampler and model parameters. "
+                        "Edit the example as needed, then send it as a chat message starting with /setup save.\n\n"
+                        "Allowed keys: KSAMPLER_STEPS, KSAMPLER_CFG, KSAMPLER_SAMPLER_NAME, KSAMPLER_SCHEDULER, KSAMPLER_DENOISE, KSAMPLER_SEED, CLIP_NAME_1, CLIP_NAME_2, UNET_MODEL_NAME, VAE_NAME, save_to_backend"
+                    ),
+                    "placeholder": placeholder,
+                    "value": placeholder
+                }
+            }
+        )
+
+    async def _emit_current_values(self, event_emitter: Callable[..., Any]) -> None:
+        v = self.valves
+        eff = self._get_effective_settings()
+        lines = [
+            "Current settings:",
+            f"- KSAMPLER_STEPS: {eff['steps']}",
+            f"- KSAMPLER_CFG: {eff['cfg']}",
+            f"- KSAMPLER_SAMPLER_NAME: {eff['sampler_name']}",
+            f"- KSAMPLER_SCHEDULER: {eff['scheduler']}",
+            f"- KSAMPLER_DENOISE: {eff['denoise']}",
+            f"- KSAMPLER_SEED: {eff['seed']}",
+            f"- CLIP_NAME_1: {v.CLIP_NAME_1}",
+            f"- CLIP_NAME_2: {v.CLIP_NAME_2}",
+            f"- UNET_MODEL_NAME: {v.UNET_MODEL_NAME}",
+            f"- VAE_NAME: {v.VAE_NAME}",
+            f"- ENABLE_CONFIG_OVERRIDE: {v.ENABLE_CONFIG_OVERRIDE}",
+            f"- CONFIG_BACKEND_PATH: {v.CONFIG_BACKEND_PATH}",
+        ]
+        await event_emitter({"type": "message", "data": {"content": "\n".join(lines)}})
+
+    def _get_effective_settings(self) -> Dict[str, Union[int, float, str, None]]:
+        """Return effective sampler settings using valves overrides if present, otherwise workflow defaults, otherwise hard defaults."""
+        # Hard defaults as last resort
+        eff: Dict[str, Union[int, float, str, None]] = {
+            "steps": 20,
+            "cfg": 1.0,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "denoise": 1.0,
+            "seed": None,
+        }
+        # Try to read from workflow JSON
+        try:
+            wf = cast(Dict[str, Any], json.loads(self.valves.COMFYUI_WORKFLOW_JSON))
+            k_id = self.valves.KSAMPLER_NODE_ID
+            node = cast(Dict[str, Any], wf.get(k_id, {}))
+            inputs = cast(Dict[str, Any], node.get("inputs", {}))
+            eff.update({
+                "steps": inputs.get("steps", eff["steps"]),
+                "cfg": inputs.get("cfg", eff["cfg"]),
+                "sampler_name": inputs.get("sampler_name", eff["sampler_name"]),
+                "scheduler": inputs.get("scheduler", eff["scheduler"]),
+                "denoise": inputs.get("denoise", eff["denoise"]),
+                "seed": inputs.get("seed", eff["seed"]),
+            })
+        except Exception:
+            pass
+        # Override with valves if provided
+        if self.valves.KSAMPLER_STEPS is not None:
+            eff["steps"] = int(self.valves.KSAMPLER_STEPS)
+        if self.valves.KSAMPLER_CFG is not None:
+            eff["cfg"] = float(self.valves.KSAMPLER_CFG)
+        if self.valves.KSAMPLER_SAMPLER_NAME:
+            eff["sampler_name"] = str(self.valves.KSAMPLER_SAMPLER_NAME)
+        if self.valves.KSAMPLER_SCHEDULER:
+            eff["scheduler"] = str(self.valves.KSAMPLER_SCHEDULER)
+        if self.valves.KSAMPLER_DENOISE is not None:
+            eff["denoise"] = float(self.valves.KSAMPLER_DENOISE)
+        if self.valves.KSAMPLER_SEED is not None:
+            eff["seed"] = int(self.valves.KSAMPLER_SEED)
+        return eff
+
+    async def _ask_input(
+        self,
+        event_call: Callable[[Dict[str, Any]], Awaitable[Any]],
+        title: str,
+        message: str,
+        placeholder: str,
+        value: str,
+    ) -> Optional[str]:
+        try:
+            result = await event_call(
+                {
+                    "type": "input",
+                    "data": {
+                        "title": title,
+                        "message": message,
+                        "placeholder": placeholder,
+                        "value": value,
+                    },
+                }
+            )
+            if isinstance(result, dict) and "value" in result:
+                return str(cast(Any, result)["value"]).strip()
+            if isinstance(result, str):
+                return result.strip()
+        except Exception as e:
+            logger.warning(f"Input prompt failed for {title}: {e}")
+        return None
+
+    async def _interactive_setup(self) -> None:
+        if not hasattr(self, "__event_call__") or self.__event_call__ is None:
+            # Fall back to the input prompt if event_call is not available
+            await self._emit_setup_prompt(self.__event_emitter__)
+            return
+        eff = self._get_effective_settings()
+        # Ask for each parameter; blank means keep current
+        # Steps (int)
+        steps_s = await self._ask_input(self.__event_call__, "Steps", "Enter number of steps (leave blank to keep)", str(eff["steps"]), str(eff["steps"]))
+        cfg_s = await self._ask_input(self.__event_call__, "CFG", "Enter CFG (leave blank to keep)", str(eff["cfg"]), str(eff["cfg"]))
+        sampler_s = await self._ask_input(self.__event_call__, "Sampler Name", "Enter sampler name (leave blank to keep)", str(eff["sampler_name"]), str(eff["sampler_name"]))
+        scheduler_s = await self._ask_input(self.__event_call__, "Scheduler", "Enter scheduler (leave blank to keep)", str(eff["scheduler"]), str(eff["scheduler"]))
+        denoise_s = await self._ask_input(self.__event_call__, "Denoise", "Enter denoise (leave blank to keep)", str(eff["denoise"]), str(eff["denoise"]))
+        seed_s = await self._ask_input(self.__event_call__, "Seed", "Enter seed (leave blank to keep or clear)", str(eff["seed"]) if eff["seed"] is not None else "", str(eff["seed"]) if eff["seed"] is not None else "")
+        clip1_s = await self._ask_input(self.__event_call__, "CLIP 1 Filename", "Enter CLIP 1 filename (leave blank to keep)", self.valves.CLIP_NAME_1 or "", self.valves.CLIP_NAME_1 or "")
+        clip2_s = await self._ask_input(self.__event_call__, "CLIP 2/T5 Filename", "Enter CLIP 2/T5 filename (leave blank to keep)", self.valves.CLIP_NAME_2 or "", self.valves.CLIP_NAME_2 or "")
+        unet_s = await self._ask_input(self.__event_call__, "UNet/Diffusion Filename", "Enter UNet/Diffusion filename (leave blank to keep)", self.valves.UNET_MODEL_NAME or "", self.valves.UNET_MODEL_NAME or "")
+        vae_s = await self._ask_input(self.__event_call__, "VAE Filename", "Enter VAE filename (leave blank to keep)", self.valves.VAE_NAME or "", self.valves.VAE_NAME or "")
+
+        applied: Dict[str, Any] = {}
+        # Apply conversions and set if provided
+        def _apply_num(key: str, raw: Optional[str], conv: Callable[[str], Union[int, float]]):
+            nonlocal applied
+            if raw is None or raw == "":
+                return
+            try:
+                applied[key] = conv(raw)
+                setattr(self.valves, key, applied[key])
+            except Exception:
+                logger.warning(f"Invalid value for {key}: {raw}")
+
+        def _apply_str(key: str, raw: Optional[str]):
+            nonlocal applied
+            if raw is None or raw == "":
+                return
+            applied[key] = raw
+            setattr(self.valves, key, raw)
+
+        _apply_num("KSAMPLER_STEPS", steps_s, int)
+        _apply_num("KSAMPLER_CFG", cfg_s, float)
+        _apply_str("KSAMPLER_SAMPLER_NAME", sampler_s)
+        _apply_str("KSAMPLER_SCHEDULER", scheduler_s)
+        _apply_num("KSAMPLER_DENOISE", denoise_s, float)
+        if seed_s == "":
+            # Explicit clear
+            applied["KSAMPLER_SEED"] = None
+            self.valves.KSAMPLER_SEED = None
+        else:
+            _apply_num("KSAMPLER_SEED", seed_s, int)
+        _apply_str("CLIP_NAME_1", clip1_s)
+        _apply_str("CLIP_NAME_2", clip2_s)
+        _apply_str("UNET_MODEL_NAME", unet_s)
+        _apply_str("VAE_NAME", vae_s)
+
+        # Confirm save to backend defaults
+        save_flag = False
+        try:
+            resp = await self.__event_call__(
+                {
+                    "type": "confirmation",
+                    "data": {
+                        "title": "Save Defaults",
+                        "message": "Save these settings as backend defaults (config.json)?",
+                    },
+                }
+            )
+            if isinstance(resp, bool):
+                save_flag = resp
+            elif isinstance(resp, dict) and "confirmed" in resp:
+                resp_typed = cast(Dict[str, Any], resp)
+                conf_val = resp_typed.get("confirmed")
+                save_flag = bool(True if conf_val is True else False)
+        except Exception:
+            pass
+
+        saved_path = None
+        if save_flag and applied:
+            try:
+                saved_path = self._save_config(applied)
+            except Exception:
+                pass
+
+        msg_lines = ["Applied settings:"] + [f"- {k}: {v}" for k, v in applied.items()] if applied else ["No changes applied"]
+        if save_flag:
+            msg_lines.append(f"Saved to: {saved_path or '(failed to save)'}")
+        await self.__event_emitter__({"type": "message", "data": {"content": "\n".join(msg_lines)}})
+        await self.emit_status(self.__event_emitter__, "success", "Setup updated", done=True)
+
+    def _is_admin(self) -> bool:
+        try:
+            role = str(getattr(self.__user__, "role", "")).lower()
+            return role in {"admin", "super_admin", "owner"}
+        except Exception:
+            return False
+
+    def _extract_last_user_text(self, messages: List[Dict[str, Any]]) -> Optional[str]:
+        for msg in reversed(messages or []):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    # Concatenate text items
+                    texts: List[str] = []
+                    for item in cast(List[Dict[str, Any]], content):
+                        if item.get("type") == "text":
+                            t_val: Any = item.get("text")
+                            if isinstance(t_val, str):
+                                texts.append(t_val)
+                    if texts:
+                        return "\n".join(texts)
+        return None
+
     async def pipe(
         self,
         body: Dict[str, Any],
@@ -619,6 +934,7 @@ class Pipe:
         __event_emitter__: Callable[..., Any],
         __request__: Any = None,
         __task__: Any = None,
+        __event_call__: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
     ) -> Union[Dict[str, Any], str]:
         """
         Main function of the Pipe class.
@@ -627,6 +943,69 @@ class Pipe:
         self.__event_emitter__ = __event_emitter__
         self.__request__ = __request__
         self.__user__ = Users.get_user_by_id(__user__["id"])
+        # optional event call for interactive prompts
+        self.__event_call__ = __event_call__
+        # Re-apply backend config (takes precedence) on each run
+        try:
+            self._load_config_and_apply()
+        except Exception:
+            pass
+
+        # Handle admin-only /setup commands before any image requirements
+        user_text = self._extract_last_user_text(body.get("messages", [])) or ""
+        ut_low = user_text.strip().lower()
+        if ut_low.startswith("/setup"):
+            if not self.valves.ENABLE_SETUP_FORM:
+                await self.emit_status(self.__event_emitter__, "warning", "/setup is disabled by valves.", done=True)
+                return body
+            if not self._is_admin():
+                await self.emit_status(self.__event_emitter__, "error", "Only admins can use /setup.", done=True)
+                return body
+
+            # /setup save {json}
+            if ut_low.startswith("/setup save"):
+                # Extract JSON payload after '/setup save'
+                try:
+                    # Keep original string to preserve case in values
+                    m = re.match(r"^/setup\s+save\s+(\{[\s\S]*\})\s*$", user_text.strip(), flags=re.IGNORECASE)
+                    if not m:
+                        raise ValueError("No JSON payload found after '/setup save'")
+                    payload_str = m.group(1)
+                    overrides = cast(Dict[str, Any], json.loads(payload_str))
+
+                    # Coerce and apply to valves
+                    applied: Dict[str, Any] = {}
+                    for k, v in overrides.items():
+                        if not hasattr(self.valves, k):
+                            continue
+                        try:
+                            setattr(self.valves, k, v)
+                            applied[k] = v
+                        except Exception:
+                            logger.warning(f"Failed to set valve {k} -> {v}")
+
+                    # Persist if requested
+                    save_flag = bool(overrides.get("save_to_backend", False))
+                    saved_path = None
+                    if save_flag:
+                        try:
+                            saved_path = self._save_config(applied)
+                        except Exception:
+                            pass
+
+                    msg_lines = ["Applied settings:"] + [f"- {k}: {v}" for k, v in applied.items()]
+                    if save_flag:
+                        msg_lines.append(f"Saved to: {saved_path or '(failed to save)'}")
+                    await self.__event_emitter__({"type": "message", "data": {"content": "\n".join(msg_lines)}})
+                    await self.emit_status(self.__event_emitter__, "success", "Setup updated", done=True)
+                except Exception as e:
+                    await self.emit_status(self.__event_emitter__, "error", f"Failed to parse/save setup: {e}", done=True)
+                return body
+
+            # Plain /setup -> interactive inputs if available; otherwise fallback to single input helper
+            await self._emit_current_values(self.__event_emitter__)
+            await self._interactive_setup()
+            return body
         messages = body.get("messages", [])
         prompt, base64_image, ksampler_options = self.setup_inputs(messages)
         prompt = prompt or ""
