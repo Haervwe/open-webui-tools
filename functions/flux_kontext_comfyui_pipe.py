@@ -31,7 +31,7 @@ import uuid
 import aiohttp
 import asyncio
 import random
-from typing import List, Dict, Callable, Optional, Union, Any, cast, Awaitable
+from typing import Dict, Callable, Optional, Union, Any, cast, Awaitable
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import get_last_user_message_item  # type: ignore
 from open_webui.utils.chat import generate_chat_completion  # type: ignore
@@ -356,7 +356,7 @@ class Pipe:
             raise
 
     def setup_inputs(
-        self, messages: List[Dict[str, str]]
+        self, messages: list[Dict[str, str]]
     ) -> tuple[
         Optional[str], Optional[str], Dict[str, Optional[Union[int, float, str]]]
     ]:
@@ -395,7 +395,7 @@ class Pipe:
 
         image_url: Optional[str] = None
         if isinstance(content, list):
-            for item in cast(List[Dict[str, Any]], content):
+            for item in cast(list[Dict[str, Any]], content):
                 if item.get("type") == "text":
                     prompt += cast(str, item.get("text", ""))
                 elif item.get("type") == "image_url" and item.get("image_url", {}).get(
@@ -445,7 +445,7 @@ class Pipe:
         event_emitter: Callable[..., Any],
     ) -> str:
         try:
-            await self.emit_status(event_emitter, "info", "Enhancing the prompt...")
+            # Suppress intermediate info emission to avoid UI clutter
 
             payload: Dict[str, Any] = {
                 "model": self.valves.VISION_MODEL_ID,
@@ -477,7 +477,7 @@ class Pipe:
             resp_data: Dict[str, Any] = cast(
                 Dict[str, Any], await generate_chat_completion(request, payload, user)
             )
-            await self.emit_status(event_emitter, "info", "Prompt enhanced")
+            # Suppress intermediate info emission to avoid UI clutter
             enhanced_prompt: str = str(resp_data["choices"][0]["message"]["content"])
             enhanced_prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
             await event_emitter(
@@ -585,22 +585,9 @@ class Pipe:
                     message = json.loads(msg.data)
                     msg_type, data = message.get("type"), message.get("data", {})
 
-                    if msg_type == "status":
-                        q_remaining = (
-                            data.get("status", {})
-                            .get("exec_info", {})
-                            .get("queue_remaining", 0)
-                        )
-                        await self.emit_status(
-                            event_emitter,
-                            "info",
-                            f"In queue... {q_remaining} tasks remaining.",
-                        )
-                    elif msg_type == "progress":
-                        progress = int(data.get("value", 0) / data.get("max", 1) * 100)
-                        await self.emit_status(
-                            event_emitter, "info", f"Processing... {progress}%"
-                        )
+                    if msg_type in {"status", "progress"}:
+                        # Silence noisy progress/status updates to avoid UI clutter
+                        continue
                     elif msg_type == "executed" and data.get("prompt_id") == prompt_id:
                         logger.info(f"Execution signal received: {data}")
                         return True
@@ -909,7 +896,7 @@ class Pipe:
         except Exception:
             return False
 
-    def _extract_last_user_text(self, messages: List[Dict[str, Any]]) -> Optional[str]:
+    def _extract_last_user_text(self, messages: list[Dict[str, Any]]) -> Optional[str]:
         for msg in reversed(messages or []):
             if msg.get("role") == "user":
                 content = msg.get("content")
@@ -917,8 +904,8 @@ class Pipe:
                     return content
                 if isinstance(content, list):
                     # Concatenate text items
-                    texts: List[str] = []
-                    for item in cast(List[Dict[str, Any]], content):
+                    texts: list[str] = []
+                    for item in cast(list[Dict[str, Any]], content):
                         if item.get("type") == "text":
                             t_val: Any = item.get("text")
                             if isinstance(t_val, str):
@@ -1082,7 +1069,7 @@ class Pipe:
                 await self.emit_status(
                     self.__event_emitter__,
                     "info",
-                    "Workflow queued. Waiting for completion signal...",
+                    "🖼️ Generating image...",
                 )
                 job_done = await self.wait_for_job_signal(
                     ws_api_url, prompt_id, self.__event_emitter__
@@ -1126,11 +1113,7 @@ class Pipe:
 
                 if image_to_display:
                     internal_image_url = f"{http_api_url}/view?filename={image_to_display['filename']}&subfolder={image_to_display.get('subfolder', '')}&type={image_to_display.get('type', 'output')}"
-                    await self.emit_status(
-                        self.__event_emitter__,
-                        "info",
-                        "Downloading generated image...",
-                    )
+                    # Suppress intermediate download status
 
                     async with session.get(internal_image_url) as http_response:
                         http_response.raise_for_status()
@@ -1139,9 +1122,7 @@ class Pipe:
                             "content-type", "image/png"
                         )
 
-                    await self.emit_status(
-                        self.__event_emitter__, "info", "Embedding image into chat..."
-                    )
+                    # Suppress intermediate embedding status
 
                     public_image_url = self._save_image_and_get_public_url(
                         request=self.__request__,
@@ -1190,7 +1171,7 @@ class Pipe:
         return body
 
 
-def get_loaded_models(api_url: str = "http://localhost:11434") -> List[Dict[str, Any]]:
+def get_loaded_models(api_url: str = "http://localhost:11434") -> list[Dict[str, Any]]:
     try:
         response = requests.get(f"{api_url.rstrip('/')}/api/ps", timeout=5)
         response.raise_for_status()

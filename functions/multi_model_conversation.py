@@ -3,12 +3,13 @@ title: Multi Model Conversations
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.8.1
+version: 0.9.2
 """
 
 import logging
 import json
 import asyncio
+import re
 from typing import Dict, List, Callable, Awaitable, Union
 from pydantic import BaseModel, Field
 from dataclasses import dataclass
@@ -35,6 +36,99 @@ def setup_logger():
 
 
 logger = setup_logger()
+
+
+def extract_and_format_thinking(message: str) -> tuple[str, str]:
+    """
+    Extract thinking tags and format them as collapsible details.
+    Returns (thinking_details, cleaned_message)
+    Only processes complete, properly paired thinking tags.
+    """
+    thinking_details = ""
+    cleaned_message = message
+    
+    # Pattern to match complete thinking blocks with proper open/close pairs
+    complete_pattern = re.compile(
+        r"<(think|thinking|reason|reasoning|thought)>(.*?)</\1>",
+        re.DOTALL | re.IGNORECASE
+    )
+    
+    matches = complete_pattern.findall(message)
+    if matches:
+        # Combine all thinking content
+        thinking_content = "\n\n".join(match[1].strip() for match in matches)
+        
+        # Format as collapsible details block
+        thinking_details = (
+            f'<details type="reasoning" open="true">\n'
+            f"<summary>Thinking…</summary>\n"
+            f"{thinking_content}\n"
+            "</details>\n\n"
+        )
+        
+        # Remove complete thinking tags from message
+        cleaned_message = complete_pattern.sub("", message).strip()
+    
+    # Also handle pipe-style tags
+    pipe_pattern = re.compile(
+        r"\|begin_of_thought\|(.*?)\|end_of_thought\|",
+        re.DOTALL
+    )
+    
+    pipe_matches = pipe_pattern.findall(cleaned_message)
+    if pipe_matches:
+        if not thinking_details:
+            thinking_content = "\n\n".join(match.strip() for match in pipe_matches)
+            thinking_details = (
+                f'<details type="reasoning" open="true">\n'
+                f"<summary>Thinking…</summary>\n"
+                f"{thinking_content}\n"
+                "</details>\n\n"
+            )
+        cleaned_message = pipe_pattern.sub("", cleaned_message).strip()
+    
+    return thinking_details, cleaned_message
+
+
+def clean_thinking_tags(message: str) -> str:
+    """
+    Remove thinking tags and their content from model responses to prevent them from breaking conversation flow.
+    This is used for conversation history (not for display).
+    It uses a multi-pass approach to handle well-formed and orphaned tags.
+    """
+    
+    complete_pattern = re.compile(
+        r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>"
+        r"|"
+        r"\|begin_of_thought\|.*?\|end_of_thought\|",
+        re.DOTALL | re.IGNORECASE,
+    )
+    cleaned = re.sub(complete_pattern, "", message)
+
+    orphan_close_pattern = re.compile(
+        r"</(?:think|thinking|reason|reasoning|thought|Thought)>"
+        r"|"
+        r"\|end_of_thought\|",
+        re.IGNORECASE
+    )
+    
+    # Find all matches and get the end position of the last one
+    last_match_end = -1
+    for match in orphan_close_pattern.finditer(cleaned):
+        last_match_end = match.end()
+
+    if last_match_end != -1:
+        cleaned = cleaned[last_match_end:]
+
+    orphan_open_pattern = re.compile(
+        r"<(?:think|thinking|reason|reasoning|thought|Thought)>"
+        r"|"
+        r"\|begin_of_thought\|",
+        re.IGNORECASE
+    )
+    cleaned = re.sub(orphan_open_pattern, "", cleaned)
+    
+    return cleaned.strip()
 
 
 class Pipe:
@@ -216,7 +310,14 @@ class Pipe:
         valves = __user__.get("valves", self.UserValves())
         
         # Use conversation history from the body directly
-        conversation_history = body.get("messages", [])
+        # Clean thinking tags from incoming history as well
+        raw_history = body.get("messages", [])
+        conversation_history = []
+        for msg in raw_history:
+            cleaned_msg = msg.copy()
+            if "content" in cleaned_msg:
+                cleaned_msg["content"] = clean_thinking_tags(cleaned_msg["content"])
+            conversation_history.append(cleaned_msg)
         
         if not conversation_history:
             return "Error: No message history found."
@@ -316,39 +417,94 @@ class Pipe:
                 model = participant["model"]
                 alias = participant["alias"]
                 
-                # FIX - Combine character sheet and appended message into one system prompt.
-                # This creates a cleaner, more compliant message history for the model.
+                logger.debug(f"=== Starting turn for {alias} (round {round_num + 1}) ===")
+                logger.debug(f"Conversation history length: {len(conversation_history)}")
+                
+
                 system_prompt = f"{participant['system_message']}\n\n{valves.AllParticipantsApendedMessage} {alias}"
 
-                # FIX - Construct the message list cleanly.
-                # No more artificial 'user' message at the end.
                 messages = [
                     {"role": "system", "content": system_prompt},
                     *conversation_history,
                 ]
+                
+                logger.debug(f"[{alias}] System prompt: {system_prompt[:200]}...")
+                logger.debug(f"[{alias}] Sending {len(messages)} messages to model")
+                for i, msg in enumerate(messages[-3:]):  # Log last 3 messages
+                    logger.debug(f"[{alias}] Message {i}: role={msg['role']}, content={msg.get('content', '')[:200]}...")
 
                 await self.emit_status(
                     "info", f"Getting response from: {alias} ({model})...", False
                 )
                 try:
                     await self.emit_model_title(alias)
+                    
                     full_response = ""
+                    buffer = ""
+                    is_buffering = True
+                    has_processed_buffer = False
+                    
+
+                    start_thought_pattern = re.compile(
+                        r"^\s*<(think|thinking|reason|reasoning|thought|Thought)>(.*?)<\/\1>", 
+                        re.DOTALL | re.IGNORECASE
+                    )
+
                     async for chunk in self.get_streaming_completion(
                         messages, model=model, valves=valves
                     ):
                         full_response += chunk
-                        await self.emit_message(chunk)
+                        
+                        if is_buffering:
+                            buffer += chunk
+                            match = start_thought_pattern.search(buffer)
+                            if match:
+                                thinking_content = match.group(2).strip()
+                                thinking_details = (
+                                    f'<details type="reasoning" open="true">\n'
+                                    f"<summary>Thinking…</summary>\n"
+                                    f"{thinking_content}\n"
+                                    "</details>\n\n"
+                                )
+                                await self.emit_message(thinking_details)
+                                
+                                remaining_buffer = buffer[match.end():]
+                                if remaining_buffer:
+                                    await self.emit_message(remaining_buffer)
+                                
+                                is_buffering = False
+                                has_processed_buffer = True
 
-                    cleaned_response = full_response.strip()
+                            elif len(buffer) > 2500:
+                                await self.emit_message(buffer)
+                                is_buffering = False
+                                has_processed_buffer = True
+                        else:
+
+                            await self.emit_message(chunk)
+
+
+                    if is_buffering and not has_processed_buffer:
+                        await self.emit_message(buffer)
+
+                    logger.debug(f"[{alias}] Full response length: {len(full_response)}")
+                    logger.debug(f"[{alias}] Full response: {full_response[:500]}...")
+                    
+                    cleaned_response = clean_thinking_tags(full_response)
+                    
+                    logger.debug(f"[{alias}] Cleaned response: {cleaned_response[:300]}...")
+                    
                     conversation_history.append(
-                        {"role": "assistant", "content": cleaned_response}
+                        {"role": "assistant", "content": cleaned_response.strip()}
                     )
-                    logger.debug(f"History updated with response from {alias}")
+                    logger.debug(f"[{alias}] Added to history. New length: {len(conversation_history)}")
+                    logger.debug(f"[{alias}] Last history entry: {conversation_history[-1]['content'][:200]}...")
 
                 except Exception as e:
-                    error_message = f"Error getting response from {model}: {e}"
+                    error_message = f"Error getting response from {alias} ({model}): {e}"
                     await self.emit_status("error", error_message, True)
-                    logger.error(f"Error with {model}: {e}", exc_info=True)
+                    await self.emit_message(f"\n\n**ERROR**: {error_message}\n\n")
+                    logger.error(f"Error with {alias} ({model}): {e}", exc_info=True)
 
         await self.emit_status("success", "Conversation round completed.", True)
         return ""
