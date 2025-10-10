@@ -1069,7 +1069,7 @@ class Pipe:
                 await self.emit_status(
                     self.__event_emitter__,
                     "info",
-                    "🖼️ Generating image...",
+                    "⏳ Generating image...",
                 )
                 job_done = await self.wait_for_job_signal(
                     ws_api_url, prompt_id, self.__event_emitter__
