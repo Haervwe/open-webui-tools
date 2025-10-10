@@ -235,7 +235,7 @@ class Pipe:
 
         AUTO_CHECK_MODEL_LOADER: bool = Field(
             title="Auto Check Model Loader",
-            default=False,
+            default=True,
             description="Automatically check model loader. Enable if you are not sure about the model loader.",
         )
 
