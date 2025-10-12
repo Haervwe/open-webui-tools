@@ -411,76 +411,74 @@ Generate music using the ACE Step AI model via ComfyUI. This tool lets you creat
 
 ### Description
 
-A pipe that connects Open WebUI to the **Flux Kontext** image-to-image editing model through ComfyUI. This integration allows for advanced image editing, style transfers, and other creative transformations using the Flux Kontext workflow.
+A pipe that connects Open WebUI to the **Flux Kontext** image-to-image editing model through ComfyUI. This integration allows for advanced image editing, style transfers, and other creative transformations using the Flux Kontext workflow. Features an interactive `/setup` command system for easy configuration by administrators.
 
 ### Configuration
 
-| Parameter               | Type  | Description                                                  | Default                                |
-| ----------------------- | ----- | ------------------------------------------------------------ | -------------------------------------- |
-| COMFYUI_ADDRESS         | str   | Address of the running ComfyUI server.                       | `http://127.0.0.1:8188`                |
-| COMFYUI_WORKFLOW_JSON   | str   | The entire ComfyUI workflow in JSON format.                  | Default workflow JSON                  |
-| PROMPT_NODE_ID          | str   | The ID of the node that accepts the text prompt.             | `"6"`                                  |
-| IMAGE_NODE_ID           | str   | The ID of the node that accepts the Base64 image.            | `"196"`                                |
-| KSAMPLER_NODE_ID        | str   | The ID of the sampler node to apply inline parameters.       | `"194"`                                |
-| ENHANCE_PROMPT          | bool  | Use a vision model to enhance prompts based on the input image. | `False`                                |
-| VISION_MODEL_ID         | str   | Vision model to use for prompt enhancement.                  | `""`                                   |
-| ENHANCER_SYSTEM_PROMPT  | str   | System prompt guiding the vision model when enhancing prompts. | Detailed instructions included in code |
-| UNLOAD_OLLAMA_MODELS    | bool  | Unload all Ollama models from VRAM before running.           | `False`                                |
-| OLLAMA_URL              | str   | Ollama API URL for unloading models.                         | `http://host.docker.internal:11434`    |
-| MAX_WAIT_TIME           | int   | Maximum wait time for generation (in seconds).               | `1200`                                 |
-| AUTO_CHECK_MODEL_LOADER | bool  | Automatically detects model loader type for your checkpoint (.safetensors or .gguf). | `False`                                |
-| REG_EX                  | bool  | Enable inline KSampler parameter extraction from prompt using RegEx. | `False`                                |
-| KSAMPLER_MIN_STEPS      | int   | Minimum number of steps for KSampler when inline parameters are used. | `5`                                    |
-| KSAMPLER_MAX_STEPS      | int   | Maximum number of steps for KSampler when inline parameters are used. | `60`                                   |
-| KSAMPLER_MIN_CFG        | float | Minimum CFG value for KSampler when inline parameters are used. | `0.0`                                  |
-| KSAMPLER_MAX_CFG        | float | Maximum CFG value for KSampler when inline parameters are used. | `15.0`                                 |
-| KSAMPLER_MIN_DENOISE    | float | Minimum denoise value for KSampler when inline parameters are used. | `0.0`                                  |
-| KSAMPLER_MAX_DENOISE    | float | Maximum denoise value for KSampler when inline parameters are used. | `1.0`                                  |
+The pipe includes an interactive setup system that allows administrators to configure all settings through chat commands. Most configuration can be done using the `/setup` command, which provides an interactive form for easy adjustment of parameters.
+
+**Key Configuration Options:**
+
+- **COMFYUI_ADDRESS**: Address of the running ComfyUI server (default: `http://127.0.0.1:8188`)
+- **COMFYUI_WORKFLOW_JSON**: The entire ComfyUI workflow in JSON format
+- **PROMPT_NODE_ID**: Node ID for text prompt input (default: `"6"`)
+- **IMAGE_NODE_ID**: Node ID for Base64 image input (default: `"196"`)
+- **KSAMPLER_NODE_ID**: Node ID for the sampler node (default: `"194"`)
+- **ENHANCE_PROMPT**: Enable vision model-based prompt enhancement (default: `False`)
+- **VISION_MODEL_ID**: Vision model to use for prompt enhancement
+- **UNLOAD_OLLAMA_MODELS**: Free RAM by unloading Ollama models before generation (default: `False`)
+- **MAX_WAIT_TIME**: Maximum wait time for generation in seconds (default: `1200`)
+- **AUTO_CHECK_MODEL_LOADER**: Auto-detect model loader type for .safetensors or .gguf (default: `False`)
 
 ### Usage
 
+#### Initial Setup
+
 1. **Import the workflow:**
-    In ComfyUI, import `extras/flux_context_owui_api_v1.json` as a workflow. Adjust node IDs if you modify the workflow.
+   - In ComfyUI, import `extras/flux_context_owui_api_v1.json` as a workflow
+   - Adjust node IDs if you modify the workflow
 
-2. **Configure the pipe in Open WebUI:**
+2. **Configure using /setup command (Admin only):**
+   - Type `/setup` in the chat to launch the interactive configuration form
+   - The form will display all current settings with input fields
+   - Adjust any settings you need to change
+   - Submit the form to apply and optionally save the configuration
+   - Settings can be persisted to a backend config file for permanent storage
 
-   - Set `COMFYUI_ADDRESS` to your ComfyUI backend.
-   - Paste the workflow JSON into `COMFYUI_WORKFLOW_JSON`.
-   - Set the correct node IDs for prompt (`PROMPT_NODE_ID`), image (`IMAGE_NODE_ID`), and sampler (`KSAMPLER_NODE_ID`).
-   - Optional: Enable `ENHANCE_PROMPT` and specify a `VISION_MODEL_ID` to automatically refine prompts using a vision-language model.
+3. **Alternative: Manual configuration:**
+   - Access the pipe's Valves in Open WebUI's admin panel
+   - Set `COMFYUI_ADDRESS` to your ComfyUI backend
+   - Paste the workflow JSON into `COMFYUI_WORKFLOW_JSON`
+   - Configure node IDs and other parameters as needed
 
-3. **Using inline KSampler parameters:**
-    You can define sampler settings directly in your prompt using the following syntax:
+#### Using the Pipe
 
-   ```
-   {seed=1234, steps=20, cfg=1.7, sampler_name=euler, scheduler=simple, denoise=0.8}
-   ```
+1. **Basic image editing:**
+   - Upload an image to the chat
+   - Provide a text prompt describing the desired changes
+   - The pipe processes the image through ComfyUI and returns the edited result
 
-   This allows dynamic adjustment of seed, steps, CFG, sampler type, scheduler, and denoise without changing the workflow configuration. Make sure `REG_EX` is enabled to extract these parameters.
+2. **Enhanced prompts (optional):**
+   - Enable `ENHANCE_PROMPT` in settings
+   - Set a `VISION_MODEL_ID` (e.g., a multimodal model like LLaVA or GPT-4V)
+   - The vision model will analyze the input image and automatically refine your prompt for better results
 
-4. **Editing images:**
+3. **Memory management:**
+   - Enable `UNLOAD_OLLAMA_MODELS` to free RAM before generation
+   - The default workflow includes a `Clean VRAM` node for VRAM management in ComfyUI
 
-   - Provide a text prompt and an input image.
-   - The pipe will automatically validate KSampler steps, CFG, and denoise values to prevent invalid or overloaded settings.
-   - If `ENHANCE_PROMPT` is enabled, the vision model analyzes the input image and refines the prompt for better results.
-   - RAM can be managed by enabling `UNLOAD_OLLAMA_MODELS` to free memory before generation.
-   - VRAM can be managed with the `Clean VRAM` node in ComfyUI. The default workflow includes it by default.
-
-
-**Example 1 - Basic edit:**
+**Example - Image editing:**
 
 ```
 Prompt: "Edit this image to look like a medieval fantasy king, preserving facial features."
+[Upload image]
 ```
+
+![Flux Kontext Setup](img/flux_kontext_setup.png)
+*Example of Flux Kontext /setup command interface*
+
 ![Flux Kontext Example](img/flux_kontext_without_parameters.png)
-
-**Example 2 - Using inline KSampler parameters:**
-
-```
-Prompt: "Colorize this black-and-white photo of Albert Einstein, keeping his facial features realistic and natural. Add a stylish pair of glasses on his face, ensuring they fit proportionally and complement his expression. Preserve the original lighting, texture, and details of the image. {seed=3141879, steps=30}"
-```
-
-![Flux Kontext Example](img/flux_kontext_with_parameters.png)
+*Example of Flux Kontext image editing output*
 
 
 ---
@@ -618,17 +616,40 @@ Search arXiv.org for relevant academic papers and iteratively refine a research 
 
 ### Description
 
-Simulate conversations between multiple language models, each acting as a distinct character. Configure up to 5 participants.
+Simulate conversations between multiple language models, each acting as a distinct character. Configure up to 5 participants with unique personas, models, and behaviors. This pipe enables engaging multi-agent discussions, debates, and collaborative problem-solving scenarios.
 
 ### Configuration
 
+This pipe features **User Valves** - configurable settings that are unique per user and can be customized for each individual chat session. This means each user can have their own conversation setups, and different chats can have different participant configurations.
+
+**Core Settings:**
+
 - `number_of_participants`: Set the number of participants (1-5)
 - `rounds_per_user_message`: How many rounds of replies before the user can send another message
-- `participant_[1-5]_model`: Model for each participant
-- `participant_[1-5]_alias`: Display name for each participant
+
+**Per-Participant Configuration (for each of the 5 participants):**
+
+- `participant_[1-5]_model`: Model for each participant (e.g., qwen3:14b, gpt-4, claude-3)
+- `participant_[1-5]_alias`: Display name for each participant (e.g., "Optimist", "Skeptic")
 - `participant_[1-5]_system_message`: Persona and instructions for each participant
 - `all_participants_appended_message`: Global instruction appended to each prompt
-- `temperature`, `top_k`, `top_p`: Standard model parameters
+
+**Model Parameters:**
+
+- `temperature`, `top_k`, `top_p`: Standard model parameters for generation control
+
+### Accessing User Valves
+
+To configure the conversation participants and settings:
+
+1. **In the new chat interface:** Click the settings icon (gear icon) in the chat input area
+2. A "Valves" panel will open showing all configurable parameters
+3. Adjust the number of participants, models, aliases, and system messages
+4. Each chat can have its own unique configuration
+5. Settings are saved per-chat, allowing you to maintain different conversation setups
+
+![Multi Model Conversation Valves](img/conversations.png)
+*Example of Multi Model Conversations User Valves configuration panel*
 
 ### Usage
 
@@ -638,8 +659,13 @@ Simulate conversations between multiple language models, each acting as a distin
   Start a conversation between three AI agents about climate change.
   ```
 
-![Multi Model Conversation Example](img/conversations.png)
-*Example of Multi Model Conversations Pipe*
+**Use Cases:**
+
+- **Debates:** Set up opposing viewpoints (optimist vs. skeptic)
+- **Brainstorming:** Multiple creative perspectives on a problem
+- **Role-playing:** Interactive storytelling with multiple characters
+- **Analysis:** Different analytical approaches to the same topic
+- **Expert Panels:** Simulate domain experts discussing a complex issue
 
 ---
 
@@ -678,16 +704,15 @@ Analyze this resume:
 
 ### Description
 
-Control your Mopidy music server to play songs from the local library or YouTube, manage playlists, and handle various music commands.
+Control your Mopidy music server to play songs from the local library or YouTube, manage playlists, and handle various music commands. This pipe provides an intuitive interface for music playback, search, and playlist management through natural language commands.
 
 ### Configuration
 
 - `model`: The model ID from your LLM provider
 - `mopidy_url`: URL for the Mopidy JSON-RPC API endpoint (default: `http://localhost:6680/mopidy/rpc`)
-- `youtube_api_key`: YouTube Data API key for search
+- `youtube_api_key`: YouTube Data API key for search functionality
 - `temperature`: Model temperature (default: 0.7)
 - `max_search_results`: Maximum number of search results to return (default: 5)
-- `use_iris`: Toggle to use Iris interface or custom HTML UI (default: True)
 - `system_prompt`: System prompt for request analysis
 
 ### Usage
@@ -698,10 +723,18 @@ Control your Mopidy music server to play songs from the local library or YouTube
   Play the song "Imagine" by John Lennon
   ```
 
-- Quick text commands: stop, halt, play, start, resume, continue, next, skip, pause
+- **Quick text commands:** stop, halt, play, start, resume, continue, next, skip, pause
 
-![Mopidy Example](img/Mopidy.png)
-*Example of Mopidy Music Controller Pipe*
+### Features
+
+- **Natural Language Control**: Use conversational commands to control playback
+- **YouTube Integration**: Search and play songs directly from YouTube
+- **Local Library Support**: Access and play songs from your local Mopidy library
+- **Playlist Management**: Create, modify, and manage playlists
+- **Playback Control**: Full control over playback including play, pause, skip, volume, and more
+
+![Mopidy Example](img/mopidy_new.png)
+*Example of Mopidy Music Controller Pipe in action*
 
 ---
 
