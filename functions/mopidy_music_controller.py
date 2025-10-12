@@ -323,7 +323,6 @@ class Pipe:
         rpc_url = self.valves.Mopidy_URL
         
         html = f"""<!DOCTYPE html>
-<html>
 <head>
     <title>Mopidy Player</title>
     <meta charset="UTF-8">
@@ -866,7 +865,7 @@ class Pipe:
         connectWebSocket();
     </script>
 </body>
-</html>"""
+"""
         return html
 
     async def search_youtube_with_api(
