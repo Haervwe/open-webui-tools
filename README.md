@@ -901,15 +901,27 @@ Uses an LLM to automatically improve the quality of your prompts before they are
 
 ### Description
 
-Acts as a model router. Analyzes the user's message and available models, then automatically selects the most appropriate model, pipe, or preset for the task.
+Acts as an intelligent model router that analyzes the user's message and available models, then automatically selects the most appropriate model, pipe, or preset for the task. Now with enhanced model filtering capabilities and improved error handling.
 
 ### Configuration
 
-- Configure banned models, vision model routing, and whether to show the selection reasoning in chat.
+- **banned_models**: List of model IDs to exclude from selection
+- **allowed_models**: List of model IDs to whitelist (when set, only these models will be considered) - **NEW**
+- **vision_model_routing**: Enable automatic routing to vision-capable models for image-related tasks
+- **show_reasoning**: Display the selection reasoning in chat
+- **disable_qwen_thinking**: Disable special handling for Qwen thinking models
+
+### Features
+
+- **Whitelist Support**: Use `allowed_models` to restrict selection to specific models only
+- **Enhanced Error Handling**: Improved reliability with better fallback mechanisms - **NEW**
+- **Automatic Fallback**: Gracefully handles errors by falling back to the original model
 
 ### Usage
 
-- Enable in your model configuration's filters section.
+- Enable in your model configuration's filters section
+- Configure `allowed_models` to create a whitelist of preferred models, or use `banned_models` to exclude specific ones
+- The filter will automatically analyze each message and route to the best available model
 
 ![Mopidy Example](img/semantic_router.png)
 
