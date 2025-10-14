@@ -910,7 +910,7 @@ class Pipe:
                             tracks.extend(playlist_videos)
                         else:
                             video_id = item["id"]["videoId"]
-                            uri = f"yt:https://www.youtube.com/watch?v={video_id}"
+                            uri = f"youtube:video:{video_id}"  # Use Mopidy-YouTube URI format
                             track_info = {
                                 "uri": uri,
                                 "name": snippet.get("title", ""),
@@ -1046,7 +1046,7 @@ class Pipe:
                         for item in items:
                             snippet = item.get("snippet", {})
                             video_id = snippet["resourceId"]["videoId"]
-                            uri = f"yt:https://www.youtube.com/watch?v={video_id}"
+                            uri = f"youtube:video:{video_id}"  # Use Mopidy-YouTube URI format
                             track_info = {
                                 "uri": uri,
                                 "name": snippet.get("title", ""),
@@ -1078,33 +1078,113 @@ class Pipe:
         if self.valves.Debug_Logging:
             logger.debug(f"Playing URIs: {uris}")
         try:
-            payloads = [
-                {
+            timeout = aiohttp.ClientTimeout(total=self.valves.Request_Timeout)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                clear_payload = {
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "core.tracklist.clear",
-                },
-                {
+                }
+                async with session.post(self.valves.Mopidy_URL, json=clear_payload) as response:
+                    result = await response.json()
+                    if self.valves.Debug_Logging:
+                        logger.debug(f"Response for core.tracklist.clear: {result}")
+                
+                add_payload = {
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "core.tracklist.add",
                     "params": {"uris": uris},
-                },
-                {
+                }
+                async with session.post(self.valves.Mopidy_URL, json=add_payload) as response:
+                    result = await response.json()
+                    if self.valves.Debug_Logging:
+                        logger.debug(f"Response for core.tracklist.add: {result}")
+
+                    added_tracks = result.get("result", [])
+                    if not added_tracks:
+                        logger.error("No tracks were added to tracklist - URIs may be invalid")
+                        return False
+                    if self.valves.Debug_Logging:
+                        logger.debug(f"Successfully added {len(added_tracks)} tracks to tracklist")
+
+                first_tlid = added_tracks[0]['tlid']
+                play_payload = {
                     "jsonrpc": "2.0",
                     "id": 3,
                     "method": "core.playback.play",
-                },
-            ]
-            timeout = aiohttp.ClientTimeout(total=self.valves.Request_Timeout)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                for payload in payloads:
-                    async with session.post(
-                        self.valves.Mopidy_URL, json=payload
-                    ) as response:
+                    "params": {"tlid": first_tlid},
+                }
+                play_timeout = aiohttp.ClientTimeout(total=15.0) 
+                async with aiohttp.ClientSession(timeout=play_timeout) as play_session:
+                    async with play_session.post(self.valves.Mopidy_URL, json=play_payload) as response:
                         result = await response.json()
                         if self.valves.Debug_Logging:
-                            logger.debug(f"Response for {payload['method']}: {result}")
+                            logger.debug(f"Response for core.playback.play (tlid={first_tlid}): {result}")
+                
+                await asyncio.sleep(0.5)
+                state_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "core.playback.get_state",
+                }
+                async with session.post(self.valves.Mopidy_URL, json=state_payload) as response:
+                    result = await response.json()
+                    state = result.get("result")
+                    if self.valves.Debug_Logging:
+                        logger.debug(f"Playback state after play command: {state}")
+                
+                current_track_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "core.playback.get_current_tl_track",
+                }
+                async with session.post(self.valves.Mopidy_URL, json=current_track_payload) as response:
+                    result = await response.json()
+                    current_tl_track = result.get("result")
+                    if self.valves.Debug_Logging:
+                        logger.debug(f"Current TL track: {current_tl_track}")
+                    
+                    if state != "playing":
+                        logger.warning(f"Playback did not start - state is '{state}' instead of 'playing'")
+                        if current_tl_track:
+                            logger.info(f"Current track according to Mopidy: {current_tl_track}")
+                        logger.info("First track may be unavailable, attempting to skip to next track...")
+                        
+                        for attempt in range(3):
+                            skip_payload = {
+                                "jsonrpc": "2.0",
+                                "id": 6 + attempt,
+                                "method": "core.playback.next",
+                            }
+                            async with session.post(self.valves.Mopidy_URL, json=skip_payload) as response:
+                                skip_result = await response.json()
+                                if self.valves.Debug_Logging:
+                                    logger.debug(f"Skip command result: {skip_result}")
+                            
+                            await asyncio.sleep(1.0)
+                            
+                            async with session.post(self.valves.Mopidy_URL, json=current_track_payload) as response:
+                                result = await response.json()
+                                current_tl_track = result.get("result")
+                                if self.valves.Debug_Logging:
+                                    logger.debug(f"Current TL track after skip {attempt + 1}: {current_tl_track}")
+                            
+                            async with session.post(self.valves.Mopidy_URL, json=state_payload) as response:
+                                result = await response.json()
+                                state = result.get("result")
+                                if self.valves.Debug_Logging:
+                                    logger.debug(f"Playback state after skip attempt {attempt + 1}: {state}")
+                                
+                                if state == "playing":
+                                    logger.info(f"Successfully started playback on track {attempt + 2}")
+                                    return True
+                        
+                        logger.error(f"Playback failed to start after trying {3} tracks - all may be unavailable")
+                        logger.error("This may be due to: YouTube videos being geo-restricted, age-restricted, or unavailable")
+                        logger.error("Check Mopidy logs for more details: sudo journalctl -u mopidy -f")
+                        return False
+            
             return True
         except asyncio.TimeoutError:
             logger.error(f"Timeout playing URIs after {self.valves.Request_Timeout}s")
