@@ -349,26 +349,27 @@ class Pipe:
             border-radius: 20px;
             padding: 30px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
-            max-width: 400px;
+            max-width: 420px;
             width: 100%;
             border: 1px solid #3a3a3a;
         }}
         
         .album-art {{
             width: 100%;
-            height: 300px;
-            background: #1a1a1a;
+            aspect-ratio: 1;
+            background: linear-gradient(135deg, #1a1a1a 0%, #252525 100%);
             border-radius: 15px;
             display: flex;
             align-items: center;
             justify-content: center;
             font-size: 80px;
-            margin-bottom: 20px;
+            margin-bottom: 25px;
             position: relative;
             overflow: hidden;
             background-size: cover;
             background-position: center;
             border: 1px solid #3a3a3a;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
         }}
         
         .album-art-placeholder {{
@@ -402,16 +403,18 @@ class Pipe:
         .track-info {{
             text-align: center;
             margin-bottom: 25px;
+            padding: 0 10px;
         }}
         
         .track-name {{
-            font-size: 20px;
-            font-weight: 600;
+            font-size: 22px;
+            font-weight: 700;
             color: #ffffff;
             margin-bottom: 8px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            line-height: 1.3;
         }}
         
         .track-artist {{
@@ -420,19 +423,21 @@ class Pipe:
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            line-height: 1.4;
         }}
         
         .track-album {{
             font-size: 14px;
             color: #808080;
-            margin-top: 4px;
+            margin-top: 5px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            line-height: 1.4;
         }}
         
         .progress-container {{
-            margin-bottom: 25px;
+            margin-bottom: 28px;
         }}
         
         .progress-bar {{
@@ -442,77 +447,106 @@ class Pipe:
             border-radius: 3px;
             cursor: pointer;
             position: relative;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+        }}
+        
+        .progress-bar:hover {{
+            height: 8px;
+            transition: height 0.2s ease;
         }}
         
         .progress-fill {{
             height: 100%;
-            background: linear-gradient(90deg, #555 0%, #888 100%);
+            background: linear-gradient(90deg, #5a5a5a 0%, #8a8a8a 100%);
             border-radius: 3px;
             width: 0%;
             transition: width 0.1s linear;
+            box-shadow: 0 0 8px rgba(138, 138, 138, 0.4);
         }}
         
         .time-info {{
             display: flex;
             justify-content: space-between;
-            font-size: 12px;
-            color: #808080;
+            font-size: 13px;
+            color: #999;
+            font-weight: 500;
         }}
         
         .controls {{
             display: flex;
             justify-content: center;
             align-items: center;
-            gap: 15px;
-            margin-bottom: 20px;
+            gap: 20px;
+            margin-bottom: 25px;
         }}
         
         .control-btn {{
-            background: none;
-            border: none;
-            font-size: 24px;
+            background: #333;
+            border: 1px solid #444;
+            font-size: 22px;
             cursor: pointer;
-            padding: 10px;
+            padding: 0;
             border-radius: 50%;
-            transition: all 0.3s;
-            color: #b0b0b0;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            color: #bbb;
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 50px;
-            height: 50px;
+            width: 52px;
+            height: 52px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            line-height: 1;
+            font-family: Arial, sans-serif;
         }}
         
         .control-btn:hover {{
-            background: #3a3a3a;
+            background: #3e3e3e;
             color: #ffffff;
             transform: scale(1.1);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+            border-color: #555;
+        }}
+        
+        .control-btn:active {{
+            transform: scale(0.95);
         }}
         
         .control-btn.play-pause {{
-            background: linear-gradient(135deg, #444 0%, #666 100%);
+            background: linear-gradient(135deg, #4a4a4a 0%, #6a6a6a 100%);
             color: white;
-            font-size: 30px;
-            width: 60px;
-            height: 60px;
+            font-size: 26px;
+            width: 68px;
+            height: 68px;
+            border: 2px solid #555;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+            line-height: 1;
         }}
         
         .control-btn.play-pause:hover {{
-            background: linear-gradient(135deg, #555 0%, #777 100%);
-            transform: scale(1.15);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+            background: linear-gradient(135deg, #5a5a5a 0%, #7a7a7a 100%);
+            transform: scale(1.12);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+            border-color: #666;
+        }}
+        
+        .control-btn.play-pause:active {{
+            transform: scale(1.02);
         }}
         
         .volume-container {{
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 12px;
+            margin-bottom: 15px;
+            padding: 0 5px;
         }}
         
         .volume-icon {{
-            font-size: 20px;
+            font-size: 22px;
             color: #b0b0b0;
+            min-width: 24px;
+            text-align: center;
         }}
         
         .volume-slider {{
@@ -522,41 +556,66 @@ class Pipe:
             background: #1a1a1a;
             border-radius: 3px;
             outline: none;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+        }}
+        
+        .volume-slider:hover {{
+            background: #222;
         }}
         
         .volume-slider::-webkit-slider-thumb {{
             -webkit-appearance: none;
-            width: 16px;
-            height: 16px;
-            background: linear-gradient(135deg, #555 0%, #888 100%);
+            width: 18px;
+            height: 18px;
+            background: linear-gradient(135deg, #5a5a5a 0%, #8a8a8a 100%);
             border-radius: 50%;
             cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+            transition: all 0.2s ease;
+        }}
+        
+        .volume-slider::-webkit-slider-thumb:hover {{
+            transform: scale(1.2);
+            background: linear-gradient(135deg, #6a6a6a 0%, #9a9a9a 100%);
         }}
         
         .volume-slider::-moz-range-thumb {{
-            width: 16px;
-            height: 16px;
-            background: linear-gradient(135deg, #555 0%, #888 100%);
+            width: 18px;
+            height: 18px;
+            background: linear-gradient(135deg, #5a5a5a 0%, #8a8a8a 100%);
             border-radius: 50%;
             cursor: pointer;
             border: none;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+            transition: all 0.2s ease;
+        }}
+        
+        .volume-slider::-moz-range-thumb:hover {{
+            transform: scale(1.2);
+            background: linear-gradient(135deg, #6a6a6a 0%, #9a9a9a 100%);
         }}
         
         .status {{
             text-align: center;
-            font-size: 12px;
-            color: #808080;
-            padding: 8px;
+            font-size: 13px;
+            color: #888;
+            padding: 10px;
             background: #1a1a1a;
-            border-radius: 8px;
+            border-radius: 10px;
+            font-weight: 500;
+            border: 1px solid #333;
         }}
         
         .status.connected {{
             color: #90ee90;
+            background: rgba(144, 238, 144, 0.1);
+            border-color: rgba(144, 238, 144, 0.3);
         }}
         
         .status.error {{
             color: #ff6b6b;
+            background: rgba(255, 107, 107, 0.1);
+            border-color: rgba(255, 107, 107, 0.3);
         }}
     </style>
 </head>
@@ -1314,23 +1373,22 @@ class Pipe:
             )
             tracks = await self.search_local(query)
             if tracks:
-                play_success = await self.play_uris(tracks)
-                if play_success:
-                    track_names = ", ".join(
-                        [f"{t['name']} by {t['artists'][0]}" for t in tracks[:3]]
-                    )
-                    await self.emit_message(
-                        f"Now playing from local library: {track_names}..."
-                    )
-                    html_code = await self.generate_player_html()
-                    html_code_block = (
-                        f"""\n ```html \n{html_code}""" if html_code else ""
-                    )
-                    await self.emit_message(html_code_block)
-                    await self.emit_status("success", "Playback started", True)
-                else:
-                    await self.emit_message("Failed to start playback.")
-                    await self.emit_status("error", "Playback failed", True)
+                await self.play_uris(tracks)
+
+                await asyncio.sleep(0.5)
+
+                track_names = ", ".join(
+                    [f"{t['name']} by {t['artists'][0]}" for t in tracks[:3]]
+                )
+                await self.emit_message(
+                    f"Playing from local library: {track_names}..."
+                )
+                html_code = await self.generate_player_html()
+                html_code_block = (
+                    f"""\n ```html \n{html_code}""" if html_code else ""
+                )
+                await self.emit_message(html_code_block)
+                await self.emit_status("success", "Playback started", True)
                 return
 
             await self.emit_status(
@@ -1339,20 +1397,17 @@ class Pipe:
             tracks = await self.search_youtube(query)
             if tracks:
                 track = tracks[0]
-                play_success = await self.play_uris([track])
-                if play_success:
-                    await self.emit_message(
-                        f"Now playing '{track['name']}' by {track['artists'][0]} from YouTube."
-                    )
-                    html_code = await self.generate_player_html()
-                    html_code_block = (
-                        f"""\n ```html \n{html_code}""" if html_code else ""
-                    )
-                    await self.emit_message(html_code_block)
-                    await self.emit_status("success", "Playback started", True)
-                else:
-                    await self.emit_message("Failed to start playback.")
-                    await self.emit_status("error", "Playback failed", True)
+                await self.play_uris([track])
+                await asyncio.sleep(0.5)
+                await self.emit_message(
+                    f"Playing '{track['name']}' by {track['artists'][0]} from YouTube."
+                )
+                html_code = await self.generate_player_html()
+                html_code_block = (
+                    f"""\n ```html \n{html_code}""" if html_code else ""
+                )
+                await self.emit_message(html_code_block)
+                await self.emit_status("success", "Playback started", True)
                 return
             else:
                 await self.emit_message(
