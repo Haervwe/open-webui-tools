@@ -8,7 +8,7 @@ author_url: https://github.com/Haervwe/open-webui-tools
 description: Edit images using the Flux Kontext workflow API in ComfyUI.
 required_open_webui_version: 0.4.0
 requirements:
-version: 5.0
+version: 5.1
 license: MIT
 
 ComfyUI Required Nodes For Default Workflow:
