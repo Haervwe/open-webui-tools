@@ -901,29 +901,51 @@ Uses an LLM to automatically improve the quality of your prompts before they are
 
 ### Description
 
-Acts as an intelligent model router that analyzes the user's message and available models, then automatically selects the most appropriate model, pipe, or preset for the task. Now with enhanced model filtering capabilities and improved error handling.
+Acts as an intelligent model router that analyzes the user's message and available models, then automatically selects the most appropriate model, pipe, or preset for the task. Features vision model filtering, knowledge base integration, and robust file handling with Open WebUI's RAG system.
 
-### Configuration
+![Semantic Router Example](img/semantic_router_with_images.png)
 
-- **banned_models**: List of model IDs to exclude from selection
-- **allowed_models**: List of model IDs to whitelist (when set, only these models will be considered) - **NEW**
-- **vision_model_routing**: Enable automatic routing to vision-capable models for image-related tasks
-- **show_reasoning**: Display the selection reasoning in chat
-- **disable_qwen_thinking**: Disable special handling for Qwen thinking models
+### Configuration Valves
+
+- **vision_fallback_model_id**: Fallback model for image queries when no vision-capable models are available
+- **banned_models**: List of model IDs to exclude from routing selection
+- **allowed_models**: List of model IDs to whitelist (when set, only these models will be considered)
+- **router_model_id**: Specific model to use for routing decisions (leave empty to use current model)
+- **system_prompt**: System prompt for the router model (customizable)
+- **disable_qwen_thinking**: Append `/no_think` to router prompt for Qwen models
+- **show_reasoning**: Display routing reasoning in chat
+- **status**: Show status updates in chat
+- **debug**: Enable debug logging
 
 ### Features
 
-- **Whitelist Support**: Use `allowed_models` to restrict selection to specific models only
-- **Enhanced Error Handling**: Improved reliability with better fallback mechanisms - **NEW**
+- **Vision Model Filtering**: Automatically filters model selection to only vision-capable models when images are detected in the conversation (checks `meta.capabilities.vision` flag)
+- **Smart Fallback**: Uses `vision_fallback_model_id` only when no vision models are available in the filtered list
+- **Knowledge Base Integration**: Properly handles files from knowledge collections with full RAG retrieval support
+- **File Structure Compliance**: Passes files in correct INPUT format to Open WebUI's `get_sources_from_items()` for proper RAG processing
+- **Whitelist Support**: Use `allowed_models` to restrict selection to specific models onlyyy
 - **Automatic Fallback**: Gracefully handles errors by falling back to the original model
 
 ### Usage
 
-- Enable in your model configuration's filters section
-- Configure `allowed_models` to create a whitelist of preferred models, or use `banned_models` to exclude specific ones
-- The filter will automatically analyze each message and route to the best available model
+1. Enable in your model configuration's filters section
+2. Configure `vision_fallback_model_id` to specify a fallback model for image queries
+3. Optionally set `allowed_models` to create a whitelist of preferred models, or use `banned_models` to exclude specific ones
+4. The filter will automatically:
+   - Detect images in conversations
+   - Filter available models to vision-capable ones when images are present
+   - Route to the best available model based on the task
+   - Attach relevant files from knowledge collections with proper RAG retrieval
 
-![Mopidy Example](img/semantic_router.png)
+### How Vision Filtering Works
+
+When images are detected in the conversation:
+1. Filter checks all available models for `meta.capabilities.vision` flag
+2. Only vision-capable models are included in the routing selection
+3. If no vision models are found, uses `vision_fallback_model_id` as fallback
+4. Router makes informed decision with full image context
+
+![Semantic Router](img/semantic_router.png)
 
 
 ---
