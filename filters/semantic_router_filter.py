@@ -3,11 +3,15 @@ title: Semantic Router Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.0
+version: 0.4.5
 description: Filter that acts a model router, using model descriptions and capabilities
 (make sure to set them in the models you want to be presented to the router)
 and the prompt, selecting the best model base, pipe or preset for the task completion.
-Supports vision model filtering and proper type handling.
+Supports vision model filtering, proper type handling, and passes images to the router model
+for contextual routing decisions. Automatically switches to vision fallback model if the
+router model doesn't support vision. Strictly filters out inactive/deleted models (is_active must be True).
+Preserves all original request parameters and relies on Open WebUI's built-in payload
+conversion system to handle backend-specific parameter translation.
 """
 
 import logging
@@ -27,6 +31,7 @@ from pydantic import BaseModel, Field
 from fastapi import Request
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
+from open_webui.utils.payload import convert_payload_openai_to_ollama
 from open_webui.models.users import UserModel, Users
 from open_webui.models.files import FileMetadataResponse, Files
 from open_webui.models.models import ModelUserResponse, ModelModel
@@ -46,6 +51,7 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.propagate = False
+
 
 class ModelInfo(TypedDict):
     """Model information structure for routing decisions"""
@@ -90,11 +96,47 @@ def is_vision_capable(model_data: Dict[str, Any]) -> bool:
     meta = model_data.get("meta", {})
     capabilities = meta.get("capabilities", {})
 
-    # Check for explicit vision flag in capabilities
     if isinstance(capabilities, dict):
         return bool(capabilities.get("vision", False))
 
     return False
+
+
+def clean_ollama_params(payload: dict) -> dict:
+    """
+    Remove Ollama-specific parameters that cause errors with OpenAI endpoints.
+    Called when routing TO an OpenAI endpoint.
+    """
+    clean = payload.copy()
+    
+    # Remove Ollama-specific 'options' dict entirely
+    if "options" in clean:
+        options = clean.pop("options")
+        
+        # Extract num_predict -> max_tokens
+        if "num_predict" in options:
+            clean["max_tokens"] = options["num_predict"]
+        
+        # Move compatible params to root
+        for param in ["temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop"]:
+            if param in options and param not in clean:
+                clean[param] = options[param]
+    
+    # Handle format -> response_format
+    if "format" in clean:
+        format_val = clean.pop("format")
+        if isinstance(format_val, dict):
+            clean["response_format"] = {"type": "json_schema", "json_schema": {"schema": format_val}}
+        elif format_val == "json":
+            clean["response_format"] = {"type": "json_object"}
+    
+    # Handle system parameter at root (move to messages)
+    if "system" in clean:
+        system_content = clean.pop("system")
+        sys_msg = {"role": "system", "content": system_content}
+        clean["messages"] = [sys_msg] + clean.get("messages", [])
+    
+    return clean
 
 
 class Filter:
@@ -117,7 +159,7 @@ class Filter:
         system_prompt: str = Field(
             default=(
                 "You are a model router assistant. Analyze the user's message and select the most appropriate model.\n"
-                "Consider the task type, complexity, and required capabilities.\n"
+                "Consider the task type, complexity, and required capabilities. DO NOT assume capabilties beyond the explicitly stated in the description.\n"
                 'Return ONLY a JSON object with: {"selected_model_id": "id of selected model", "reasoning": "brief explanation"}'
             ),
             description="System prompt for router model",
@@ -146,11 +188,9 @@ class Filter:
         last_message = messages[-1]
         content = last_message.get("content", "")
 
-        # Check for images in list format (multimodal content)
         if isinstance(content, list):
             return any(item.get("type") == "image_url" for item in content)
 
-        # Check for images key
         return bool(last_message.get("images"))
 
     def _get_available_models(
@@ -167,33 +207,52 @@ class Filter:
         """
         available: List[ModelInfo] = []
 
+        if self.valves.debug:
+            logger.debug(
+                f"Processing {len(models_data)} models for routing (filter_vision={filter_vision})"
+            )
+
         for model in models_data:
             model_dict = extract_model_data(model)
             model_id = model_dict.get("id")
             meta = model_dict.get("meta", {})
             pipeline_type = model_dict.get("pipeline", {}).get("type")
 
-            # Skip if no ID or if it's a filter pipeline
             if not model_id or pipeline_type == "filter":
                 continue
 
-            # Apply whitelist if defined
+            is_active = model_dict.get("is_active", False)
+            if self.valves.debug:
+                base_model_id = model_dict.get("base_model_id")
+                logger.debug(
+                    f"Model {model_id}: is_active={is_active} (type: {type(is_active).__name__}), "
+                    f"base_model_id={base_model_id}, pipeline={pipeline_type}"
+                )
+
+            if not is_active:
+                if self.valves.debug:
+                    logger.debug(f"Skipping inactive/deleted model: {model_id}")
+                continue
+
             if (
                 self.valves.allowed_models
                 and model_id not in self.valves.allowed_models
             ):
+                if self.valves.debug:
+                    logger.debug(f"Skipping model not in allowed_models: {model_id}")
                 continue
 
-            # Apply blacklist
             if model_id in self.valves.banned_models:
+                if self.valves.debug:
+                    logger.debug(f"Skipping banned model: {model_id}")
                 continue
 
-            # Must have description
             description = meta.get("description")
             if not description:
+                if self.valves.debug:
+                    logger.debug(f"Skipping model without description: {model_id}")
                 continue
 
-            # Check vision capability if filtering
             is_vision = is_vision_capable(model_dict)
             if filter_vision and not is_vision:
                 continue
@@ -206,26 +265,30 @@ class Filter:
             }
             available.append(model_info)
 
+        if self.valves.debug:
+            logger.debug(f"Found {len(available)} available models after filtering")
+            if available:
+                model_list = ", ".join([f"{m['name']} ({m['id']})" for m in available])
+                logger.debug(f"Available models: {model_list}")
+            else:
+                logger.debug("No models passed filtering criteria")
+
         return available
 
     async def _get_model_recommendation(
         self, body: Dict[str, Any], available_models: List[ModelInfo], user_message: str
     ) -> RouterResponse:
         """Get model recommendation from the router LLM"""
-        # Prepare system prompt
         system_prompt = self.valves.system_prompt
         if self.valves.disable_qwen_thinking:
             system_prompt += " /no_think"
 
-        # Build messages for router
         models_json = json.dumps(available_models, indent=2)
         router_messages: List[Dict[str, Any]] = []
 
-        # Preserve system message if exists
         if body.get("messages") and body["messages"][0]["role"] == "system":
             router_messages.append(body["messages"][0])
 
-        # Add router system message
         router_messages.append(
             {
                 "role": "system",
@@ -233,16 +296,78 @@ class Filter:
             }
         )
 
-        # Add user message
-        router_messages.append(
-            {
-                "role": "user",
-                "content": f"User request: {user_message}\n\nSelect the most appropriate model.",
-            }
-        )
+        has_images = self._has_images(body.get("messages", []))
 
-        # Determine which model to use for routing
-        router_model = self.valves.router_model_id or body.get("model")
+        if has_images:
+            last_msg = body.get("messages", [])[-1]
+            router_user_message = {"role": "user", "content": []}
+
+            if isinstance(last_msg.get("content"), list):
+                for item in last_msg["content"]:
+                    if item.get("type") == "text":
+                        router_user_message["content"].append(
+                            {
+                                "type": "text",
+                                "text": f"User request: {item.get('text', '')}\n\nSelect the most appropriate model based on the text and image(s) provided.",
+                            }
+                        )
+                    elif item.get("type") == "image_url":
+                        router_user_message["content"].append(item)
+            else:
+                router_user_message["content"].append(
+                    {
+                        "type": "text",
+                        "text": f"User request: {user_message}\n\nSelect the most appropriate model based on the text and image(s) provided.",
+                    }
+                )
+                if "images" in last_msg:
+                    router_user_message["images"] = last_msg["images"]
+
+            router_messages.append(router_user_message)
+        else:
+            router_messages.append(
+                {
+                    "role": "user",
+                    "content": f"User request: {user_message}\n\nSelect the most appropriate model.",
+                }
+            )
+
+        router_model = self.valves.router_model_id
+        if not router_model:
+            metadata_model = body.get("metadata", {}).get("model", {})
+            base_model_id = metadata_model.get("info", {}).get("base_model_id")
+            router_model = base_model_id or body.get("model")
+
+        if has_images:
+            from open_webui.routers.models import get_models, get_base_models
+
+            all_models = await get_models(
+                self.__request__, self.__user__
+            ) + await get_base_models(self.__user__)
+
+            router_model_obj = next(
+                (
+                    m
+                    for m in all_models
+                    if extract_model_data(m).get("id") == router_model
+                ),
+                None,
+            )
+
+            if router_model_obj:
+                router_model_data = extract_model_data(router_model_obj)
+                if not is_vision_capable(router_model_data):
+                    if self.valves.vision_fallback_model_id:
+                        logger.info(
+                            f"Router model '{router_model}' is not vision-capable. "
+                            f"Using fallback '{self.valves.vision_fallback_model_id}' for routing."
+                        )
+                        router_model = self.valves.vision_fallback_model_id
+                    else:
+                        logger.warning(
+                            f"Router model '{router_model}' is not vision-capable and no fallback is set. "
+                            "Routing decision may not consider image content."
+                        )
 
         payload = {
             "model": router_model,
@@ -433,12 +558,10 @@ class Filter:
         for file_data in new_files:
             file_id = file_data["id"]
             if file_id in existing_ids:
-                # Update existing file
                 idx = next(i for i, f in enumerate(merged) if f["id"] == file_id)
-                merged[idx].update(dict(file_data))  # Convert TypedDict to dict
+                merged[idx].update(dict(file_data))
             else:
-                # Add new file
-                merged.append(dict(file_data))  # Convert TypedDict to dict
+                merged.append(dict(file_data))
                 existing_ids.add(file_id)
 
         return merged
@@ -451,29 +574,25 @@ class Filter:
         files_data: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Build the updated request body with selected model and metadata"""
+
         new_body = original_body.copy()
         new_body["model"] = selected_model["id"]
 
-        # Extract model data
         model_data = extract_model_data(selected_model_full)
         meta = model_data.get("meta", {})
 
-        # Initialize metadata
         new_body.setdefault("metadata", {})
         original_metadata = original_body.get("metadata", {})
 
-        # Update filterIds (exclude self)
         new_body["metadata"]["filterIds"] = [
             fid for fid in meta.get("filterIds", []) if fid != "semantic_router_filter"
         ]
 
-        # Handle tool_ids
         new_body.pop("tool_ids", None)
         new_body["metadata"].pop("tool_ids", None)
         if meta.get("toolIds"):
             new_body["tool_ids"] = meta["toolIds"].copy()
 
-        # Preserve important metadata
         for key in [
             "user_id",
             "chat_id",
@@ -485,38 +604,20 @@ class Filter:
             if key in original_metadata:
                 new_body["metadata"][key] = original_metadata[key]
 
-        # Build model metadata
         new_body["metadata"]["model"] = self._build_model_metadata(
             selected_model, model_data, original_metadata.get("model", {})
         )
-
-        # Preserve features
         new_body["metadata"]["features"] = original_body.get("features", {})
 
-        # Handle files and knowledge
         if files_data:
             new_body["files"] = self._merge_files(new_body.get("files", []), files_data)
         elif "files" in original_body:
             new_body["files"] = original_body["files"]
 
-        # Process knowledge collections
         if new_body.get("files"):
             new_body["metadata"]["model"].setdefault("info", {}).setdefault("meta", {})[
                 "knowledge"
             ] = self._process_files_for_knowledge(new_body["files"])
-
-        # Preserve generation parameters
-        for field in [
-            "temperature",
-            "max_tokens",
-            "top_p",
-            "frequency_penalty",
-            "presence_penalty",
-            "seed",
-            "stream",
-        ]:
-            if field in original_body:
-                new_body[field] = original_body[field]
 
         return new_body
 
@@ -540,12 +641,10 @@ class Filter:
             },
         }
 
-        # Preserve original fields
         for field in ["object", "created", "owned_by", "preset", "actions"]:
             if field in original_model:
                 updated_model[field] = original_model[field]
 
-        # Copy info fields from original
         if "info" in original_model:
             for field in [
                 "user_id",
@@ -557,7 +656,6 @@ class Filter:
                 if field in original_model["info"]:
                     updated_model["info"][field] = original_model["info"][field]
 
-        # Handle meta in info
         if "info" in original_model and "meta" in original_model["info"]:
             updated_model["info"]["meta"] = {
                 k: v
@@ -567,7 +665,6 @@ class Filter:
             if meta.get("toolIds"):
                 updated_model["info"]["meta"]["toolIds"] = meta["toolIds"]
 
-        # Preserve params
         if "params" in original_model:
             updated_model["info"]["params"] = original_model["params"]
 
@@ -590,7 +687,6 @@ class Filter:
         has_images = self._has_images(messages)
 
         try:
-            # Fetch all available models
             models = await get_models(
                 self.__request__, self.__user__
             ) + await get_base_models(self.__user__)
@@ -599,17 +695,14 @@ class Filter:
                 logger.warning("No models returned from get_models()")
                 return body
 
-            # Handle image messages
             if has_images:
                 if self.valves.debug:
                     logger.debug("Message contains images, filtering for vision models")
 
-                # Get vision-capable models
                 available_models = self._get_available_models(
                     models, filter_vision=True
                 )
 
-                # If no vision models found, use fallback if set
                 if not available_models and self.valves.vision_fallback_model_id:
                     if self.valves.debug:
                         logger.debug(
@@ -622,7 +715,6 @@ class Filter:
                     logger.warning("No vision-capable models found and no fallback set")
                     return body
             else:
-                # Get all available models for text-only messages
                 available_models = self._get_available_models(
                     models, filter_vision=False
                 )
@@ -631,7 +723,6 @@ class Filter:
                 logger.warning("No valid models found for routing")
                 return body
 
-            # Get routing recommendation
             if self.valves.status:
                 await __event_emitter__(
                     {
@@ -648,7 +739,6 @@ class Filter:
                 body, available_models, user_message
             )
 
-            # Display reasoning if enabled
             if self.valves.show_reasoning:
                 reasoning_message = (
                     f"<details>\n<summary>Model Selection</summary>\n"
@@ -662,7 +752,6 @@ class Filter:
                     }
                 )
 
-            # Find selected model
             selected_model = next(
                 (m for m in available_models if m["id"] == result["selected_model_id"]),
                 None,
@@ -673,7 +762,6 @@ class Filter:
                 )
                 return body
 
-            # Get full model data
             selected_model_full = next(
                 (
                     m
@@ -683,14 +771,12 @@ class Filter:
                 None,
             )
 
-            # Ensure we have a model
             if not selected_model_full:
                 logger.warning(
                     f"Could not find full model data for {selected_model['id']}"
                 )
                 return body
 
-            # Get knowledge files if configured
             files_data: List[Dict[str, Any]] = []
             model_data = extract_model_data(selected_model_full)
             meta = model_data.get("meta", {})
@@ -698,10 +784,21 @@ class Filter:
             if isinstance(knowledge, list) and knowledge:
                 files_data = await self._get_files_from_collections(knowledge)
 
-            # Build updated body
             new_body = self._build_updated_body(
                 body, selected_model, selected_model_full, files_data
             )
+
+            # Convert payload based on source/target model backend mismatch
+            source_owned_by = body.get("metadata", {}).get("model", {}).get("owned_by")
+            target_owned_by = model_data.get("owned_by")
+            
+            if source_owned_by != target_owned_by:
+                if target_owned_by == "ollama":
+                    # Target is Ollama, source is OpenAI → convert to Ollama
+                    new_body = convert_payload_openai_to_ollama(new_body)
+                elif target_owned_by == "openai":
+                    # Target is OpenAI, source might be Ollama → clean Ollama params
+                    new_body = clean_ollama_params(new_body)
 
             if self.valves.status:
                 await __event_emitter__(
