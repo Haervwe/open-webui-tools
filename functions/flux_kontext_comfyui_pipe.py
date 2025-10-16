@@ -25,26 +25,28 @@ Instructions:
 - Ensure Dual CLIP Loader and VAE Loader nodes are configured with the correct model files.
 """
 
-import json
-import os
-import uuid
-import aiohttp
 import asyncio
+import io
+import json
+import logging
+import mimetypes
+import os
 import random
-from typing import Dict, Callable, Optional, Union, Any, cast, Awaitable
+import re
+import time
+import uuid
+
+import aiohttp
+import requests
+from fastapi import UploadFile
 from pydantic import BaseModel, Field
-from open_webui.utils.misc import get_last_user_message_item  # type: ignore
-from open_webui.utils.chat import generate_chat_completion  # type: ignore
-from open_webui.models.users import User, Users
+from typing import Dict, Callable, Optional, Union, Any, cast, Awaitable
 
 from open_webui.constants import TASKS
-import logging
-import requests
-
-import io
-import mimetypes
-from fastapi import UploadFile
-import re
+from open_webui.models.users import User, Users
+from open_webui.routers.files import upload_file_handler  # type: ignore
+from open_webui.utils.chat import generate_chat_completion  # type: ignore
+from open_webui.utils.misc import get_last_user_message_item  # type: ignore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -293,7 +295,6 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
         self.client_id = str(uuid.uuid4())
-        # Attempt to pre-load config on construction (best-effort)
         try:
             self._load_config_and_apply()
         except Exception:
@@ -305,7 +306,6 @@ class Pipe:
     def _get_config_path(self) -> str:
         if getattr(self.valves, "CONFIG_BACKEND_PATH", "auto") and self.valves.CONFIG_BACKEND_PATH != "auto":
             return self.valves.CONFIG_BACKEND_PATH
-        # Default to a file next to this module
         return os.path.join(os.path.dirname(__file__), "flux_kontext_comfyui_config.json")
 
     def _load_config_and_apply(self) -> None:
@@ -318,7 +318,6 @@ class Pipe:
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 data = cast(Dict[str, Any], json.load(f))
-            # Only apply known fields
             for k, v in data.items():
                 if hasattr(self.valves, k):
                     try:
@@ -334,7 +333,6 @@ class Pipe:
         cfg_path = self._get_config_path()
         try:
             os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-            # Load existing to merge
             existing: Dict[str, Any] = {}
             if os.path.exists(cfg_path):
                 try:
@@ -342,7 +340,6 @@ class Pipe:
                         existing = json.load(f) or {}
                 except Exception:
                     existing = {}
-            # Keep only known fields
             for k in list(values.keys()):
                 if not hasattr(self.valves, k):
                     values.pop(k, None)
@@ -445,8 +442,6 @@ class Pipe:
         event_emitter: Callable[..., Any],
     ) -> str:
         try:
-            # Suppress intermediate info emission to avoid UI clutter
-
             payload: Dict[str, Any] = {
                 "model": self.valves.VISION_MODEL_ID,
                 "messages": [
@@ -477,7 +472,6 @@ class Pipe:
             resp_data: Dict[str, Any] = cast(
                 Dict[str, Any], await generate_chat_completion(request, payload, user)
             )
-            # Suppress intermediate info emission to avoid UI clutter
             enhanced_prompt: str = str(resp_data["choices"][0]["message"]["content"])
             enhanced_prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
             await event_emitter(
@@ -533,7 +527,6 @@ class Pipe:
                         inputs["clip_name2"] = self.valves.CLIP_NAME_2
                 if ctype in ("UNETLoader", "UnetLoaderGGUF", "UNetLoaderGGUF"):
                     if getattr(self.valves, "UNET_MODEL_NAME", ""):
-                        # Standard key in provided workflow
                         inputs["unet_name"] = self.valves.UNET_MODEL_NAME
                 if ctype == "VAELoader":
                     if getattr(self.valves, "VAE_NAME", ""):
@@ -586,7 +579,6 @@ class Pipe:
                     msg_type, data = message.get("type"), message.get("data", {})
 
                     if msg_type in {"status", "progress"}:
-                        # Silence noisy progress/status updates to avoid UI clutter
                         continue
                     elif msg_type == "executed" and data.get("prompt_id") == prompt_id:
                         logger.info(f"Execution signal received: {data}")
@@ -624,8 +616,6 @@ class Pipe:
         self, request: Any, image_data: bytes, content_type: str, user: User
     ) -> str:
         try:
-            from open_webui.routers.files import upload_file_handler  # type: ignore
-
             image_format = mimetypes.guess_extension(content_type)
             if not image_format:
 
@@ -651,8 +641,15 @@ class Pipe:
                 raise Exception("Failed to save image to OpenWebUI")
 
             file_id = str(getattr(file_item, "id", ""))
-            url = request.app.url_path_for("get_file_content_by_id", id=file_id)
-            return str(url)
+            
+            base_url = str(request.base_url).rstrip('/')
+            relative_path = request.app.url_path_for("get_file_content_by_id", id=file_id)
+            
+            timestamp = int(time.time() * 1000)
+            url_with_cache_bust = f"{base_url}{relative_path}?t={timestamp}"
+            
+            logger.info(f"Generated absolute URL for image: {url_with_cache_bust}")
+            return str(url_with_cache_bust)
         except Exception as e:
             logger.error(f"Error saving image to OpenWebUI: {e}", exc_info=True)
             raise e
@@ -930,15 +927,11 @@ class Pipe:
         self.__event_emitter__ = __event_emitter__
         self.__request__ = __request__
         self.__user__ = Users.get_user_by_id(__user__["id"])
-        # optional event call for interactive prompts
         self.__event_call__ = __event_call__
-        # Re-apply backend config (takes precedence) on each run
         try:
             self._load_config_and_apply()
         except Exception:
             pass
-
-        # Handle admin-only /setup commands before any image requirements
         user_text = self._extract_last_user_text(body.get("messages", [])) or ""
         ut_low = user_text.strip().lower()
         if ut_low.startswith("/setup"):
@@ -949,18 +942,13 @@ class Pipe:
                 await self.emit_status(self.__event_emitter__, "error", "Only admins can use /setup.", done=True)
                 return body
 
-            # /setup save {json}
             if ut_low.startswith("/setup save"):
-                # Extract JSON payload after '/setup save'
                 try:
-                    # Keep original string to preserve case in values
                     m = re.match(r"^/setup\s+save\s+(\{[\s\S]*\})\s*$", user_text.strip(), flags=re.IGNORECASE)
                     if not m:
                         raise ValueError("No JSON payload found after '/setup save'")
                     payload_str = m.group(1)
                     overrides = cast(Dict[str, Any], json.loads(payload_str))
-
-                    # Coerce and apply to valves
                     applied: Dict[str, Any] = {}
                     for k, v in overrides.items():
                         if not hasattr(self.valves, k):
@@ -971,7 +959,6 @@ class Pipe:
                         except Exception:
                             logger.warning(f"Failed to set valve {k} -> {v}")
 
-                    # Persist if requested
                     save_flag = bool(overrides.get("save_to_backend", False))
                     saved_path = None
                     if save_flag:
@@ -988,8 +975,6 @@ class Pipe:
                 except Exception as e:
                     await self.emit_status(self.__event_emitter__, "error", f"Failed to parse/save setup: {e}", done=True)
                 return body
-
-            # Plain /setup -> interactive inputs if available; otherwise fallback to single input helper
             await self._emit_current_values(self.__event_emitter__)
             await self._interactive_setup()
             return body
@@ -1079,10 +1064,10 @@ class Pipe:
                     raise Exception(
                         "Did not receive a successful execution signal from ComfyUI."
                     )
-
+                await asyncio.sleep(2)
+                
                 job_data = None
-                for attempt in range(3):
-                    await asyncio.sleep(attempt + 1)
+                for attempt in range(5):
                     logger.info(
                         f"Fetching history for prompt {prompt_id}, attempt {attempt + 1}..."
                     )
@@ -1090,20 +1075,34 @@ class Pipe:
                         f"{http_api_url}/history/{prompt_id}"
                     ) as resp:
                         text = await resp.text()
-                        logger.info(f"History {resp.status}: {text}")
+                        logger.info(f"History {resp.status}: {text[:500]}")
                         if resp.status == 200:
                             history = await resp.json()
                             logger.info(f"History JSON keys: {list(history.keys())}")
                             if prompt_id in history:
                                 job_data = history[prompt_id]
+                                logger.info("Successfully retrieved job data from history")
                                 break
-                    logger.warning(
-                        f"Attempt {attempt + 1} to fetch history failed or was incomplete."
-                    )
+                    
+                    if attempt < 4:
+                        wait_time = 2 + (attempt * 1)
+                        logger.warning(
+                            f"Attempt {attempt + 1} to fetch history failed or was incomplete. Waiting {wait_time}s before retry..."
+                        )
+                        await asyncio.sleep(wait_time)
 
                 if not job_data:
+                    logger.warning("Attempting to fetch full history as fallback...")
+                    async with session.get(f"{http_api_url}/history") as resp:
+                        if resp.status == 200:
+                            all_history = await resp.json()
+                            if prompt_id in all_history:
+                                job_data = all_history[prompt_id]
+                                logger.info("Successfully retrieved job data from full history")
+                
+                if not job_data:
                     raise Exception(
-                        "Failed to retrieve job data from history after multiple attempts."
+                        f"Failed to retrieve job data from history after multiple attempts. Prompt ID: {prompt_id}"
                     )
 
                 logger.info(
@@ -1113,7 +1112,6 @@ class Pipe:
 
                 if image_to_display:
                     internal_image_url = f"{http_api_url}/view?filename={image_to_display['filename']}&subfolder={image_to_display.get('subfolder', '')}&type={image_to_display.get('type', 'output')}"
-                    # Suppress intermediate download status
 
                     async with session.get(internal_image_url) as http_response:
                         http_response.raise_for_status()
@@ -1121,8 +1119,8 @@ class Pipe:
                         content_type = http_response.headers.get(
                             "content-type", "image/png"
                         )
-
-                    # Suppress intermediate embedding status
+                    
+                    logger.info(f"Downloaded image data: {len(image_data)} bytes, type: {content_type}")
 
                     public_image_url = self._save_image_and_get_public_url(
                         request=self.__request__,
@@ -1130,26 +1128,21 @@ class Pipe:
                         content_type=content_type,
                         user=self.__user__,
                     )
+                    
+                    logger.info(f"Image saved with public URL: {public_image_url}")
 
                     alt_text = (
                         prompt if prompt else "Edited image generated by Flux Kontext"
                     )
                     response_content = f"Here is the edited image:\n\n![{alt_text}]({public_image_url})"
 
-                    await self.__event_emitter__(
-                        {"type": "message", "data": {"content": response_content}}
-                    )
                     await self.emit_status(
                         self.__event_emitter__,
                         "success",
                         "Image processed successfully!",
                         done=True,
                     )
-
-                    body["messages"].append(
-                        {"role": "assistant", "content": response_content}
-                    )
-                    return body
+                    return response_content
 
                 else:
                     await self.emit_status(
