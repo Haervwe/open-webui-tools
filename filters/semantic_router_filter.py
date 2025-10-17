@@ -3,7 +3,7 @@ title: Semantic Router Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.5
+    version = "0.5.5"  # Fixed: Set body["files"] (not metadata.files) - middleware moves it
 description: Filter that acts a model router, using model descriptions and capabilities
 (make sure to set them in the models you want to be presented to the router)
 and the prompt, selecting the best model base, pipe or preset for the task completion.
@@ -12,6 +12,12 @@ for contextual routing decisions. Automatically switches to vision fallback mode
 router model doesn't support vision. Strictly filters out inactive/deleted models (is_active must be True).
 Preserves all original request parameters and relies on Open WebUI's built-in payload
 conversion system to handle backend-specific parameter translation.
+Fixed v0.5.1: Improved RAG file handling - preserves original knowledge structure:
+  - Now passes through the target model's knowledge collections unchanged
+  - Collects and merges files from source and target models
+  - Creates proper file structures for RAG retrieval
+  - Extensive debug logging to track file collection process
+Enable debug mode (valves.debug = True) to see detailed file handling diagnostics.
 """
 
 import logging
@@ -109,28 +115,23 @@ def clean_ollama_params(payload: dict) -> dict:
     """
     clean = payload.copy()
     
-    # Remove Ollama-specific 'options' dict entirely
     if "options" in clean:
         options = clean.pop("options")
         
-        # Extract num_predict -> max_tokens
         if "num_predict" in options:
             clean["max_tokens"] = options["num_predict"]
         
-        # Move compatible params to root
         for param in ["temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop"]:
             if param in options and param not in clean:
                 clean[param] = options[param]
-    
-    # Handle format -> response_format
+                
     if "format" in clean:
         format_val = clean.pop("format")
         if isinstance(format_val, dict):
             clean["response_format"] = {"type": "json_schema", "json_schema": {"schema": format_val}}
         elif format_val == "json":
             clean["response_format"] = {"type": "json_object"}
-    
-    # Handle system parameter at root (move to messages)
+
     if "system" in clean:
         system_content = clean.pop("system")
         sys_msg = {"role": "system", "content": system_content}
@@ -396,7 +397,6 @@ class Filter:
 
     def _extract_response_content(self, response: Any) -> Optional[str]:
         """Extract content from various response formats"""
-        # Handle JSONResponse
         if hasattr(response, "body"):
             response_data = json.loads(response.body.decode("utf-8"))
         elif hasattr(response, "json"):
@@ -406,13 +406,11 @@ class Filter:
         else:
             response_data = response
 
-        # Check for errors
         if isinstance(response_data, dict) and "error" in response_data:
             error_msg = response_data["error"].get("message", "Unknown API error")
             logger.error(f"API error in model recommendation: {error_msg}")
             raise Exception(f"API error: {error_msg}")
 
-        # Extract content from various formats
         if isinstance(response_data, dict):
             if "choices" in response_data:
                 return response_data["choices"][0]["message"]["content"]
@@ -458,21 +456,28 @@ class Filter:
 
         This creates the structure that Open WebUI's RAG system will process,
         NOT the final citation structure.
+        
+        RAG File Handling Flow:
+        1. _get_files_from_collections: Retrieves files from model's knowledge collections
+        2. _build_file_data: Formats each file with metadata (id, name, collection_name)
+        3. _merge_files: Combines knowledge files with any existing request files
+        4. _process_files_for_knowledge: Groups merged files by collection_name
+        5. _build_collection_data: Creates collection structures with file_ids arrays
+        6. Final structure placed in body["metadata"]["model"]["info"]["meta"]["knowledge"]
+        
+        This ensures ALL files from ALL collections are properly included for RAG retrieval.
         """
         file_id = file_metadata.id
         meta = file_metadata.meta or {}
 
+        # Return the structure expected by Open WebUI's RAG system
+        # The "id" field should be the actual file ID for proper retrieval
         return {
             "type": "file",
             "id": file_id,
             "name": meta.get("name", file_id),
             "collection_name": collection_name,
             "legacy": False,
-            # Optional: Add enriched file data if content is available
-            "file": {
-                "meta": meta,
-                "data": {"content": meta.get("content", "")},
-            },
         }
 
     async def _get_files_from_collections(
@@ -481,37 +486,88 @@ class Filter:
         """
         Get files from knowledge collections and format for RAG retrieval.
         Returns INPUT format expected by get_sources_from_items().
+        Handles multiple knowledge collection structure formats.
         """
         files_data: List[Dict[str, Any]] = []
 
+        if self.valves.debug:
+            logger.debug(f"Processing {len(knowledge_collections)} knowledge collections")
+            logger.debug(f"Raw knowledge_collections structure: {json.dumps(knowledge_collections, indent=2, default=str)}")
+
         for collection in knowledge_collections:
             if not isinstance(collection, dict):
+                if self.valves.debug:
+                    logger.debug(f"Skipping non-dict collection: {type(collection)}")
                 continue
 
+            if self.valves.debug:
+                logger.debug(f"Processing collection: {json.dumps(collection, indent=2, default=str)}")
+
             collection_id = collection.get("id")
+            if not collection_id:
+                if self.valves.debug:
+                    logger.debug(f"Skipping collection with no ID: {collection}")
+                continue
+            
+            # Try multiple possible structures for file_ids
+            # Structure 1: collection.data.file_ids (created by _build_collection_data)
             file_ids = collection.get("data", {}).get("file_ids", [])
+            structure_used = "data.file_ids"
+            
+            # Structure 2: collection.file_ids (simple structure from model meta)
+            if not file_ids:
+                file_ids = collection.get("file_ids", [])
+                structure_used = "file_ids"
+            
+            # Structure 3: collection.files (alternate structure)
+            if not file_ids:
+                files = collection.get("files", [])
+                if isinstance(files, list):
+                    # Extract IDs from file objects if they exist
+                    file_ids = [f.get("id") if isinstance(f, dict) else f for f in files]
+                    structure_used = "files"
+
+            if self.valves.debug:
+                logger.debug(f"Collection '{collection_id}': found {len(file_ids)} file IDs using structure '{structure_used}' - {file_ids}")
 
             for file_id in file_ids:
                 try:
                     file_metadata = Files.get_file_metadata_by_id(file_id)
-                    if file_metadata and not any(
-                        f["id"] == file_metadata.id for f in files_data
-                    ):
-                        file_data = self._build_file_data(file_metadata, collection_id)
-                        files_data.append(file_data)
+                    if file_metadata:
+                        # Check if file already added (avoid duplicates)
+                        if not any(f["id"] == file_metadata.id for f in files_data):
+                            file_data = self._build_file_data(file_metadata, collection_id)
+                            files_data.append(file_data)
+                            if self.valves.debug:
+                                logger.debug(f"  Added file {file_metadata.id} from collection {collection_id}")
+                        else:
+                            if self.valves.debug:
+                                logger.debug(f"  File {file_metadata.id} already in files_data, skipping")
+                    else:
+                        logger.warning(f"File {file_id} not found in Files database")
 
                 except Exception as e:
-                    logger.error(f"Error getting file {file_id}: {str(e)}")
+                    logger.error(f"Error getting file {file_id} from collection {collection_id}: {str(e)}")
+
+        if self.valves.debug:
+            logger.debug(f"Total files collected: {len(files_data)}")
+            logger.debug(f"File IDs: {[f['id'] for f in files_data]}")
 
         return files_data
 
     def _build_collection_data(
         self, collection_id: str, files: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Build collection data structure"""
+        """
+        Build collection data structure for knowledge field.
+        This should contain file IDs, not file objects.
+        """
+        # Extract just the file IDs from the file data objects
+        file_ids = [f["id"] for f in files if "id" in f]
+        
         return {
             "id": collection_id,
-            "data": {"file_ids": files, "citations": True},
+            "data": {"file_ids": file_ids, "citations": True},
             "type": "collection",
             "meta": {
                 "citations": True,
@@ -533,20 +589,42 @@ class Filter:
         self,
         files_data: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Process files and group into collections"""
+        """
+        Process files and group into collections.
+        Groups files by their collection_name field (from _build_file_data).
+        """
+        if self.valves.debug:
+            logger.debug(f"_process_files_for_knowledge called with {len(files_data)} files")
+            logger.debug(f"Files input to _process_files_for_knowledge: {json.dumps(files_data, indent=2, default=str)}")
+        
         collections: Dict[str, List[Dict[str, Any]]] = {}
 
         for file_data in files_data:
-            collection_name = file_data.get("meta", {}).get("collection_name")
+            # Get collection_name from the top-level field (set in _build_file_data)
+            collection_name = file_data.get("collection_name")
             if not collection_name:
+                if self.valves.debug:
+                    logger.debug(f"File {file_data.get('id')} has no collection_name, skipping")
+                    logger.debug(f"File data without collection_name: {json.dumps(file_data, indent=2, default=str)}")
                 continue
 
             collections.setdefault(collection_name, []).append(file_data)
 
-        return [
+        if self.valves.debug:
+            logger.debug(f"Processed {len(files_data)} files into {len(collections)} collections")
+            for cid, files in collections.items():
+                logger.debug(f"  Collection '{cid}': {len(files)} files - {[f['id'] for f in files]}")
+
+        result = [
             self._build_collection_data(cid, files)
             for cid, files in collections.items()
         ]
+        
+        if self.valves.debug:
+            logger.debug(f"_process_files_for_knowledge returning {len(result)} collection structures")
+            logger.debug(f"Final collection structures: {json.dumps(result, indent=2, default=str)}")
+        
+        return result
 
     def _merge_files(
         self, existing_files: List[Dict[str, Any]], new_files: List[Dict[str, Any]]
@@ -609,15 +687,56 @@ class Filter:
         )
         new_body["metadata"]["features"] = original_body.get("features", {})
 
-        if files_data:
-            new_body["files"] = self._merge_files(new_body.get("files", []), files_data)
-        elif "files" in original_body:
-            new_body["files"] = original_body["files"]
-
-        if new_body.get("files"):
+        # CRITICAL DISCOVERY: The middleware moves body["files"] to body["metadata"]["files"]!
+        # See /utils/middleware.py lines 1172-1210:
+        #   files = form_data.pop("files", None)  # Takes from body["files"]
+        #   metadata = {..., "files": files}       # Puts in body["metadata"]["files"]
+        #
+        # So filters must set body["files"], and middleware will move it to metadata.files
+        # THEN chat_completion_files_handler checks body["metadata"]["files"] for RAG.
+        #
+        # For knowledge collections, we need to set items with type="collection"
+        # which will cause Open WebUI to query the knowledge collection in the vector DB.
+        model_knowledge = meta.get("knowledge", [])
+        if model_knowledge:
+            # Set knowledge structure in model info for UI/display purposes
             new_body["metadata"]["model"].setdefault("info", {}).setdefault("meta", {})[
                 "knowledge"
-            ] = self._process_files_for_knowledge(new_body["files"])
+            ] = model_knowledge
+            
+            # Build proper collection items for RAG retrieval
+            # Each knowledge collection becomes a collection-type item
+            collection_items = []
+            for knowledge_item in model_knowledge:
+                if isinstance(knowledge_item, dict) and knowledge_item.get("id"):
+                    collection_items.append({
+                        "type": "collection",
+                        "id": knowledge_item["id"],  # This is the knowledge collection ID
+                        "legacy": False,
+                        "collection_name": knowledge_item["id"],
+                    })
+            
+            # Set in body["files"] - middleware will move to metadata.files
+            new_body["files"] = collection_items
+            
+            if self.valves.debug:
+                logger.debug(f"Set body['files'] with {len(collection_items)} collection items for RAG")
+                logger.debug(f"Collection items: {json.dumps(collection_items, indent=2, default=str)}")
+        elif files_data:
+            # No knowledge collections, but we have direct file uploads
+            # Convert file data to file items for RAG
+            file_items = []
+            for file_data in files_data:
+                file_items.append({
+                    "type": "file",
+                    "id": file_data.get("id"),
+                    "name": file_data.get("name"),
+                    "legacy": False,
+                })
+            
+            new_body["files"] = file_items
+            if self.valves.debug:
+                logger.debug(f"Set body['files'] with {len(file_items)} file items")
 
         return new_body
 
@@ -777,27 +896,104 @@ class Filter:
                 )
                 return body
 
+            # Collect all files: from original request AND target model's knowledge collections
+            if self.valves.debug:
+                logger.debug("=" * 80)
+                logger.debug("STARTING FILE COLLECTION PROCESS")
+                logger.debug("=" * 80)
+            
             files_data: List[Dict[str, Any]] = []
+            
+            # First, preserve any files from the original request body
+            original_files = body.get("files", [])
+            if original_files:
+                if self.valves.debug:
+                    logger.debug(f"Step 1: Original request body has {len(original_files)} files")
+                    logger.debug(f"Original files: {json.dumps(original_files, indent=2, default=str)}")
+                files_data.extend(original_files)
+            else:
+                if self.valves.debug:
+                    logger.debug("Step 1: No files in original request body")
+            
+            # Second, get files from the SOURCE model's knowledge collections (if any)
+            # This ensures we include files from the model that was originally selected
+            original_metadata = body.get("metadata", {})
+            original_model_info = original_metadata.get("model", {}).get("info", {})
+            original_knowledge = original_model_info.get("meta", {}).get("knowledge", [])
+            
+            if isinstance(original_knowledge, list) and original_knowledge:
+                if self.valves.debug:
+                    logger.debug(f"Step 2: Original source model has {len(original_knowledge)} knowledge collections")
+                
+                original_knowledge_files = await self._get_files_from_collections(original_knowledge)
+                
+                if original_knowledge_files:
+                    if self.valves.debug:
+                        logger.debug(f"Step 2: Retrieved {len(original_knowledge_files)} files from source model's knowledge collections")
+                    
+                    # Merge with existing files
+                    files_data = self._merge_files(files_data, original_knowledge_files)
+                    
+                    if self.valves.debug:
+                        logger.debug(f"Step 2: After merging source model knowledge: {len(files_data)} total files")
+                        logger.debug(f"Step 2: Current file IDs: {[f['id'] for f in files_data]}")
+            else:
+                if self.valves.debug:
+                    logger.debug("Step 2: No knowledge collections in source model")
+            
+            # Third, get files from TARGET model's knowledge collections
             model_data = extract_model_data(selected_model_full)
             meta = model_data.get("meta", {})
             knowledge = meta.get("knowledge", [])
+            
+            if self.valves.debug:
+                logger.debug(f"Step 3: Selected target model '{selected_model['id']}' has {len(knowledge)} knowledge collections")
+                logger.debug(f"Step 3: Target model knowledge structure: {json.dumps(knowledge, indent=2, default=str)}")
+            
             if isinstance(knowledge, list) and knowledge:
-                files_data = await self._get_files_from_collections(knowledge)
+                knowledge_files = await self._get_files_from_collections(knowledge)
+                
+                if self.valves.debug:
+                    logger.debug(f"Step 3: Retrieved {len(knowledge_files)} files from target model's knowledge collections")
+                    logger.debug(f"Step 3: Target model file IDs: {[f['id'] for f in knowledge_files]}")
+                
+                # Merge knowledge files with original files (avoiding duplicates)
+                files_data = self._merge_files(files_data, knowledge_files)
+                
+                if self.valves.debug:
+                    logger.debug(f"Step 3: After final merge: {len(files_data)} total files")
+                    logger.debug(f"Step 3: Final merged file IDs: {[f['id'] for f in files_data]}")
+            else:
+                if self.valves.debug:
+                    logger.debug("Step 3: No knowledge collections found on target model")
 
             new_body = self._build_updated_body(
                 body, selected_model, selected_model_full, files_data
             )
+            
+            if self.valves.debug:
+                logger.debug("=" * 80)
+                logger.debug("FINAL BODY BEING RETURNED:")
+                logger.debug(f"  Model: {new_body.get('model')}")
+                
+                # Check body["files"] - will be moved to metadata.files by middleware
+                body_files = new_body.get("files", [])
+                logger.debug(f"  body['files'] count: {len(body_files)}")
+                logger.debug(f"  body['files'] structure: {json.dumps(body_files, indent=2, default=str)}")
+                
+                # Check knowledge structure
+                knowledge_in_body = new_body.get("metadata", {}).get("model", {}).get("info", {}).get("meta", {}).get("knowledge", [])
+                logger.debug(f"  Knowledge collections count: {len(knowledge_in_body)}")
+                logger.debug(f"  Knowledge structure: {json.dumps(knowledge_in_body, indent=2, default=str)}")
+                logger.debug("=" * 80)
 
-            # Convert payload based on source/target model backend mismatch
             source_owned_by = body.get("metadata", {}).get("model", {}).get("owned_by")
             target_owned_by = model_data.get("owned_by")
             
             if source_owned_by != target_owned_by:
                 if target_owned_by == "ollama":
-                    # Target is Ollama, source is OpenAI → convert to Ollama
                     new_body = convert_payload_openai_to_ollama(new_body)
-                elif target_owned_by == "openai":
-                    # Target is OpenAI, source might be Ollama → clean Ollama params
+                else:
                     new_body = clean_ollama_params(new_body)
 
             if self.valves.status:
