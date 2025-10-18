@@ -3,7 +3,7 @@ title: Semantic Router Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.0
+version: 1.1.0
 description: Filter that acts a model router, using model descriptions and capabilities
 (make sure to set them in the models you want to be presented to the router)
 and the prompt, selecting the best model base, pipe or preset for the task completion.
@@ -12,6 +12,13 @@ for contextual routing decisions. Automatically switches to vision fallback mode
 router model doesn't support vision. Strictly filters out inactive/deleted models (is_active must be True).
 Preserves all original request parameters and relies on Open WebUI's built-in payload
 conversion system to handle backend-specific parameter translation.
+
+v1.1.0 - DYNAMIC VISION RE-ROUTING:
+- Detects when images are added to conversation but current model lacks vision capability
+- Automatically triggers fresh routing with vision filter when needed
+- Works both with persisted routing markers and continuation without markers
+- Checks current model's vision capability before deciding to skip routing
+- Ensures seamless transition to vision-capable models when user adds images mid-conversation
 
 v1.0.0 - INVISIBLE TEXT PERSISTENCE (WORKING SOLUTION):
 - Emits hidden marker in first assistant message using zero-width unicode characters
@@ -901,56 +908,72 @@ class Filter:
                             "created_at": model_data.get("created_at"),
                         }
 
-                        if self.valves.debug:
-                            logger.debug(
-                                "Reconstructing full routing from persisted model ID"
+                        # Check if current request has images but persisted model lacks vision
+                        has_images_now = self._has_images(messages)
+                        if has_images_now and not selected_model["vision_capable"]:
+                            logger.info("=" * 80)
+                            logger.info(
+                                "RE-ROUTING REQUIRED - Images detected but current model lacks vision"
                             )
-
-                        files_data: List[Dict[str, Any]] = []
-
-                        original_files = body.get("files", [])
-                        if original_files:
-                            files_data.extend(original_files)
+                            logger.info(
+                                f"  Current model: {routed_model_id} (vision_capable=False)"
+                            )
+                            logger.info("  Triggering fresh routing with vision filter...")
+                            logger.info("=" * 80)
+                            # Fall through to routing logic below by not returning
+                            has_assistant_messages = False
+                            routed_model_id = None
+                        else:
                             if self.valves.debug:
                                 logger.debug(
-                                    f"Restored {len(original_files)} files from original request"
+                                    "Reconstructing full routing from persisted model ID"
                                 )
 
-                        knowledge = meta.get("knowledge", [])
-                        if isinstance(knowledge, list) and knowledge:
-                            knowledge_files = await self._get_files_from_collections(
-                                knowledge
+                            files_data: List[Dict[str, Any]] = []
+
+                            original_files = body.get("files", [])
+                            if original_files:
+                                files_data.extend(original_files)
+                                if self.valves.debug:
+                                    logger.debug(
+                                        f"Restored {len(original_files)} files from original request"
+                                    )
+
+                            knowledge = meta.get("knowledge", [])
+                            if isinstance(knowledge, list) and knowledge:
+                                knowledge_files = await self._get_files_from_collections(
+                                    knowledge
+                                )
+                                files_data = self._merge_files(files_data, knowledge_files)
+                                if self.valves.debug:
+                                    logger.debug(
+                                        f"Restored {len(knowledge_files)} knowledge files from routed model"
+                                    )
+
+                            new_body: dict[Any, Any] = self._build_updated_body(
+                                body, selected_model, selected_model_full, files_data
                             )
-                            files_data = self._merge_files(files_data, knowledge_files)
-                            if self.valves.debug:
-                                logger.debug(
-                                    f"Restored {len(knowledge_files)} knowledge files from routed model"
-                                )
+                            source_owned_by = (
+                                body.get("metadata", {}).get("model", {}).get("owned_by")
+                            )
+                            target_owned_by = model_data.get("owned_by")
 
-                        new_body: dict[Any, Any] = self._build_updated_body(
-                            body, selected_model, selected_model_full, files_data
-                        )
-                        source_owned_by = (
-                            body.get("metadata", {}).get("model", {}).get("owned_by")
-                        )
-                        target_owned_by = model_data.get("owned_by")
+                            if source_owned_by != target_owned_by:
+                                if target_owned_by == "ollama":
+                                    new_body = convert_payload_openai_to_ollama(new_body)
+                                else:
+                                    new_body = clean_ollama_params(new_body)
 
-                        if source_owned_by != target_owned_by:
-                            if target_owned_by == "ollama":
-                                new_body = convert_payload_openai_to_ollama(new_body)
-                            else:
-                                new_body = clean_ollama_params(new_body)
-
-                        logger.info(
-                            "Successfully restored full routing (model + tools + knowledge + metadata)"
-                        )
-                        logger.info(
-                            f"RETURNING new_body with model: {new_body.get('model', '')}"
-                        )
-                        logger.info(
-                            f"new_body['metadata']['model']['id']: {new_body.get('metadata', {}).get('model', {}).get('id')}"
-                        )
-                        return new_body
+                            logger.info(
+                                "Successfully restored full routing (model + tools + knowledge + metadata)"
+                            )
+                            logger.info(
+                                f"RETURNING new_body with model: {new_body.get('model', '')}"
+                            )
+                            logger.info(
+                                f"new_body['metadata']['model']['id']: {new_body.get('metadata', {}).get('model', {}).get('id')}"
+                            )
+                            return new_body
                     else:
                         logger.warning(
                             f"Persisted model {routed_model_id} not found in available models, falling back"
@@ -964,13 +987,74 @@ class Filter:
                     )
                     return body
             else:
-                logger.info("=" * 80)
-                logger.info("SKIPPING ROUTING - Conversation continuation detected")
-                logger.info(f"  Current body['model']: {body.get('model')}")
-                logger.info(f"  Message count: {len(messages)}")
-                logger.info("  No routing marker found, returning unchanged")
-                logger.info("=" * 80)
-                return body
+                # No routing marker found - check if we need to re-route for vision
+                has_images_now = self._has_images(messages)
+                
+                if has_images_now:
+                    # Check if current model has vision capability
+                    try:
+                        models = await get_models(
+                            self.__request__, self.__user__
+                        ) + await get_base_models(self.__user__)
+                        
+                        current_model_id = body.get("model")
+                        current_model_full = next(
+                            (
+                                m
+                                for m in models
+                                if extract_model_data(m).get("id") == current_model_id
+                            ),
+                            None,
+                        )
+                        
+                        if current_model_full:
+                            current_model_data = extract_model_data(current_model_full)
+                            if not is_vision_capable(current_model_data):
+                                logger.info("=" * 80)
+                                logger.info(
+                                    "RE-ROUTING REQUIRED - Images detected but current model lacks vision"
+                                )
+                                logger.info(
+                                    f"  Current model: {current_model_id} (vision_capable=False)"
+                                )
+                                logger.info("  Triggering fresh routing with vision filter...")
+                                logger.info("=" * 80)
+                                # Fall through to routing logic below
+                                has_assistant_messages = False
+                            else:
+                                # Current model has vision, continue without routing
+                                logger.info("=" * 80)
+                                logger.info("SKIPPING ROUTING - Conversation continuation detected")
+                                logger.info(f"  Current body['model']: {body.get('model')}")
+                                logger.info(f"  Message count: {len(messages)}")
+                                logger.info("  Current model has vision capability, no re-routing needed")
+                                logger.info("=" * 80)
+                                return body
+                        else:
+                            # Model not found, return as-is
+                            logger.info("=" * 80)
+                            logger.info("SKIPPING ROUTING - Conversation continuation detected")
+                            logger.info(f"  Current body['model']: {body.get('model')}")
+                            logger.info(f"  Message count: {len(messages)}")
+                            logger.info("  Current model not found in available models")
+                            logger.info("=" * 80)
+                            return body
+                    except Exception as e:
+                        logger.error(
+                            f"Error checking current model vision capability: {e}",
+                            exc_info=True,
+                        )
+                        logger.info("SKIPPING ROUTING - Error during vision check")
+                        return body
+                else:
+                    # No images, continue without routing
+                    logger.info("=" * 80)
+                    logger.info("SKIPPING ROUTING - Conversation continuation detected")
+                    logger.info(f"  Current body['model']: {body.get('model')}")
+                    logger.info(f"  Message count: {len(messages)}")
+                    logger.info("  No routing marker found, returning unchanged")
+                    logger.info("=" * 80)
+                    return body
 
         has_images = self._has_images(messages)
 
