@@ -13,45 +13,6 @@ router model doesn't support vision. Strictly filters out inactive/deleted model
 Preserves all original request parameters and relies on Open WebUI's built-in payload
 conversion system to handle backend-specific parameter translation.
 
-v1.1.0 - DYNAMIC VISION RE-ROUTING:
-- Detects when images are added to conversation but current model lacks vision capability
-- Automatically triggers fresh routing with vision filter when needed
-- Works both with persisted routing markers and continuation without markers
-- Checks current model's vision capability before deciding to skip routing
-- Ensures seamless transition to vision-capable models when user adds images mid-conversation
-
-v1.0.0 - INVISIBLE TEXT PERSISTENCE (WORKING SOLUTION):
-- Emits hidden marker in first assistant message using zero-width unicode characters
-- Pattern: ​‌‍⁠[model-id]​‌‍⁠ (invisible to user, persists in chat DB)
-- On continuation: detects marker in first assistant message, strips it, reconstructs routing
-- Simple, reliable: no middleware changes, no metadata dependencies, works with existing chat DB
-- Saves ton of logic compared to previous attempts with metadata/system messages
-
-Previous failed attempts (v0.9.x):
-- metadata.variables: Not persisted by Open WebUI across requests
-- System messages: Filtered out before saving to chat DB
-v0.9.1 - DUAL PERSISTENCE STRATEGY (FAILED):
-- Uses TWO methods to ensure routing persists across conversation turns:
-  1. metadata.variables (if supported)
-  2. Hidden system message in chat history (guaranteed)
-- Checks both sources when restoring routing on continuation
-
-v0.9.0 - MODEL PERSISTENCE (INITIAL):
-- First attempt using metadata.variables only
-
-v0.8.1 - ENHANCED LOGGING:
-- Added detailed INFO-level logging for routing skip detection
-- Logs show: body['model'] when skipping, message counts, and reasoning
-- Removed noisy DEBUG logs for filtered models (cleaner output)
-- Key routing decisions now clearly visible in logs
-- Summary remains: routes on first message, skips on subsequent
-
-v0.8.0 - SIMPLIFIED & FIXED:
-- Routes ONLY on first user message (detects assistant messages in history)
-- Reasoning message shown ONCE on first routing
-- Stores routing decision in instance variables for future use
-- Clean, simple approach: if conversation started → skip routing
-
 Enable debug mode (valves.debug = True) to see detailed routing diagnostics.
 """
 
@@ -856,8 +817,9 @@ class Filter:
                 if msg.get("role") == "assistant":
                     content = msg.get("content", "")
                     if isinstance(content, str):
+                        # Pattern to match marker with optional newlines before/after
                         marker_pattern = (
-                            r"\u200B\u200C\u200D\u2060(.*?)\u200B\u200C\u200D\u2060"
+                            r"\n*\u200B\u200C\u200D\u2060(.*?)\u200B\u200C\u200D\u2060\n*"
                         )
                         match = re.search(marker_pattern, content)
                         if match:
@@ -1261,7 +1223,8 @@ class Filter:
                 body, selected_model, selected_model_full, files_data
             )
 
-            hidden_marker = f"\u200b\u200c\u200d\u2060{selected_model['id']}\u200b\u200c\u200d\u2060"
+            # Add newlines around marker so it doesn't stick to LLM response text
+            hidden_marker = f"\n\n\u200b\u200c\u200d\u2060{selected_model['id']}\u200b\u200c\u200d\u2060\n\n"
 
             await __event_emitter__(
                 {

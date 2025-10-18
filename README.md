@@ -706,14 +706,27 @@ Analyze this resume:
 
 Control your Mopidy music server to play songs from the local library or YouTube, manage playlists, and handle various music commands. This pipe provides an intuitive interface for music playback, search, and playlist management through natural language commands.
 
+**⚠️ Requirements**: This pipe requires [Mopidy-Iris](https://github.com/jaedb/Iris) to be installed for the player interface. Iris provides a beautiful, feature-rich web interface for controlling Mopidy.
+
 ### Configuration
 
 - `model`: The model ID from your LLM provider
-- `mopidy_url`: URL for the Mopidy JSON-RPC API endpoint (default: `http://localhost:6680/mopidy/rpc`)
+- `mopidy_url`: URL for the Mopidy JSON-RPC API endpoint (default: `http://localhost:6680/mopidy/rpc`) - Iris UI must be installed
 - `youtube_api_key`: YouTube Data API key for search functionality
 - `temperature`: Model temperature (default: 0.7)
 - `max_search_results`: Maximum number of search results to return (default: 5)
 - `system_prompt`: System prompt for request analysis
+
+### Prerequisites
+
+1. **Mopidy Server**: Install and configure [Mopidy](https://mopidy.com/)
+2. **Mopidy-Iris**: Install the Iris web interface:
+   ```bash
+   pip install Mopidy-Iris
+   ```
+3. **Optional Extensions**:
+   - Mopidy-Local (for local library)
+   - Mopidy-YouTube (for YouTube playback)
 
 ### Usage
 
@@ -731,10 +744,11 @@ Control your Mopidy music server to play songs from the local library or YouTube
 - **YouTube Integration**: Search and play songs directly from YouTube
 - **Local Library Support**: Access and play songs from your local Mopidy library
 - **Playlist Management**: Create, modify, and manage playlists
-- **Playback Control**: Full control over playback including play, pause, skip, volume, and more
+- **Iris UI Integration**: Beautiful, professional web interface with full playback controls
+- **Seamless Embedding**: Iris player embedded directly in Open WebUI chat interface
 
-![Mopidy Example](img/mopidy_new.png)
-*Example of Mopidy Music Controller Pipe in action*
+![Mopidy Example](img/mopidy_0_7.png)
+*Example of Mopidy Music Controller Pipe with Iris UI (v0.7.0)*
 
 ---
 
@@ -901,7 +915,11 @@ Uses an LLM to automatically improve the quality of your prompts before they are
 
 ### Description
 
-Acts as an intelligent model router that analyzes the user's message and available models, then automatically selects the most appropriate model, pipe, or preset for the task. Features vision model filtering, knowledge base integration, and robust file handling with Open WebUI's RAG system.
+Acts as an intelligent model router that analyzes the user's message and available models, then automatically selects the most appropriate model, pipe, or preset for the task. Features vision model filtering, **dynamic vision re-routing**, conversation persistence, knowledge base integration, and robust file handling with Open WebUI's RAG system.
+
+The filter uses an innovative invisible text marker system to persist routing decisions across conversation turns. When a model is selected, the filter emits zero-width unicode characters in the first assistant message. These markers are **invisible to the LLM** (stripped before processing) but persist in the chat database, ensuring the same model, tools, and knowledge bases are used throughout the entire conversation without requiring metadata or system message manipulation.
+
+The filter automatically detects when images are added to an existing conversation and intelligently re-routes to a vision-capable model if the current model lacks vision support. This enables seamless transitions from text-only conversations to image-based interactions without manual model switching.
 
 ![Semantic Router Example](img/semantic_router_with_images.png)
 
@@ -919,11 +937,15 @@ Acts as an intelligent model router that analyzes the user's message and availab
 
 ### Features
 
+- **Conversation Persistence**: Routes only on first user message, then automatically maintains the selected model throughout the conversation using invisible text markers
+- **Dynamic Vision Re-Routing**: Automatically detects when images are added mid-conversation and re-routes to a vision-capable model if the current model lacks vision support
 - **Vision Model Filtering**: Automatically filters model selection to only vision-capable models when images are detected in the conversation (checks `meta.capabilities.vision` flag)
 - **Smart Fallback**: Uses `vision_fallback_model_id` only when no vision models are available in the filtered list
 - **Knowledge Base Integration**: Properly handles files from knowledge collections with full RAG retrieval support
+- **Tool Preservation**: Maintains model-specific tools across conversation turns
 - **File Structure Compliance**: Passes files in correct INPUT format to Open WebUI's `get_sources_from_items()` for proper RAG processing
-- **Whitelist Support**: Use `allowed_models` to restrict selection to specific models onlyyy
+- **Whitelist Support**: Use `allowed_models` to restrict selection to specific models only
+- **Cross-Backend Compatibility**: Automatically converts payloads between OpenAI and Ollama formats when routing between different backend types
 - **Automatic Fallback**: Gracefully handles errors by falling back to the original model
 
 ### Usage
@@ -932,18 +954,57 @@ Acts as an intelligent model router that analyzes the user's message and availab
 2. Configure `vision_fallback_model_id` to specify a fallback model for image queries
 3. Optionally set `allowed_models` to create a whitelist of preferred models, or use `banned_models` to exclude specific ones
 4. The filter will automatically:
-   - Detect images in conversations
-   - Filter available models to vision-capable ones when images are present
-   - Route to the best available model based on the task
+   - Route on the first user message only (analyzes task requirements and available models)
+   - Emit an invisible marker that persists the routing decision in chat history
+   - Detect and restore routing on subsequent messages in the conversation
+   - **Re-route dynamically when images are added to a conversation if the current model lacks vision capability**
+   - Detect images in conversations and filter to vision-capable models when present
+   - Preserve the selected model's tools and knowledge bases throughout the conversation
    - Attach relevant files from knowledge collections with proper RAG retrieval
+   - Convert payloads between OpenAI and Ollama formats as needed
+
+### How It Works
+
+**First Message (Routing):**
+
+1. Analyzes user message and available models
+2. Filters to vision-capable models if images are detected
+3. Routes to the best model for the task
+4. Emits invisible unicode marker (e.g., `​‌‍⁠model-id​‌‍⁠`) in first assistant message
+5. Preserves model's tools, knowledge bases, and configuration
+
+**Subsequent Messages (Persistence):**
+
+1. Detects invisible marker in conversation history
+2. Extracts persisted model ID
+3. **Checks if images are present but current model lacks vision capability** ⭐ NEW
+4. If vision mismatch detected, triggers fresh routing with vision filter
+5. Otherwise, reconstructs full routing (model + tools + knowledge + metadata)
+6. Strips marker from message content (invisible to LLM)
+7. Continues conversation with same model and configuration
+
+**Dynamic Vision Re-Routing Example:**
+
+```
+User: "Explain quantum physics"
+→ Router selects text model (e.g., llama3.2:latest)
+
+User: "Thanks! Now what's in this picture?" [attaches image]
+→ Filter detects: images present + current model lacks vision
+→ Automatically triggers re-routing with vision filter
+→ Router selects vision model (e.g., llama3.2-vision:latest)
+→ Vision model processes image and responds
+```
 
 ### How Vision Filtering Works
 
 When images are detected in the conversation:
+
 1. Filter checks all available models for `meta.capabilities.vision` flag
 2. Only vision-capable models are included in the routing selection
 3. If no vision models are found, uses `vision_fallback_model_id` as fallback
-4. Router makes informed decision with full image context
+4. Router model receives images for contextual routing decisions
+5. If router model doesn't support vision, automatically switches to vision fallback for routing
 
 ![Semantic Router](img/semantic_router.png)
 
