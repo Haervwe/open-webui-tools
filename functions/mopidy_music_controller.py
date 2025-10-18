@@ -3,8 +3,8 @@ title: Mopidy_Music_Controller
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.0
-description: A pipe to control Mopidy music server to play songs from local library or YouTube, manage playlists, and handle various music commands 
+version: 0.7.0
+description: A pipe to control Mopidy music server to play songs from local library or YouTube, manage playlists, and handle various music commands. Requires Mopidy-Iris UI to be installed for the player interface.
 needs a Local and/or a Youtube API endpoint configured in mopidy.
 mopidy repo: https://github.com/mopidy
 """
@@ -65,7 +65,7 @@ class Pipe:
         Model: str = Field(default="", description="Model tag")
         Mopidy_URL: str = Field(
             default="http://localhost:6680/mopidy/rpc",
-            description="URL for the Mopidy JSON-RPC API endpoint",
+            description="URL for the Mopidy JSON-RPC API endpoint (requires Iris UI installed)",
         )
         YouTube_API_Key: str = Field(
             default="", description="YouTube Data API key for search"
@@ -126,6 +126,82 @@ class Pipe:
                 },
             },
         )
+
+    async def emit_player(self):
+        """Emit the Iris player HTML as an embed."""
+        iris_available = await self.check_iris_available()
+        if not iris_available:
+            await self.emit_message("⚠️ Iris UI is not available. Please install Mopidy-Iris to use the music player.")
+            if self.valves.Debug_Logging:
+                logger.warning("Iris UI not available - player cannot be displayed")
+            return
+        
+        html_code = await self.generate_iris_embed()
+        if self.valves.Debug_Logging:
+            logger.debug("Using Iris UI for player")
+        
+        if html_code:
+            await self.__current_event_emitter__(
+                {
+                    "type": "embeds",
+                    "data": {
+                        "embeds": [html_code],
+                    },
+                }
+            )
+
+    async def check_iris_available(self) -> bool:
+        """Check if Iris web UI is available."""
+        try:
+            iris_url = self.valves.Mopidy_URL.replace("/mopidy/rpc", "/iris")
+            timeout = aiohttp.ClientTimeout(total=5.0)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(iris_url) as response:
+                    available = response.status == 200
+                    if self.valves.Debug_Logging:
+                        logger.debug(f"Iris UI available at {iris_url}: {available}")
+                    return available
+        except Exception as e:
+            if self.valves.Debug_Logging:
+                logger.debug(f"Iris UI not available: {e}")
+            return False
+
+    async def generate_iris_embed(self) -> str:
+        """Generate an iframe embed for Iris UI."""
+        # Get base URL for proper iframe embedding
+        base_url = self.valves.Mopidy_URL.rsplit("/mopidy", 1)[0]
+        iris_full_url = f"{base_url}/iris"
+        
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Mopidy Iris Player</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            background: #000;
+            overflow: hidden;
+            height: 100vh;
+        }}
+        iframe {{
+            width: 100%;
+            height: 800px;
+            min-height: 800px;
+            border: none;
+        }}
+    </style>
+</head>
+<body>
+    <iframe src="{iris_full_url}" allow="autoplay; clipboard-write" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
+</body>
+</html>"""
+        return html
 
     async def search_local_playlists(self, query: str) -> Optional[List[Dict]]:
         """Search for playlists in the local Mopidy library."""
@@ -303,629 +379,6 @@ class Pipe:
         except Exception as e:
             logger.error(f"Error selecting best playlist: {e}")
             return None
-
-    async def generate_player_html(self) -> str:
-        """Generate HTML code for the music player UI with all logic included in the output."""
-        current_track = await self.get_current_track_info()
-        track_name = current_track.get("name", "No track playing")
-        artists = (
-            ", ".join(
-                artist.get("name", "Unknown Artist")
-                for artist in current_track.get("artists", [])
-            )
-            if current_track.get("artists")
-            else "Unknown Artist"
-        )
-        album = current_track.get("album", {}).get("name", "Unknown Album")
-        ws_url = self.valves.Mopidy_URL.replace("http://", "ws://").replace(
-            "/mopidy/rpc", "/mopidy/ws"
-        )
-        rpc_url = self.valves.Mopidy_URL
-        
-        html = f"""<!DOCTYPE html>
-<head>
-    <title>Mopidy Player</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            padding: 20px;
-        }}
-        
-        .player {{
-            background: #2a2a2a;
-            border-radius: 20px;
-            padding: 30px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
-            max-width: 420px;
-            width: 100%;
-            border: 1px solid #3a3a3a;
-        }}
-        
-        .album-art {{
-            width: 100%;
-            aspect-ratio: 1;
-            background: linear-gradient(135deg, #1a1a1a 0%, #252525 100%);
-            border-radius: 15px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 80px;
-            margin-bottom: 25px;
-            position: relative;
-            overflow: hidden;
-            background-size: cover;
-            background-position: center;
-            border: 1px solid #3a3a3a;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-        }}
-        
-        .album-art-placeholder {{
-            font-size: 80px;
-            color: #555;
-            z-index: 1;
-        }}
-        
-        .album-art img {{
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            display: block;
-        }}
-        
-        .album-art.playing::after {{
-            content: '';
-            position: absolute;
-            width: 200%;
-            height: 200%;
-            background: linear-gradient(45deg, transparent, rgba(255,255,255,0.05), transparent);
-            animation: shine 3s infinite;
-            z-index: 2;
-        }}
-        
-        @keyframes shine {{
-            0% {{ transform: translateX(-100%) translateY(-100%) rotate(45deg); }}
-            100% {{ transform: translateX(100%) translateY(100%) rotate(45deg); }}
-        }}
-        
-        .track-info {{
-            text-align: center;
-            margin-bottom: 25px;
-            padding: 0 10px;
-        }}
-        
-        .track-name {{
-            font-size: 22px;
-            font-weight: 700;
-            color: #ffffff;
-            margin-bottom: 8px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            line-height: 1.3;
-        }}
-        
-        .track-artist {{
-            font-size: 16px;
-            color: #b0b0b0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            line-height: 1.4;
-        }}
-        
-        .track-album {{
-            font-size: 14px;
-            color: #808080;
-            margin-top: 5px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            line-height: 1.4;
-        }}
-        
-        .progress-container {{
-            margin-bottom: 28px;
-        }}
-        
-        .progress-bar {{
-            width: 100%;
-            height: 6px;
-            background: #1a1a1a;
-            border-radius: 3px;
-            cursor: pointer;
-            position: relative;
-            margin-bottom: 10px;
-            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
-        }}
-        
-        .progress-bar:hover {{
-            height: 8px;
-            transition: height 0.2s ease;
-        }}
-        
-        .progress-fill {{
-            height: 100%;
-            background: linear-gradient(90deg, #5a5a5a 0%, #8a8a8a 100%);
-            border-radius: 3px;
-            width: 0%;
-            transition: width 0.1s linear;
-            box-shadow: 0 0 8px rgba(138, 138, 138, 0.4);
-        }}
-        
-        .time-info {{
-            display: flex;
-            justify-content: space-between;
-            font-size: 13px;
-            color: #999;
-            font-weight: 500;
-        }}
-        
-        .controls {{
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 20px;
-            margin-bottom: 25px;
-        }}
-        
-        .control-btn {{
-            background: #333;
-            border: 1px solid #444;
-            font-size: 22px;
-            cursor: pointer;
-            padding: 0;
-            border-radius: 50%;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            color: #bbb;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 52px;
-            height: 52px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-            line-height: 1;
-            font-family: Arial, sans-serif;
-        }}
-        
-        .control-btn:hover {{
-            background: #3e3e3e;
-            color: #ffffff;
-            transform: scale(1.1);
-            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
-            border-color: #555;
-        }}
-        
-        .control-btn:active {{
-            transform: scale(0.95);
-        }}
-        
-        .control-btn.play-pause {{
-            background: linear-gradient(135deg, #4a4a4a 0%, #6a6a6a 100%);
-            color: white;
-            font-size: 26px;
-            width: 68px;
-            height: 68px;
-            border: 2px solid #555;
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-            line-height: 1;
-        }}
-        
-        .control-btn.play-pause:hover {{
-            background: linear-gradient(135deg, #5a5a5a 0%, #7a7a7a 100%);
-            transform: scale(1.12);
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-            border-color: #666;
-        }}
-        
-        .control-btn.play-pause:active {{
-            transform: scale(1.02);
-        }}
-        
-        .volume-container {{
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 15px;
-            padding: 0 5px;
-        }}
-        
-        .volume-icon {{
-            font-size: 22px;
-            color: #b0b0b0;
-            min-width: 24px;
-            text-align: center;
-        }}
-        
-        .volume-slider {{
-            flex: 1;
-            height: 6px;
-            -webkit-appearance: none;
-            background: #1a1a1a;
-            border-radius: 3px;
-            outline: none;
-            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
-        }}
-        
-        .volume-slider:hover {{
-            background: #222;
-        }}
-        
-        .volume-slider::-webkit-slider-thumb {{
-            -webkit-appearance: none;
-            width: 18px;
-            height: 18px;
-            background: linear-gradient(135deg, #5a5a5a 0%, #8a8a8a 100%);
-            border-radius: 50%;
-            cursor: pointer;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-            transition: all 0.2s ease;
-        }}
-        
-        .volume-slider::-webkit-slider-thumb:hover {{
-            transform: scale(1.2);
-            background: linear-gradient(135deg, #6a6a6a 0%, #9a9a9a 100%);
-        }}
-        
-        .volume-slider::-moz-range-thumb {{
-            width: 18px;
-            height: 18px;
-            background: linear-gradient(135deg, #5a5a5a 0%, #8a8a8a 100%);
-            border-radius: 50%;
-            cursor: pointer;
-            border: none;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-            transition: all 0.2s ease;
-        }}
-        
-        .volume-slider::-moz-range-thumb:hover {{
-            transform: scale(1.2);
-            background: linear-gradient(135deg, #6a6a6a 0%, #9a9a9a 100%);
-        }}
-        
-        .status {{
-            text-align: center;
-            font-size: 13px;
-            color: #888;
-            padding: 10px;
-            background: #1a1a1a;
-            border-radius: 10px;
-            font-weight: 500;
-            border: 1px solid #333;
-        }}
-        
-        .status.connected {{
-            color: #90ee90;
-            background: rgba(144, 238, 144, 0.1);
-            border-color: rgba(144, 238, 144, 0.3);
-        }}
-        
-        .status.error {{
-            color: #ff6b6b;
-            background: rgba(255, 107, 107, 0.1);
-            border-color: rgba(255, 107, 107, 0.3);
-        }}
-    </style>
-</head>
-<body>
-    <div class="player">
-        <div class="album-art" id="albumArt">
-            <span class="album-art-placeholder">🎵</span>
-        </div>
-        
-        <div class="track-info">
-            <div class="track-name" id="trackName">{track_name}</div>
-            <div class="track-artist" id="trackArtist">{artists}</div>
-            <div class="track-album" id="trackAlbum">{album}</div>
-        </div>
-        
-        <div class="progress-container">
-            <div class="progress-bar" id="progressBar">
-                <div class="progress-fill" id="progressFill"></div>
-            </div>
-            <div class="time-info">
-                <span id="currentTime">0:00</span>
-                <span id="duration">0:00</span>
-            </div>
-        </div>
-        
-        <div class="controls">
-            <button class="control-btn" onclick="previousTrack()" title="Previous">⏮</button>
-            <button class="control-btn play-pause" onclick="togglePlayPause()" id="playPauseBtn" title="Play/Pause">▶</button>
-            <button class="control-btn" onclick="nextTrack()" title="Next">⏭</button>
-        </div>
-        
-        <div class="volume-container">
-            <span class="volume-icon">♪</span>
-            <input type="range" min="0" max="100" value="50" class="volume-slider" id="volumeSlider">
-        </div>
-        
-        <div class="status" id="status">Connecting...</div>
-    </div>
-    
-    <script>
-        const RPC_URL = '{rpc_url}';
-        const WS_URL = '{ws_url}';
-        let ws = null;
-        let isPlaying = false;
-        let currentPosition = 0;
-        let trackLength = 0;
-        let positionInterval = null;
-        
-        // Format time in seconds to MM:SS
-        function formatTime(seconds) {{
-            if (!seconds || isNaN(seconds)) return '0:00';
-            const mins = Math.floor(seconds / 60);
-            const secs = Math.floor(seconds % 60);
-            return `${{mins}}:${{secs.toString().padStart(2, '0')}}`;
-        }}
-        
-        // Make RPC call to Mopidy
-        async function rpcCall(method, params = {{}}) {{
-            try {{
-                const response = await fetch(RPC_URL, {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{
-                        jsonrpc: '2.0',
-                        id: Date.now(),
-                        method: method,
-                        params: params
-                    }})
-                }});
-                const data = await response.json();
-                return data.result;
-            }} catch (error) {{
-                console.error('RPC call failed:', error);
-                updateStatus('Error: ' + error.message, 'error');
-                return null;
-            }}
-        }}
-        
-        // Update album art
-        async function updateAlbumArt(track) {{
-            const albumArt = document.getElementById('albumArt');
-            
-            if (track && track.uri) {{
-                try {{
-                    // Get album art images from Mopidy
-                    const images = await rpcCall('core.library.get_images', {{ uris: [track.uri] }});
-                    
-                    if (images && images[track.uri] && images[track.uri].length > 0) {{
-                        // Sort by size to get the best quality image
-                        const sortedImages = images[track.uri].sort((a, b) => {{
-                            const aSize = (a.width || 0) * (a.height || 0);
-                            const bSize = (b.width || 0) * (b.height || 0);
-                            return bSize - aSize;
-                        }});
-                        
-                        let imageUrl = sortedImages[0].uri;
-                        
-                        // Fix the URL if it's relative or has wrong base
-                        // Parse the RPC URL to get the Mopidy server base
-                        const rpcUrl = new URL(RPC_URL);
-                        const mopidyBase = `${{rpcUrl.protocol}}//${{rpcUrl.host}}`;
-                        
-                        // If the image URL starts with /images, /local, or other Mopidy paths
-                        // prepend the Mopidy server base
-                        if (imageUrl.startsWith('/')) {{
-                            imageUrl = mopidyBase + imageUrl;
-                        }} else if (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {{
-                            // If it's not an absolute URL, make it one
-                            imageUrl = mopidyBase + '/' + imageUrl;
-                        }}
-                        
-                        console.log('Loading album art from:', imageUrl);
-                        albumArt.innerHTML = `<img src="${{imageUrl}}" alt="Album Art" onerror="this.style.display='none'; this.parentElement.innerHTML='<span class=\\'album-art-placeholder\\'>🎵</span>'; console.error('Failed to load image:', '${{imageUrl}}');">`;
-                    }} else {{
-                        albumArt.innerHTML = '<span class="album-art-placeholder">🎵</span>';
-                    }}
-                }} catch (error) {{
-                    console.error('Failed to load album art:', error);
-                    albumArt.innerHTML = '<span class="album-art-placeholder">🎵</span>';
-                }}
-            }} else {{
-                albumArt.innerHTML = '<span class="album-art-placeholder">🎵</span>';
-            }}
-        }}
-        
-        // Update UI with track info
-        function updateTrackInfo(track) {{
-            if (!track) return;
-            
-            document.getElementById('trackName').textContent = track.name || 'Unknown Track';
-            
-            const artists = track.artists?.map(a => a.name).join(', ') || 'Unknown Artist';
-            document.getElementById('trackArtist').textContent = artists;
-            
-            const album = track.album?.name || 'Unknown Album';
-            document.getElementById('trackAlbum').textContent = album;
-            
-            trackLength = track.length ? track.length / 1000 : 0;
-            document.getElementById('duration').textContent = formatTime(trackLength);
-            
-            // Update album art
-            updateAlbumArt(track);
-        }}
-        
-        // Update play/pause button
-        function updatePlayPauseButton(playing) {{
-            isPlaying = playing;
-            const btn = document.getElementById('playPauseBtn');
-            btn.textContent = playing ? '⏸' : '▶';
-            
-            const albumArt = document.getElementById('albumArt');
-            if (playing) {{
-                albumArt.classList.add('playing');
-                startPositionTracking();
-            }} else {{
-                albumArt.classList.remove('playing');
-                stopPositionTracking();
-            }}
-        }}
-        
-        // Update progress bar
-        function updateProgress(position) {{
-            if (!trackLength) return;
-            currentPosition = position / 1000;
-            const percentage = (currentPosition / trackLength) * 100;
-            document.getElementById('progressFill').style.width = percentage + '%';
-            document.getElementById('currentTime').textContent = formatTime(currentPosition);
-        }}
-        
-        // Start tracking position
-        function startPositionTracking() {{
-            stopPositionTracking();
-            positionInterval = setInterval(async () => {{
-                const position = await rpcCall('core.playback.get_time_position');
-                if (position !== null) {{
-                    updateProgress(position);
-                }}
-            }}, 1000);
-        }}
-        
-        function stopPositionTracking() {{
-            if (positionInterval) {{
-                clearInterval(positionInterval);
-                positionInterval = null;
-            }}
-        }}
-        
-        // Update status message
-        function updateStatus(message, type = '') {{
-            const status = document.getElementById('status');
-            status.textContent = message;
-            status.className = 'status' + (type ? ' ' + type : '');
-        }}
-        
-        // Control functions
-        async function togglePlayPause() {{
-            const state = await rpcCall('core.playback.get_state');
-            if (state === 'playing') {{
-                await rpcCall('core.playback.pause');
-            }} else {{
-                await rpcCall('core.playback.play');
-            }}
-        }}
-        
-        async function previousTrack() {{
-            await rpcCall('core.playback.previous');
-        }}
-        
-        async function nextTrack() {{
-            await rpcCall('core.playback.next');
-        }}
-        
-        // Volume control
-        document.getElementById('volumeSlider').addEventListener('input', async (e) => {{
-            const volume = parseInt(e.target.value);
-            await rpcCall('core.mixer.set_volume', {{ volume: volume }});
-        }});
-        
-        // Progress bar seeking
-        document.getElementById('progressBar').addEventListener('click', async (e) => {{
-            if (!trackLength) return;
-            const bar = e.currentTarget;
-            const rect = bar.getBoundingClientRect();
-            const percentage = (e.clientX - rect.left) / rect.width;
-            const position = Math.floor(percentage * trackLength * 1000);
-            await rpcCall('core.playback.seek', {{ time_position: position }});
-        }});
-        
-        // Initialize WebSocket connection
-        function connectWebSocket() {{
-            try {{
-                ws = new WebSocket(WS_URL);
-                
-                ws.onopen = () => {{
-                    console.log('WebSocket connected');
-                    updateStatus('Connected', 'connected');
-                    initializePlayer();
-                }};
-                
-                ws.onmessage = (event) => {{
-                    const data = JSON.parse(event.data);
-                    
-                    if (data.event === 'track_playback_started') {{
-                        updateTrackInfo(data.tl_track?.track);
-                        updatePlayPauseButton(true);
-                    }} else if (data.event === 'playback_state_changed') {{
-                        updatePlayPauseButton(data.new_state === 'playing');
-                    }} else if (data.event === 'track_playback_paused') {{
-                        updatePlayPauseButton(false);
-                    }} else if (data.event === 'track_playback_resumed') {{
-                        updatePlayPauseButton(true);
-                    }} else if (data.event === 'seeked') {{
-                        updateProgress(data.time_position);
-                    }}
-                }};
-                
-                ws.onerror = (error) => {{
-                    console.error('WebSocket error:', error);
-                    updateStatus('Connection error', 'error');
-                }};
-                
-                ws.onclose = () => {{
-                    console.log('WebSocket disconnected');
-                    updateStatus('Disconnected - Retrying...', 'error');
-                    setTimeout(connectWebSocket, 3000);
-                }};
-            }} catch (error) {{
-                console.error('Failed to connect WebSocket:', error);
-                updateStatus('Failed to connect', 'error');
-            }}
-        }}
-        
-        // Initialize player state
-        async function initializePlayer() {{
-            try {{
-                // Get current track
-                const track = await rpcCall('core.playback.get_current_track');
-                if (track) {{
-                    updateTrackInfo(track);
-                }}
-                
-                // Get playback state
-                const state = await rpcCall('core.playback.get_state');
-                updatePlayPauseButton(state === 'playing');
-                
-                // Get current position
-                const position = await rpcCall('core.playback.get_time_position');
-                if (position !== null) {{
-                    updateProgress(position);
-                }}
-                
-                // Get volume
-                const volume = await rpcCall('core.mixer.get_volume');
-                if (volume !== null) {{
-                    document.getElementById('volumeSlider').value = volume;
-                }}
-                
-                updateStatus('Ready', 'connected');
-            }} catch (error) {{
-                console.error('Failed to initialize player:', error);
-                updateStatus('Initialization error', 'error');
-            }}
-        }}
-        
-        // Start everything
-        connectWebSocket();
-    </script>
-</body>
-"""
-        return html
 
     async def search_youtube_with_api(
         self, query: str, playlist=False
@@ -1383,11 +836,7 @@ class Pipe:
                 await self.emit_message(
                     f"Playing from local library: {track_names}..."
                 )
-                html_code = await self.generate_player_html()
-                html_code_block = (
-                    f"""\n ```html \n{html_code}""" if html_code else ""
-                )
-                await self.emit_message(html_code_block)
+                await self.emit_player()
                 await self.emit_status("success", "Playback started", True)
                 return
 
@@ -1402,11 +851,7 @@ class Pipe:
                 await self.emit_message(
                     f"Playing '{track['name']}' by {track['artists'][0]} from YouTube."
                 )
-                html_code = await self.generate_player_html()
-                html_code_block = (
-                    f"""\n ```html \n{html_code}""" if html_code else ""
-                )
-                await self.emit_message(html_code_block)
+                await self.emit_player()
                 await self.emit_status("success", "Playback started", True)
                 return
             else:
@@ -1437,11 +882,7 @@ class Pipe:
                             await self.emit_message(
                                 f"Now playing playlist '{best_playlist['name']}' from local library."
                             )
-                            html_code = await self.generate_player_html()
-                            html_code_block = (
-                                f"""\n```html\n{html_code}\n```""" if html_code else ""
-                            )
-                            await self.emit_message(html_code_block)
+                            await self.emit_player()
                             await self.emit_status("success", "Playback started", True)
                         else:
                             await self.emit_message("Failed to play playlist.")
@@ -1471,11 +912,7 @@ class Pipe:
                     await self.emit_message(
                         f"Now playing from local library: {track_names}{'...' if len(tracks) > 3 else ''}"
                     )
-                    html_code = await self.generate_player_html()
-                    html_code_block = (
-                        f"""\n```html\n{html_code}\n```""" if html_code else ""
-                    )
-                    await self.emit_message(html_code_block)
+                    await self.emit_player()
                     await self.emit_status("success", "Playback started", True)
                 else:
                     await self.emit_message("Failed to play tracks.")
@@ -1498,11 +935,7 @@ class Pipe:
                             await self.emit_message(
                                 f"Now playing YouTube playlist '{best_playlist['name']}'."
                             )
-                            html_code = await self.generate_player_html()
-                            html_code_block = (
-                                f"""\n```html\n{html_code}\n```""" if html_code else ""
-                            )
-                            await self.emit_message(html_code_block)
+                            await self.emit_player()
                             await self.emit_status("success", "Playback started", True)
                         else:
                             await self.emit_message("Failed to play YouTube playlist.")
@@ -1526,9 +959,7 @@ class Pipe:
             return
 
         elif action == "show_current_song":
-            html_code = await self.generate_player_html()
-            html_code_block = f"""\n ```html \n{html_code}""" if html_code else ""
-            await self.emit_message(html_code_block)
+            await self.emit_player()
             await self.emit_status("success", "Displayed current song", True)
             return
 
