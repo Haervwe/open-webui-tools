@@ -364,12 +364,12 @@ class Tools:
             padding: 20px;
         }}
         .player-container {{
-            background: rgba(20, 20, 25, 0.5);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(20, 20, 25, 0.25);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.06);
             border-radius: 12px;
             padding: 24px;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
             max-width: 480px;
             width: 100%;
         }}
