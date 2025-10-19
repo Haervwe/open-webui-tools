@@ -18,6 +18,7 @@ This repository contains **15+ specialized tools and functions** designed to enh
 - **arXiv Search** - Academic paper discovery (no API key required!)
 - **Perplexica Search** - Web search using Perplexica API with citations
 - **Pexels Media Search** - High-quality photos and videos from Pexels API
+- **YouTube Search & Embed** - Search YouTube and play videos in embedded player
 - **Native Image Generator** - Direct Open WebUI image generation with Ollama model management
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI ACE Step Audio** - Advanced music generation
@@ -92,29 +93,30 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 1. [arXiv Search Tool](#arxiv-search-tool)
 2. [Perplexica Search Tool](#perplexica-search-tool)
 3. [Pexels Media Search Tool](#pexels-media-search-tool)
-4. [Native Image Generator](#native-image-generator)
-5. [Hugging Face Image Generator](#hugging-face-image-generator)
-6. [Cloudflare Workers AI Image Generator](#cloudflare-workers-ai-image-generator)
-7. [SearxNG Image Search Tool](#searxng-image-search-tool)
-8. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
-9. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-10. [Planner Agent v2](#planner-agent-v2)
-11. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-12. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-13. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-14. [Mopidy Music Controller](#mopidy-music-controller)
-15. [Letta Agent Pipe](#letta-agent-pipe)
-16. [MCP Pipe](#mcp-pipe)
-17. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-18. [Semantic Router Filter](#semantic-router-filter)
-19. [Full Document Filter](#full-document-filter)
-20. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-21. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-22. [Installation](#installation)
-23. [Contributing](#contributing)
-24. [License](#license)
-25. [Credits](#credits)
-26. [Support](#support)
+4. [YouTube Search & Embed Tool](#youtube-search--embed-tool)
+5. [Native Image Generator](#native-image-generator)
+6. [Hugging Face Image Generator](#hugging-face-image-generator)
+7. [Cloudflare Workers AI Image Generator](#cloudflare-workers-ai-image-generator)
+8. [SearxNG Image Search Tool](#searxng-image-search-tool)
+9. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
+10. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+11. [Planner Agent v2](#planner-agent-v2)
+12. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+13. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+14. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+15. [Mopidy Music Controller](#mopidy-music-controller)
+16. [Letta Agent Pipe](#letta-agent-pipe)
+17. [MCP Pipe](#mcp-pipe)
+18. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+19. [Semantic Router Filter](#semantic-router-filter)
+20. [Full Document Filter](#full-document-filter)
+21. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+22. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+23. [Installation](#installation)
+24. [Contributing](#contributing)
+25. [License](#license)
+26. [Credits](#credits)
+27. [Support](#support)
 
 ---
 
@@ -230,6 +232,75 @@ Search and retrieve high-quality photos and videos from the Pexels API. This too
 - **Rate Limit Handling**: Built-in error handling for API limits and invalid keys
 - **LLM Optimized**: Results are limited and formatted to prevent overwhelming language models
 - **Real-time Status**: Progress updates during search execution
+
+---
+
+### YouTube Search & Embed Tool
+
+### Description
+
+Search YouTube for videos and display them in a beautiful embedded player directly in your Open WebUI chat. This tool provides comprehensive YouTube search capabilities with automatic citation generation, detailed video information, and a custom-styled embedded player. Perfect for finding tutorials, music videos, educational content, or any video content you need.
+
+### Configuration
+
+- `YOUTUBE_API_KEY` (str): YouTube Data API v3 key from https://console.cloud.google.com/apis/credentials (required)
+- `MAX_RESULTS` (int): Maximum number of search results to return (default: 5, range: 1-10)
+- `SHOW_EMBEDDED_PLAYER` (bool): Show embedded YouTube player for the first result (default: `True`)
+- `REGION_CODE` (str): Region code for search results, e.g., "US", "GB", "JP" (default: "US")
+- `SAFE_SEARCH` (str): Safe search filter - "none", "moderate", or "strict" (default: "moderate")
+
+**Prerequisites**: Get a free YouTube Data API v3 key from [Google Cloud Console](https://console.cloud.google.com/apis/credentials) and enable the YouTube Data API v3 in your project.
+
+### Usage
+
+- **Search for Videos:**
+
+  ```python
+  Search YouTube for "python tutorial for beginners"
+  ```
+
+- **Play Specific Video:**
+
+  ```python
+  Play YouTube video dQw4w9WgXcQ
+  ```
+
+- **Search with Custom Results:**
+
+  ```python
+  Search YouTube for "cooking recipes" with 10 results
+  ```
+
+### Features
+
+- **Two Main Functions**: `search_youtube` for searching and `play_video` for playing specific video IDs
+- **Embedded Player**: Beautiful custom-styled YouTube player embedded directly in chat with responsive design
+- **Safe Search**: Built-in content filtering options
+- **Region Support**: Localized search results based on region code
+- **Direct Links**: Provides YouTube links and "Watch on YouTube" buttons
+- **Rate Limit Handling**: Proper error handling for API quota limits
+- **Real-time Status**: Progress updates during search and loading
+
+### Getting Started
+
+1. **Get a YouTube API Key:**
+   - Visit [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a new project or select an existing one
+   - Enable the "YouTube Data API v3"
+   - Create credentials (API Key)
+   - Copy the API key
+
+2. **Configure the Tool:**
+   - Open the tool's Valves settings in Open WebUI
+   - Paste your API key into the `YOUTUBE_API_KEY` field
+   - Adjust other settings as desired (region, max results, etc.)
+
+3. **Start Searching:**
+   - Use natural language: "Search YouTube for [topic]"
+   - Or use the function directly: `search_youtube("topic")`
+
+![YouTube Embedded Player Example](img/youtube_embedded.png)
+*Example of YouTube video embedded in Open WebUI chat*
 
 ---
 
