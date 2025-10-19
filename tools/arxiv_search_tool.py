@@ -6,7 +6,7 @@ author_urls:
   - https://github.com/Haervwe/
   - https://github.com/tan-yong-sheng/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.1
+version: 0.2.2
 """
 
 import aiohttp
@@ -25,6 +25,7 @@ class Tools:
     def __init__(self):
         self.base_url = "https://searchthearxiv.com/search"
         self.max_results = 5
+        self.citation = False
 
     async def search_papers(
         self,

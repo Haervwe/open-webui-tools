@@ -3,7 +3,7 @@ title: Perplexica Search API Tool
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
+version: 0.2.1
 license: MIT
 """
 
@@ -35,6 +35,7 @@ class Tools:
 
     def __init__(self):
         self.valves = self.Valves()
+        self.citation = False
         self.tools = [
             {
                 "type": "function",

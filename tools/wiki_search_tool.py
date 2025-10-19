@@ -5,18 +5,15 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 requirements:wikipedia-api
-version: 0.1.0
+version: 0.1.1
 """
 
 import wikipediaapi
 import aiohttp
-import json
-from typing import Optional, Dict, Any, Callable, Awaitable
+from typing import Optional, Any, Callable, Awaitable
 from pydantic import BaseModel, Field
 import logging
-import re
 from bs4 import BeautifulSoup
-from functools import partial
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -90,6 +87,7 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
         self.wiki = None
+        self.citation = False
         self.base_api_url = "https://en.wikipedia.org/w/api.php"
         self.image_prompt = """IMPORTANT INSTRUCTION FOR USING IMAGES:
 1. The text after this contains Wikipedia article images in markdown format.
