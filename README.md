@@ -314,6 +314,7 @@ Generate images using Open WebUI's native image generation middleware configured
 
 - `unload_ollama_models` (bool): Whether to unload all Ollama models from VRAM before generating images (default: `False`)
 - `ollama_url` (str): Ollama API URL for model management (default: `http://host.docker.internal:11434`)
+- `emit_embeds` (bool): Whether to emit HTML image embeds via the `embeds` event so generated images are displayed inline in the chat (default: `True`). When `False`, the tool will skip emitting embeds and only return bare download URLs. If `emit_embeds` is `True` but no event emitter is available, images cannot be displayed inline and only the URLs will be returned.
 
 **Prerequisites**: You must have image generation configured in Open WebUI's admin settings under Settings > Images. This tool works with any image generation backend you have set up (AUTOMATIC1111, ComfyUI, OpenAI, etc.).
 
