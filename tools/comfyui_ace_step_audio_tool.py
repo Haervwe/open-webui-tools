@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.2
+version: 0.3.1
 """
 
 import json
@@ -333,10 +333,402 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
+    def _generate_audio_player_embed(self, audio_url: str, song_title: str, tags: str, lyrics: Optional[str] = None) -> str:
+        """Generate a sleek custom audio player embed with styled controls."""
+        # Escape HTML special characters
+        safe_title = song_title.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+        safe_tags = tags.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+        safe_lyrics = (lyrics or "Instrumental").replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{safe_title}</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        html, body {{
+            background: transparent;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            overflow: hidden;
+        }}
+        body {{
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }}
+        .player-container {{
+            background: rgba(20, 20, 25, 0.5);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+            max-width: 480px;
+            width: 100%;
+        }}
+        .player-header {{
+            text-align: center;
+            margin-bottom: 20px;
+        }}
+        .player-title {{
+            font-size: 20px;
+            font-weight: 600;
+            color: #f0f0f0;
+            margin-bottom: 5px;
+            letter-spacing: -0.2px;
+        }}
+        .player-subtitle {{
+            font-size: 10px;
+            color: #888;
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }}
+        
+        /* Custom Audio Player */
+        .custom-player {{
+            margin: 18px 0;
+        }}
+        .progress-container {{
+            width: 100%;
+            height: 5px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 3px;
+            cursor: pointer;
+            margin-bottom: 14px;
+            position: relative;
+            overflow: hidden;
+        }}
+        .progress-bar {{
+            height: 100%;
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 3px;
+            width: 0%;
+            transition: width 0.1s linear;
+        }}
+        .controls {{
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }}
+        .play-btn {{
+            width: 44px;
+            height: 44px;
+            min-width: 44px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.12);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: #fff;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }}
+        .play-btn svg {{
+            width: 16px;
+            height: 16px;
+            fill: currentColor;
+        }}
+        .play-btn.playing svg {{
+            width: 14px;
+            height: 14px;
+        }}
+        .play-btn:hover {{
+            background: rgba(255, 255, 255, 0.2);
+            transform: scale(1.05);
+        }}
+        .time-display {{
+            font-size: 12px;
+            color: #aaa;
+            font-variant-numeric: tabular-nums;
+            min-width: 85px;
+        }}
+        .volume-container {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+        }}
+        .volume-btn {{
+            width: 28px;
+            height: 28px;
+            min-width: 28px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #aaa;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }}
+        .volume-btn svg {{
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
+        }}
+        .volume-btn:hover {{
+            background: rgba(255, 255, 255, 0.15);
+            color: #ccc;
+        }}
+        .volume-slider {{
+            flex: 1;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 2px;
+            cursor: pointer;
+            position: relative;
+        }}
+        .volume-bar {{
+            height: 100%;
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 2px;
+            width: 100%;
+        }}
+        
+        .info-section {{
+            margin-top: 18px;
+            padding-top: 18px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }}
+        .info-item {{
+            margin-bottom: 14px;
+        }}
+        .info-item:last-child {{
+            margin-bottom: 0;
+        }}
+        .info-label {{
+            font-size: 10px;
+            font-weight: 600;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 6px;
+        }}
+        .info-content {{
+            font-size: 13px;
+            color: #ccc;
+            line-height: 1.6;
+        }}
+        
+        /* Lyrics with scrollbar only */
+        .lyrics-container {{
+            max-height: 120px;
+            overflow-y: auto;
+            font-size: 13px;
+            color: #ccc;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            padding-right: 8px;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255, 255, 255, 0.25) rgba(255, 255, 255, 0.05);
+        }}
+        .lyrics-container::-webkit-scrollbar {{
+            width: 5px;
+        }}
+        .lyrics-container::-webkit-scrollbar-track {{
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 3px;
+        }}
+        .lyrics-container::-webkit-scrollbar-thumb {{
+            background: rgba(255, 255, 255, 0.25);
+            border-radius: 3px;
+        }}
+        .lyrics-container::-webkit-scrollbar-thumb:hover {{
+            background: rgba(255, 255, 255, 0.35);
+        }}
+        
+        .download-btn {{
+            display: inline-block;
+            width: 100%;
+            padding: 11px 18px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #e0e0e0;
+            text-align: center;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 500;
+            font-size: 13px;
+            transition: all 0.2s;
+            margin-top: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }}
+        .download-btn:hover {{
+            background: rgba(255, 255, 255, 0.15);
+            border-color: rgba(255, 255, 255, 0.2);
+        }}
+        
+        audio {{
+            display: none;
+        }}
+    </style>
+</head>
+<body>
+    <div class="player-container">
+        <div class="player-header">
+            <div class="player-title">{safe_title}</div>
+            <div class="player-subtitle">ACE Step Generation</div>
+        </div>
+        
+        <audio id="audioPlayer" preload="auto">
+            <source src="{audio_url}" type="audio/mpeg">
+            <source src="{audio_url}" type="audio/wav">
+        </audio>
+        
+        <div class="custom-player">
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="controls">
+                <button class="play-btn" id="playBtn">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z"/>
+                    </svg>
+                </button>
+                <div class="time-display" id="timeDisplay">0:00 / 0:00</div>
+                <div class="volume-container">
+                    <button class="volume-btn" id="volumeBtn">
+                        <svg viewBox="0 0 24 24" id="volumeIcon">
+                            <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
+                        </svg>
+                    </button>
+                    <div class="volume-slider" id="volumeSlider">
+                        <div class="volume-bar" id="volumeBar"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="info-section">
+            <div class="info-item">
+                <div class="info-label">Style</div>
+                <div class="info-content">{safe_tags}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Lyrics</div>
+                <div class="lyrics-container">{safe_lyrics}</div>
+            </div>
+        </div>
+        
+        <a href="{audio_url}" download class="download-btn">
+            <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor;vertical-align:middle;margin-right:6px;">
+                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+            </svg>
+            Download Song
+        </a>
+    </div>
+    
+    <script>
+        const audio = document.getElementById('audioPlayer');
+        const playBtn = document.getElementById('playBtn');
+        const progressBar = document.getElementById('progressBar');
+        const progressContainer = document.getElementById('progressContainer');
+        const timeDisplay = document.getElementById('timeDisplay');
+        const volumeSlider = document.getElementById('volumeSlider');
+        const volumeBar = document.getElementById('volumeBar');
+        const volumeBtn = document.getElementById('volumeBtn');
+        const volumeIcon = document.getElementById('volumeIcon');
+        
+        // SVG icons
+        const playIcon = '<path d="M8 5v14l11-7z"/>';
+        const pauseIcon = '<path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>';
+        const volumeHighIcon = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>';
+        const volumeMuteIcon = '<path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>';
+        const volumeLowIcon = '<path d="M7 9v6h4l5 5V4l-5 5H7z"/>';
+        
+        // Play/Pause
+        playBtn.addEventListener('click', () => {{
+            const svg = playBtn.querySelector('svg');
+            if (audio.paused) {{
+                audio.play();
+                svg.innerHTML = pauseIcon;
+                playBtn.classList.add('playing');
+            }} else {{
+                audio.pause();
+                svg.innerHTML = playIcon;
+                playBtn.classList.remove('playing');
+            }}
+        }});
+        
+        // Update progress
+        audio.addEventListener('timeupdate', () => {{
+            const progress = (audio.currentTime / audio.duration) * 100;
+            progressBar.style.width = progress + '%';
+            
+            const current = formatTime(audio.currentTime);
+            const duration = formatTime(audio.duration);
+            timeDisplay.textContent = current + ' / ' + duration;
+        }});
+        
+        // Seek
+        progressContainer.addEventListener('click', (e) => {{
+            const rect = progressContainer.getBoundingClientRect();
+            const percent = (e.clientX - rect.left) / rect.width;
+            audio.currentTime = percent * audio.duration;
+        }});
+        
+        // Volume
+        volumeSlider.addEventListener('click', (e) => {{
+            const rect = volumeSlider.getBoundingClientRect();
+            const percent = (e.clientX - rect.left) / rect.width;
+            audio.volume = Math.max(0, Math.min(1, percent));
+            volumeBar.style.width = (percent * 100) + '%';
+            updateVolumeIcon(percent);
+        }});
+        
+        volumeBtn.addEventListener('click', () => {{
+            if (audio.volume > 0) {{
+                audio.dataset.prevVolume = audio.volume;
+                audio.volume = 0;
+                volumeBar.style.width = '0%';
+                volumeIcon.innerHTML = volumeMuteIcon;
+            }} else {{
+                const prevVol = audio.dataset.prevVolume || 1;
+                audio.volume = prevVol;
+                volumeBar.style.width = (prevVol * 100) + '%';
+                updateVolumeIcon(prevVol);
+            }}
+        }});
+        
+        function updateVolumeIcon(volume) {{
+            if (volume === 0) {{
+                volumeIcon.innerHTML = volumeMuteIcon;
+            }} else if (volume < 0.5) {{
+                volumeIcon.innerHTML = volumeLowIcon;
+            }} else {{
+                volumeIcon.innerHTML = volumeHighIcon;
+            }}
+        }}
+        
+        function formatTime(seconds) {{
+            if (isNaN(seconds)) return '0:00';
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return mins + ':' + (secs < 10 ? '0' : '') + secs;
+        }}
+    </script>
+</body>
+</html>"""
+        return html
+
     async def generate_song(
         self,
         tags: str,
         lyrics: Optional[str] = None,
+        song_title: Optional[str] = None,
         __user__: Dict[str, Any] = {},
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> str:
@@ -403,10 +795,15 @@ class Tools:
         [bridge]
 
         Tool Parameters:
+                Required param song_title: A String, The title of the song you want to create. This will be displayed prominently in the player.
                 Required param tags: A String, Mainly used to describe music styles, scenes, etc. Similar to prompts we use for other generations, they primarily describe the overall style and requirements of the audio, separated by English commas
                 Required param lyrics: A string, Mainly used to describe lyrics, supporting lyric structure tags such as [verse], [chorus], and [bridge] to distinguish different parts of the lyrics. You can also input instrument names for purely instrumental music
                 If you are asked to create an instrumenta piece use the parameter with "" as input, dont leave any parameter without a value
         """
+
+        # Use a default title if none provided
+        if not song_title:
+            song_title = "AI Generated Song"
 
         if self.valves.unload_ollama_models:
             # Avoid emitting unload progress; silently perform action
@@ -502,6 +899,17 @@ class Tools:
                     )
                     if local_audio_url:
                         if __event_emitter__:
+                            # Emit the minimalistic audio player
+                            html_player = self._generate_audio_player_embed(local_audio_url, song_title, tags, lyrics)
+                            await __event_emitter__(
+                                {
+                                    "type": "embeds",
+                                    "data": {
+                                        "embeds": [html_player],
+                                    },
+                                }
+                            )
+                            
                             await __event_emitter__(
                                 {
                                     "type": "status",
@@ -512,13 +920,24 @@ class Tools:
                                 }
                             )
 
-                        return f"Song generated successfully! The audio is embedded above and can be downloaded from: {local_audio_url} please show it to the user, this output is only shown to you, please provide the markdown url to the user"
+                        return f"Song generated successfully! The audio is embedded above and can be downloaded from: {local_audio_url}"
                 else:
                     # Fallback to ComfyUI direct link if download fails
                     subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
                     comfyui_url = f"{http_api_url}/view?filename={filename}&type=output{subfolder_param}"
 
                     if __event_emitter__:
+                        # Emit the minimalistic audio player with ComfyUI URL
+                        html_player = self._generate_audio_player_embed(comfyui_url, song_title, tags, lyrics)
+                        await __event_emitter__(
+                            {
+                                "type": "embeds",
+                                "data": {
+                                    "embeds": [html_player],
+                                },
+                            }
+                        )
+                        
                         await __event_emitter__(
                             {
                                 "type": "status",
@@ -529,7 +948,7 @@ class Tools:
                             }
                         )
 
-                    return f"Song generated successfully! The audio is embedded above and can be downloaded from: {comfyui_url} please show it to the user, this output is only shown to you, please provide the markdown url to the user &type=output and ALL parts of the URI are necessary do not modify or truncate it"
+                    return f"Song generated successfully! The audio is embedded above and can be downloaded from: {comfyui_url}"
             else:
                 outputs_json = json.dumps(job_data.get("outputs", {}), indent=2)
                 if __event_emitter__:
