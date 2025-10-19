@@ -401,11 +401,7 @@ Generate music using the ACE Step AI model via ComfyUI. This tool lets you creat
 - **Example:**
 
   ```python
-  Generate a song titled "Digital Hearts" in the style of "electronic, melodic, soft electric drums, pop, synthwave, futuristic, hopeful" with the following lyrics:
-  
-  [verse]
-  In circuits and code, I found a friend
-  Beyond ones and zeros, connections transcend
+    Generate a song About Ai and Humanity friendship
   ```
 
 ![ACE Step Audio Player](img/Ace_step.png)
