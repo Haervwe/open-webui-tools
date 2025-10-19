@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.1
+version: 0.4.0
 """
 
 import json
@@ -290,57 +290,14 @@ def unload_all_models(api_url: str = "http://localhost:11434") -> dict[str, bool
         return {}
 
 
-class Tools:
-    class Valves(BaseModel):
-        comfyui_api_url: str = Field(
-            default="http://localhost:8188",
-            description="ComfyUI HTTP API endpoint.",
-        )
-        model_name: str = Field(
-            default="ACE_STEP/ace_step_v1_3.5b.safetensors",
-            description="Model name for ACE Step audio generation.",
-        )
-        workflow_json: str = Field(
-            default="",
-            description="Full ACE Step workflow JSON (string).",
-        )
-        tags_node: str = Field(default="14", description="Node ID for tags input.")
-        lyrics_node: str = Field(default="14", description="Node ID for lyrics input.")
-        seed_node: str = Field(default="52", description="Node ID for seed input.")
-        model_node: str = Field(
-            default="40", description="Node ID for model checkpoint input."
-        )
-        max_wait_time: int = Field(
-            default=300, description="Max wait time for generation (seconds)."
-        )
-        unload_ollama_models: bool = Field(
-            default=False,
-            description="Unload all Ollama models before calling ComfyUI.",
-        )
-        ollama_url: str = Field(
-            default="http://host.docker.internal:11434",
-            description="Ollama API URL.",
-        )
-        save_local: bool = Field(
-            default=True,
-            description="Copy the generated song to the Open Webui Storage Backend",
-        )
-        owui_base_url: str = Field(
-            default="http://localhost:3000",
-            description="Your owui base url",
-        )
-
-    def __init__(self):
-        self.valves = self.Valves()
-
-    def _generate_audio_player_embed(self, audio_url: str, song_title: str, tags: str, lyrics: Optional[str] = None) -> str:
-        """Generate a sleek custom audio player embed with styled controls."""
-        # Escape HTML special characters
-        safe_title = song_title.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-        safe_tags = tags.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-        safe_lyrics = (lyrics or "Instrumental").replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-        
-        html = f"""<!DOCTYPE html>
+def generate_audio_player_embed(audio_url: str, song_title: str, tags: str, lyrics: Optional[str] = None) -> str:
+    """Generate a sleek custom audio player embed with styled controls."""
+    # Escape HTML special characters
+    safe_title = song_title.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+    safe_tags = tags.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+    safe_lyrics = (lyrics or "Instrumental").replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -722,7 +679,55 @@ class Tools:
     </script>
 </body>
 </html>"""
-        return html
+    return html
+
+
+class Tools:
+    class Valves(BaseModel):
+        comfyui_api_url: str = Field(
+            default="http://localhost:8188",
+            description="ComfyUI HTTP API endpoint.",
+        )
+        model_name: str = Field(
+            default="ACE_STEP/ace_step_v1_3.5b.safetensors",
+            description="Model name for ACE Step audio generation.",
+        )
+        workflow_json: str = Field(
+            default="",
+            description="Full ACE Step workflow JSON (string).",
+        )
+        tags_node: str = Field(default="14", description="Node ID for tags input.")
+        lyrics_node: str = Field(default="14", description="Node ID for lyrics input.")
+        seed_node: str = Field(default="52", description="Node ID for seed input.")
+        model_node: str = Field(
+            default="40", description="Node ID for model checkpoint input."
+        )
+        max_wait_time: int = Field(
+            default=300, description="Max wait time for generation (seconds)."
+        )
+        unload_ollama_models: bool = Field(
+            default=False,
+            description="Unload all Ollama models before calling ComfyUI.",
+        )
+        ollama_url: str = Field(
+            default="http://host.docker.internal:11434",
+            description="Ollama API URL.",
+        )
+        save_local: bool = Field(
+            default=True,
+            description="Copy the generated song to the Open Webui Storage Backend",
+        )
+        owui_base_url: str = Field(
+            default="http://localhost:3000",
+            description="Your owui base url",
+        )
+        show_player_embed: bool = Field(
+            default=True,
+            description="Show the embedded audio player. If false, only returns download link.",
+        )
+
+    def __init__(self):
+        self.valves = self.Valves()
 
     async def generate_song(
         self,
@@ -899,16 +904,17 @@ class Tools:
                     )
                     if local_audio_url:
                         if __event_emitter__:
-                            # Emit the minimalistic audio player
-                            html_player = self._generate_audio_player_embed(local_audio_url, song_title, tags, lyrics)
-                            await __event_emitter__(
-                                {
-                                    "type": "embeds",
-                                    "data": {
-                                        "embeds": [html_player],
-                                    },
-                                }
-                            )
+                            if self.valves.show_player_embed:
+                                # Emit the minimalistic audio player
+                                html_player = generate_audio_player_embed(local_audio_url, song_title, tags, lyrics)
+                                await __event_emitter__(
+                                    {
+                                        "type": "embeds",
+                                        "data": {
+                                            "embeds": [html_player],
+                                        },
+                                    }
+                                )
                             
                             await __event_emitter__(
                                 {
@@ -920,23 +926,27 @@ class Tools:
                                 }
                             )
 
-                        return f"Song generated successfully! The audio is embedded above and can be downloaded from: {local_audio_url}"
+                        if self.valves.show_player_embed:
+                            return f"Song generated successfully! The audio is embedded above and can be downloaded from: {local_audio_url}"
+                        else:
+                            return f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({local_audio_url})\n\n**Direct link:** {local_audio_url}"
                 else:
                     # Fallback to ComfyUI direct link if download fails
                     subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
                     comfyui_url = f"{http_api_url}/view?filename={filename}&type=output{subfolder_param}"
 
                     if __event_emitter__:
-                        # Emit the minimalistic audio player with ComfyUI URL
-                        html_player = self._generate_audio_player_embed(comfyui_url, song_title, tags, lyrics)
-                        await __event_emitter__(
-                            {
-                                "type": "embeds",
-                                "data": {
-                                    "embeds": [html_player],
-                                },
-                            }
-                        )
+                        if self.valves.show_player_embed:
+                            # Emit the minimalistic audio player with ComfyUI URL
+                            html_player = generate_audio_player_embed(comfyui_url, song_title, tags, lyrics)
+                            await __event_emitter__(
+                                {
+                                    "type": "embeds",
+                                    "data": {
+                                        "embeds": [html_player],
+                                    },
+                                }
+                            )
                         
                         await __event_emitter__(
                             {
@@ -948,7 +958,10 @@ class Tools:
                             }
                         )
 
-                    return f"Song generated successfully! The audio is embedded above and can be downloaded from: {comfyui_url}"
+                    if self.valves.show_player_embed:
+                        return f"Song generated successfully! The audio is embedded above and can be downloaded from: {comfyui_url}"
+                    else:
+                        return f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({comfyui_url})\n\n**Direct link:** {comfyui_url}"
             else:
                 outputs_json = json.dumps(job_data.get("outputs", {}), indent=2)
                 if __event_emitter__:
