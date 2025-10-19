@@ -371,7 +371,7 @@ Search and retrieve images from the web using a self-hosted [SearxNG](https://se
 
 ### Description
 
-Generate music using the ACE Step AI model via ComfyUI. This tool lets you create songs from tags and lyrics, with full control over the workflow JSON and node numbers. Designed for advanced music generation and can be customized for different genres and moods.
+Generate music using the ACE Step AI model via ComfyUI. This tool lets you create songs from tags and lyrics, with full control over the workflow JSON and node numbers. Features a beautiful, transparent custom audio player with play/pause controls, progress tracking, volume adjustment, and a clean scrollable lyrics display. Designed for advanced music generation and can be customized for different genres and moods.
 
 ### Configuration
 
@@ -381,6 +381,9 @@ Generate music using the ACE Step AI model via ComfyUI. This tool lets you creat
 - `tags_node` (str): Node number for the tags input (default: `"14"`)
 - `lyrics_node` (str): Node number for the lyrics input (default: `"14"`)
 - `model_node` (str): Node number for the model checkpoint input (default: `"40"`)
+- `save_local` (bool): Copy the generated song to Open WebUI storage backend (default: `True`)
+- `owui_base_url` (str): Your Open WebUI base URL (default: `http://localhost:3000`)
+- `show_player_embed` (bool): Show the embedded audio player. If false, only returns download link (default: `True`)
 
 ### Usage
 
@@ -392,16 +395,33 @@ Generate music using the ACE Step AI model via ComfyUI. This tool lets you creat
    - Paste the workflow JSON (from the file or your own) into `workflow_json`.
    - Set the correct node numbers if you modified the workflow.
 3. **Generate music:**
-   - Provide tags and (optionally) lyrics.
-   - The tool will return a link to the generated audio file.
+   - Provide a song title, tags, and (optionally) lyrics.
+   - The tool will return either an embedded audio player or a download link based on your configuration.
 
 - **Example:**
 
   ```python
-  Generate a song in the style of "funk, pop, soul" with the following lyrics: "In the shadows where secrets hide..."
+  Generate a song titled "Digital Hearts" in the style of "electronic, melodic, soft electric drums, pop, synthwave, futuristic, hopeful" with the following lyrics:
+  
+  [verse]
+  In circuits and code, I found a friend
+  Beyond ones and zeros, connections transcend
   ```
 
-*Returns a link to the generated audio or a status message. Advanced users can fully customize the workflow for different genres, moods, or creative experiments.*
+![ACE Step Audio Player](img/Ace_step.png)
+*The sleek, transparent audio player embedded in Open WebUI chat*
+
+### Features
+
+- **Custom Audio Player**: Beautiful, semi-transparent player with blur effects
+- **Full Playback Controls**: Play/pause, seek, volume control with SVG icons
+- **Song Title Display**: User-defined song titles prominently shown
+- **Scrollable Lyrics**: Clean lyrics display with custom scrollbar (max 120px height)
+- **Transparent UI**: Integrates seamlessly with any Open WebUI theme
+- **Toggle Player**: Option to show/hide player embed and just return download links
+- **Local Storage**: Optionally saves songs to Open WebUI cache for persistence
+
+*Returns an embedded audio player with download link or just the link, depending on configuration. Advanced users can fully customize the workflow for different genres, moods, or creative experiments.*
 
 ---
 
