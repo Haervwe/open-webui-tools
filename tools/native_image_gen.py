@@ -4,7 +4,7 @@ author: Haervwe
 Based on @justinrahb tool
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.1
+version: 0.2.2
 required_open_webui_version: 0.6.31
 """
 
@@ -53,9 +53,7 @@ def unload_all_models(api_url: str = "http://localhost:11434") -> dict[str, bool
 
 
 class Tools:
-
     class Valves(BaseModel):
-
         unload_ollama_models: bool = Field(
             default=False,
             description="Unload all Ollama models before calling ComfyUI.",
@@ -146,18 +144,15 @@ class Tools:
             urls_line = " ".join(bare_urls)
 
             if self.valves.emit_embeds and __event_emitter__:
-                return (
-                    f"Images were generated and displayed inline. Provide these download links (bare URLs): {urls_line}"
-                )
+                return f"""Images were generated and displayed inline. 
+            Provide these download links (bare URLs): {urls_line} 
+            - Do not use ! markdown attachments here. 
+            use download links and acknowledge the images were displayed above"""
 
             if self.valves.emit_embeds and not __event_emitter__:
-                return (
-                    f"Images were generated but could not be displayed inline (no event emitter). Provide these download links (bare URLs): {urls_line}"
-                )
-                
-            return (
-                f"Images generated. Provide the following download links (bare URLs): {urls_line}"
-            )
+                return f"Images were generated but could not be displayed inline (no event emitter). Provide these download links (bare URLs): {urls_line}"
+
+            return f"Images generated. Provide the following download links (bare URLs): {urls_line}"
 
         except Exception as e:
             if __event_emitter__:
