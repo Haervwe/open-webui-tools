@@ -78,9 +78,9 @@ class Tools:
     async def generate_image(
         self,
         prompt: str,
-        model: str,
-        __request__: Request,
-        __user__: dict[str, Any],
+        model: str | None = None,
+        __request__: Request | None = None,
+        __user__: dict[str, Any] | None = None,
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ) -> str:
         """
