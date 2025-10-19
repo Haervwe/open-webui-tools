@@ -32,7 +32,6 @@ This repository contains **15+ specialized tools and functions** designed to enh
 - **Resume Analyzer** - Professional resume analysis
 - **Mopidy Music Controller** - Music server management
 - **Letta Agent** - Autonomous agent integration
-- **MCP Pipe** - Model Context Protocol integration
 
 ### 🔧 **Filters**
 
@@ -106,17 +105,16 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 14. [Resume Analyzer Pipe](#resume-analyzer-pipe)
 15. [Mopidy Music Controller](#mopidy-music-controller)
 16. [Letta Agent Pipe](#letta-agent-pipe)
-17. [MCP Pipe](#mcp-pipe)
-18. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-19. [Semantic Router Filter](#semantic-router-filter)
-20. [Full Document Filter](#full-document-filter)
-21. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-22. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-23. [Installation](#installation)
-24. [Contributing](#contributing)
-25. [License](#license)
-26. [Credits](#credits)
-27. [Support](#support)
+17. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+18. [Semantic Router Filter](#semantic-router-filter)
+19. [Full Document Filter](#full-document-filter)
+20. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+21. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+22. [Installation](#installation)
+23. [Contributing](#contributing)
+24. [License](#license)
+25. [Credits](#credits)
+26. [Support](#support)
 
 ---
 
@@ -865,112 +863,6 @@ Connect with Letta agents, enabling seamless integration of autonomous agents in
 
 ![Letta Example](img/Letta.png)
 *Example of Letta Agent Pipe*
-
----
-
-### MCP Pipe
-
-### Description
-
-The MCP Pipe integrates the Model Context Protocol (MCP) into Open WebUI, enabling seamless connections between AI assistants and various data sources, tools, and development environments. **Note: This implementation only works with Python-based MCP servers. NPX or other server types are not supported by default.**
-
-MCP is a universal, open standard that replaces fragmented integrations with a single protocol for connecting AI systems with data sources. This allows you to:
-
-- Connect to multiple MCP servers simultaneously (Python servers only)
-- Access tools and prompts from connected servers
-- Process queries using context-aware tools
-- Support data repositories, business tools, and development environments
-- Automatically discover tools and prompts
-- Stream responses from tools
-- Maintain conversation context across different data sources
-
-### Prerequisites
-
-- **Open WebUI**: Make sure you are running a compatible version (0.5.0+ recommended)
-- **Python MCP servers**: You must have one or more MCP-compatible servers installed and accessible (see [open-webui/openapi-servers](https://github.com/open-webui/openapi-servers) for examples)
-- **MCP configuration file**: A `config.json` file must be placed in the `/data/` folder inside your Open WebUI installation
-- **Python environment**: Any additional MCP servers you add must be installed in the Open WebUI Python environment
-
-### Step-by-Step Setup
-
-1. **Install or set up your MCP servers**
-
-   - Example: [mcp_server_time](https://github.com/open-webui/openapi-servers) for time and timezone conversion, [mcp_server_tavily](https://github.com/open-webui/openapi-servers) for web search
-   - Install via pip or clone and install as needed
-
-2. **Create the MCP configuration file**
-
-   - Place a `config.json` file in the `/data/` directory of your Open WebUI installation
-
-   - Example `config.json`:
-
-     ```json
-     {
-         "mcpServers": {
-             "time_server": {
-                 "command": "python",
-                 "args": ["-m", "mcp_server_time", "--local-timezone=America/New_York"],
-                 "description": "Provides Time and Timezone conversion tools."
-             },
-             "tavily_server": {
-                 "command": "python",
-                 "args": ["-m", "mcp_server_tavily", "--api-key=tvly-xxx"],
-                 "description": "Provides web search capabilities tools."
-             }
-         }
-     }
-     ```
-
-   - Replace `tvly-xxx` with your actual Tavily API key
-
-   - Add additional servers as needed, following the same structure
-
-3. **Install any required MCP servers**
-
-   - For each server listed in your config, ensure it is installed in the Open WebUI Python environment
-   - Example: `pip install mcp_server_time` or clone and install from source
-
-4. **Restart Open WebUI**
-
-   - This ensures the new configuration and servers are loaded
-
-5. **Configure the MCP Pipe in Open WebUI**
-
-   - Set the valves as needed (see below)
-
-### Configuration Valves
-
-- `MODEL`: (default: "Qwen2_5_16k:latest") The LLM model to use for MCP queries
-- `OPENAI_API_KEY`: Your OpenAI API key for API access (if using OpenAI-compatible models)
-- `OPENAI_API_BASE`: (default: "http://0.0.0.0:11434/v1") Base URL for API requests
-- `TEMPERATURE`: (default: 0.5) Controls randomness in responses (0.0-1.0)
-- `MAX_TOKENS`: (default: 1500) Maximum tokens to generate
-- `TOP_P`: (default: 0.8) Top-p sampling parameter
-- `PRESENCE_PENALTY`: (default: 0.8) Penalty for repeating topics
-- `FREQUENCY_PENALTY`: (default: 0.8) Penalty for repeating tokens
-
-### Example Usage
-
-```python
-# Example usage in your prompt
-Use the time_server to get the current time in New York.
-```
-
-- You can also use the Tavily server for web search, or any other MCP server you have configured.
-- The MCP Pipe will automatically discover available tools and prompts from all configured servers.
-
-### Troubleshooting & Tips
-
-- **Python servers only**: This pipe does not support NPX or non-Python MCP servers. For NPX support, see the advanced MCP Pipeline below.
-- **Server not found**: Make sure the MCP server is installed and accessible in the Python environment used by Open WebUI
-- **Config file not loaded**: Double-check the location (`/data/config.json`) and syntax of your config file
-- **API key issues**: Ensure all required API keys (e.g., Tavily, OpenAI) are set correctly in the config and valves
-- **Advanced features**: For more advanced MCP features (including NPX server support), see the [MCP Pipeline Documentation](Pipelines/MCP_Pipeline/README_MCP_Pipeline.md)
-- **Logs**: Check Open WebUI logs for errors related to MCP server startup or communication
-
-### Reference: Advanced MCP Pipeline
-
-If you need more advanced features, such as NPX server support, see the documentation in `Pipelines/MCP_Pipeline/README_MCP_Pipeline.md` in this repository.
 
 ---
 
