@@ -35,15 +35,21 @@ async def emit_embed(
 ) -> None:
     """Helper to emit embed events for displaying video player"""
     if event_emitter:
-        # Create iframe HTML for YouTube embed
-        iframe_html = f'<iframe width="100%" height="315" src="https://www.youtube.com/embed/{video_id}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>'
+        iframe_html = f"""
+<div style="width:100%;max-width:1200px;margin:0 auto;">
+  <div style="position:relative;width:100%;padding-top:56.25%;height:0;overflow:hidden;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,0.2);">
+    <iframe src="https://www.youtube.com/embed/{video_id}"
+            style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+            allowfullscreen loading="lazy"></iframe>
+  </div>
+</div>
+""".strip()
 
         await event_emitter(
             {
                 "type": "embeds",
-                "data": {
-                    "embeds": [iframe_html],
-                },
+                "data": {"embeds": [iframe_html]},
             }
         )
 
