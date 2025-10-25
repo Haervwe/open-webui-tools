@@ -4,7 +4,7 @@ description: Search YouTube videos and display them in an embedded player
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.1
+version: 1.0.2
 license: MIT
 """
 
@@ -171,7 +171,8 @@ class Tools:
     ) -> str:
         """
         Play a specific YouTube video by ID in an embedded player.
-
+        This tool requires a valid YouTube video ID. and DOES NOT use the YouTube Data API for searching.
+        First use the Search YouTube tool to find video IDs.
         Args:
             video_id: YouTube video ID (e.g., "dQw4w9WgXcQ")
 
