@@ -108,7 +108,7 @@ class Tools:
             # YouTube Data API v3 search endpoint
             search_url = "https://www.googleapis.com/youtube/v3/search"
 
-            search_params = {
+            search_params:dict[str, str | int] = {
                 "part": "snippet",
                 "q": query,
                 "type": "video",
