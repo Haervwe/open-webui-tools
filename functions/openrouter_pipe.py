@@ -213,9 +213,12 @@ class Pipe:
                                                 }
                                             )
                                         else:
-                                            markdown_links = "\n".join([
-                                                f'![generate_image]({url})' for url in embeds
-                                            ])
+                                            markdown_links = "\n".join(
+                                                [
+                                                    f"![generate_image]({url})"
+                                                    for url in embeds
+                                                ]
+                                            )
                                             await __event_emitter__(
                                                 {
                                                     "type": "message",
