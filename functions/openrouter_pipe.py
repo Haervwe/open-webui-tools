@@ -15,7 +15,7 @@ import mimetypes
 import io
 import time
 from fastapi import Request, UploadFile
-from open_webui.routers.files import upload_file_handler
+from open_webui.routers.files import upload_file_handler # type: ignore
 import json
 import base64
 import traceback
@@ -292,13 +292,13 @@ class Pipe:
             file = UploadFile(
                 file=io.BytesIO(img_bytes), filename=f"generated-image{image_format}"
             )
-            file_item: Any = upload_file_handler(
+            file_item: Any = upload_file_handler( # type: ignore
                 request=request, file=file, metadata={}, process=False, user=user
             )
             if not file_item:
                 logging.error("Failed to save image to OpenWebUI")
                 return ""
-            file_id = str(getattr(file_item, "id", ""))
+            file_id = str(getattr(file_item, "id", "")) # type: ignore
             base_url = str(request.base_url).rstrip("/")
             relative_path = request.app.url_path_for(
                 "get_file_content_by_id", id=file_id
