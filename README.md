@@ -11,7 +11,7 @@ Transform your Open WebUI instance into a powerful AI workstation with this comp
 
 ## ✨ What's Inside
 
-This repository contains **15+ specialized tools and functions** designed to enhance your Open WebUI experience:
+This repository contains **20+ specialized tools and functions** designed to enhance your Open WebUI experience:
 
 ### 🛠️ **Tools**
 
@@ -39,6 +39,7 @@ This repository contains **15+ specialized tools and functions** designed to enh
 - **Semantic Router** - Intelligent model selection
 - **Full Document** - File processing capabilities
 - **Clean Thinking Tags** - Conversation cleanup
+- **OpenRouter WebSearch Citations** - Enable web search for OpenRouter models with citation handling
 
 ## 🚀 Quick Start
 
@@ -105,16 +106,18 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 14. [Resume Analyzer Pipe](#resume-analyzer-pipe)
 15. [Mopidy Music Controller](#mopidy-music-controller)
 16. [Letta Agent Pipe](#letta-agent-pipe)
-17. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-18. [Semantic Router Filter](#semantic-router-filter)
-19. [Full Document Filter](#full-document-filter)
-20. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-21. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-22. [Installation](#installation)
-23. [Contributing](#contributing)
-24. [License](#license)
-25. [Credits](#credits)
-26. [Support](#support)
+17. [OpenRouter Image Pipe](#openrouter-image-pipe)
+18. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+19. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+20. [Semantic Router Filter](#semantic-router-filter)
+21. [Full Document Filter](#full-document-filter)
+22. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+23. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+24. [Installation](#installation)
+25. [Contributing](#contributing)
+26. [License](#license)
+27. [Credits](#credits)
+28. [Support](#support)
 
 ---
 
@@ -866,6 +869,85 @@ Connect with Letta agents, enabling seamless integration of autonomous agents in
 
 ---
 
+### OpenRouter Image Pipe
+
+### Description
+
+An adapter pipe for the OpenRouter API that enables streaming, multi-modal chat completions with built-in websearch and image generation support. This pipe focuses on image generation capabilities and web search integration, with no support for external tools and streaming-only completions. Images are automatically saved to the Open WebUI backend and URLs are emitted for stable access.
+
+### Configuration (Valves)
+
+- `API_KEY` (str): OpenRouter API key (Bearer token)
+- `ALLOWED_MODELS` (List[str]): List of allowed model slugs (only these models can be invoked by the pipe)
+- `USE_WEBSEARCH` (bool): Enable the web search plugin globally or enable per-model by appending `:online` to the model id
+- `USE_IMAGE_EMBEDDING` (bool): When True the pipe will emit generated images as HTML `<img>` embeds; otherwise images are emitted as markdown links
+
+### Features
+
+- Streaming text deltas to the client in real-time (low-latency partial responses)
+- Emits structured reasoning details when available from the model
+- Saves base64 image responses to the Open WebUI files backend and returns stable URLs (with cache-busting timestamps)
+- Built-in websearch integration for enhanced responses
+- Model capability detection (queries OpenRouter models endpoint to find supported modalities and adapts payloads automatically)
+- No support for external tools - focused on core image generation and websearch functionality
+
+### Usage
+
+Copy `functions/openrouter_image_pipe.py` into your Open WebUI Functions and enable it in your workspace. The pipe registers ids in the format `openrouter-<model>-pipe` (for example: `openrouter-openai/gpt-4o-pipe`). When invoked it will stream messages/events back to the Open WebUI frontend using the event emitter API.
+
+Example:
+
+```python
+   "Explain this image"
+```
+```python
+   "Web search recent news about Argentina and make an image about it"
+```
+
+### Example screenshots
+
+Below are example screenshots showing the pipe in action inside Open WebUI — streaming assistant text, vision-capable model input/output, and generated images.
+
+![OpenRouter Image Generation](img/openrouter_generate_image_and_citations.png)
+*Example: image generation with websearch integration.*
+
+---
+
+### OpenRouter WebSearch Citations Filter
+
+### Description
+
+Enables web search for OpenRouter models by adding plugins and options to the request payload. This filter provides a UI toggle to use OpenRouter's native websearch with proper citation handling. It processes web search results and emits structured citation events for proper source attribution in Open WebUI.
+
+### Configuration (Valves)
+
+- `engine` (str): Web search engine - "auto" (automatic selection), "native" (provider's built-in), or "exa" (Exa API)
+- `max_results` (int): Maximum number of web search results to retrieve (1-10)
+- `search_prompt` (str): Template for incorporating web search results. Use `{date}` placeholder for current date.
+- `search_context_size` (str): Search context size - "low" (minimal), "medium" (moderate), "high" (extensive)
+
+### Features
+
+- UI toggle for enabling web search on OpenRouter models
+- Automatic citation generation with markdown links using domain names
+- Structured citation events for Open WebUI integration
+- Flexible search engine selection (auto, native, or Exa)
+- Configurable search result limits and context size
+- Real-time status updates during search execution
+
+### Usage
+
+Copy `filters/openrouter_websearch_citations_filter.py` into your Open WebUI Filters and enable it in your model configuration. The filter will add web search capabilities to OpenRouter models with proper citation handling.
+
+Example search prompt template:
+```
+A web search was conducted on {date}. Incorporate the following web search results into your response.
+IMPORTANT: Cite them using markdown links named using the domain of the source.
+Example: [nytimes.com](https://nytimes.com/some-page).
+```
+
+The filter processes annotations in the response stream and emits citation events with source URLs, titles, and metadata for each web search result.
+
 ## 🔧 Filters
 
 ### Prompt Enhancer Filter
@@ -884,10 +966,13 @@ Uses an LLM to automatically improve the quality of your prompts before they are
 ### Usage
 
 - Enable in your model configuration's filters section.
+- Toggle the filter on or off as needed in chat settings.
 - The filter will automatically process each user message before it's sent to the main LLM.
 
-![Prompt Enhancer Example](img/prompt_enhancer.png)
+![Prompt Enhancer Example](img/prompt_enhancer_2.png)
 
+
+![Prompt Enhancer Example](img/prompt_enhancer.png)
 ---
 
 

@@ -90,6 +90,7 @@ Now, enhance the following prompt:
         self.__user__ = None
         self.__model__ = None
         self.__request__ = None
+        self.toggle = True
 
     async def inlet(
         self,
