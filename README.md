@@ -32,6 +32,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Resume Analyzer** - Professional resume analysis
 - **Mopidy Music Controller** - Music server management
 - **Letta Agent** - Autonomous agent integration
+- **Google Veo Text-to-Video & Image-to-Video** - Generate videos from text or a single image using Google Veo (only one image supported as input)
 
 ### 🔧 **Filters**
 
@@ -100,24 +101,25 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 8. [SearxNG Image Search Tool](#searxng-image-search-tool)
 9. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
 10. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-11. [Planner Agent v2](#planner-agent-v2)
-12. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-13. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-14. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-15. [Mopidy Music Controller](#mopidy-music-controller)
-16. [Letta Agent Pipe](#letta-agent-pipe)
-17. [OpenRouter Image Pipe](#openrouter-image-pipe)
-18. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-19. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-20. [Semantic Router Filter](#semantic-router-filter)
-21. [Full Document Filter](#full-document-filter)
-22. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-23. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-24. [Installation](#installation)
-25. [Contributing](#contributing)
-26. [License](#license)
-27. [Credits](#credits)
-28. [Support](#support)
+11. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+12. [Planner Agent v2](#planner-agent-v2)
+13. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+14. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+15. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+16. [Mopidy Music Controller](#mopidy-music-controller)
+17. [Letta Agent Pipe](#letta-agent-pipe)
+18. [OpenRouter Image Pipe](#openrouter-image-pipe)
+19. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+20. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+21. [Semantic Router Filter](#semantic-router-filter)
+22. [Full Document Filter](#full-document-filter)
+23. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+24. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+25. [Installation](#installation)
+26. [Contributing](#contributing)
+27. [License](#license)
+28. [Credits](#credits)
+29. [Support](#support)
 
 ---
 
@@ -569,6 +571,59 @@ Prompt: "Edit this image to look like a medieval fantasy king, preserving facial
 ![Flux Kontext Example](img/flux_kontext_without_parameters.png)
 *Example of Flux Kontext image editing output*
 
+
+---
+
+### Google Veo Text-to-Video & Image-to-Video Pipe
+
+### Description
+
+Generate high-quality videos from text prompts or a single image using Google Veo via the Gemini API. This pipe enables advanced video generation capabilities directly from Open WebUI, supporting creative and professional use cases. It supports both text-to-video and image-to-video generation.
+
+**Note:** Only one image is supported as input at this time. Multi-image input is not available.
+
+### Configuration
+
+- `GOOGLE_API_KEY` (str): Google API key for Gemini API access (required)
+- `MODEL` (str): The Veo model to use for video generation (default: "veo-3.1-generate-preview")
+- `ENHANCE_PROMPT` (bool): Use vision model to enhance prompt (default: False)
+- `VISION_MODEL_ID` (str): Vision model to be used as prompt enhancer
+- `ENHANCER_SYSTEM_PROMPT` (str): System prompt for prompt enhancement process
+- `MAX_WAIT_TIME` (int): Max wait time for video generation in seconds (default: 1200)
+
+**Prerequisites:**
+- You must have access to the Google Gemini API and a valid API key.
+- Only one image is supported as input for image-to-video generation (Gemini API limitation).
+
+### Usage
+
+- **Text-to-Video Example:**
+  ```python
+  Generate a video of "a futuristic city at sunset with flying cars"
+  ```
+
+- **Image-to-Video Example:**
+  ```python
+  Create a video from this image: [Attach image]
+  ```
+
+### Features
+
+- **Text-to-Video:** Generate videos from descriptive text prompts
+- **Image-to-Video:** Animate a single image into a video sequence
+- **High Quality:** Leverages Google Veo's advanced video generation models
+- **Direct Embedding:** Returns markdown-formatted video links for display in chat
+- **Status Updates:** Progress and error reporting during generation
+
+### Limitations
+
+- Only one image is supported as input for image-to-video generation (Gemini API limitation)
+- Multi-image or video editing features are not available
+
+### Example Output
+
+![Google Veo Example](img/veo3_example.png)
+*Example of Google Veo video generation output in Open WebUI*
 
 ---
 

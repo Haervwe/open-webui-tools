@@ -21,7 +21,6 @@ import os
 import time
 from typing import Any, Callable, Dict, Optional, Union
 
-import requests
 from fastapi import UploadFile
 from google import genai
 from google.genai.types import Image
