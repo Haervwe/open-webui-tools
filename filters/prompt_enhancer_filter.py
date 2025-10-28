@@ -43,7 +43,7 @@ logger = setup_logger()
 def remove_tagged_content(text: str) -> str:
 
     pattern = re.compile(
-        r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>"
+        r"<(think|thinking|reason|reasoning|thought|Thought>)>.*?</\1>"
         r"|"
         r"\|begin_of_thought\|.*?\|end_of_thought\|",
         re.DOTALL,
@@ -67,7 +67,7 @@ Example:
 Given Prompt: Write a poem about flowers.
 Enhanced Prompt: Craft a vivid and imaginative poem that explores the beauty and diversity of flowers, using rich imagery and metaphors to bring each bloom to life.
 
-Now, enhance the following prompt:
+Now, enhance the following prompt using the Context and The user prompt, return only the enhanced user prompt.:
 """,
             description="Prompt to use in the Prompt enhancer System Message",
         )
@@ -107,49 +107,12 @@ Now, enhance the following prompt:
         self.__user__ = Users.get_user_by_id(__user__["id"]) if __user__ else None
         if __task__ and __task__ != TASKS.DEFAULT:
             return body
-        # Fetch available models and log their relevant details
-        available_models = await get_models(self.__request__, self.__user__)
-        logger.debug("Available Models (truncated image data):")
-        for model in available_models:
-            truncated_model = model.model_dump()  # Convert to dict for modification
-            if "meta" in truncated_model:
-                if isinstance(truncated_model["meta"], dict):
-                    if "profile_image_url" in truncated_model["meta"]:
-                        truncated_model["meta"]["profile_image_url"] = (
-                            truncated_model["meta"]["profile_image_url"][:50] + "..."
-                            if isinstance(
-                                truncated_model["meta"]["profile_image_url"], str
-                            )
-                            else None
-                        )
-                    if "profile_image_url" in truncated_model["user"]:
-                        truncated_model["user"]["profile_image_url"] = (
-                            truncated_model["user"]["profile_image_url"][:50] + "..."
-                            if isinstance(
-                                truncated_model["user"]["profile_image_url"], str
-                            )
-                            else None
-                        )
-                else:
-                    logger.warning(
-                        f"Unexpected type for model.meta: {type(truncated_model['meta'])}"
-                    )
-            else:
-                logger.warning("Model missing 'meta' key: %s", model)
-
-            # Truncate files information
-            if "knowledge" in truncated_model and isinstance(
-                truncated_model["knowledge"], list
-            ):
-                for knowledge_item in truncated_model["knowledge"]:
-                    if isinstance(knowledge_item, dict) and "files" in knowledge_item:
-                        knowledge_item["files"] = "List of files (truncated)"
-
-                logger.debug(json.dumps(truncated_model, indent=2))
 
         messages = body["messages"]
         user_message = get_last_user_message(messages)
-
+        if messages[-1]["role"] != "user":
+            print(messages[-1]["content"])
+            return body
         if self.valves.show_status:
             await __event_emitter__(
                 {
@@ -170,23 +133,19 @@ Now, enhance the following prompt:
         context = "\n".join(
             [f"{msg['role'].upper()}: {msg['content']}" for msg in context_messages]
         )
-
+        context = "\n".join(f"""Tools: {body.get("tool_ids")}""")
+        print(body.get("metadata"))
         # Build context block
         context_str = f'\n\nContext:\n"""{context}"""\n\n' if context else ""
 
         # Construct the system prompt with clear delimiters
         system_prompt = self.valves.user_customizable_template
-        user_prompt = (
-            f"Context: {context_str}" f'Prompt to enhance:\n"""{user_message}"""\n\n'
-        )
+        user_prompt = f"{context_str}" + f'Prompt to enhance:\n"""{user_message}"""\n\n'
 
         # Log the system prompt before sending to LLM
 
         logger.debug("System Prompt: %s", system_prompt)  # Fixed string formatting
 
-        # Determine the model to use
-        # model_to_use = self.valves.model_id if self.valves.model_id else (body["model"])
-        print(__model__)
         model_to_use = None
         if self.valves.model_id:
             model_to_use = self.valves.model_id
@@ -216,7 +175,7 @@ Now, enhance the following prompt:
                 {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
-                    "content": f"Enhance the given user prompt based on context: {user_prompt}",
+                    "content": f"Enhance: {user_prompt}",
                 },
             ],
             "stream": False,
