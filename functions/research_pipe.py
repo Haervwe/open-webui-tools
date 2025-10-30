@@ -9,6 +9,7 @@ git: https://github.com/Haervwe/open-webui-tools
 version: 0.4.7
 """
 
+from datetime import datetime 
 import logging
 import random
 import re
@@ -125,6 +126,7 @@ class MCTS:
         self.selected = None
         self.max_depth = kwargs.get("max_depth", 3)
         self.breadth = kwargs.get("breadth", 2)
+
 
     async def select(self):
         node = self.root
@@ -291,6 +293,11 @@ class Pipe:
         without_pipe = ".".join(model_id.split(".")[1:])
         return without_pipe.replace(f"{name}-", "")
 
+    @property
+    def current_date(self) -> str:
+
+        return datetime.now().strftime("%Y-%m-%d")
+    
     def resolve_question(self, body: dict) -> str:
         return body.get("messages")[-1].get("content").strip()
 
@@ -429,8 +436,10 @@ class Pipe:
         - The input query may be an initial vague request or an essay with proposed improvements
         - Only output the enhanced query, ready for an API call, without explanations or titles
 
+        Current date: {self.current_date}
+        
         Initial query: "{query}"
-
+        
         Enhanced web search query:
         """
         web_query = await self.get_completion(prompt_web)
@@ -446,6 +455,8 @@ class Pipe:
         Topic: "{query}"
 
         Output ONLY the arXiv search query, no explanations or formatting.
+        
+        Current date: {self.current_date}
         """
         arxiv_query = await self.get_completion(prompt_arxiv)
 
@@ -524,6 +535,8 @@ class Pipe:
     1. Integrates the sources
     2. Highlights key findings
     3. Maintains academic rigor while being accessible
+    
+    Current date: {self.current_date}
     """
         complete = ""
         async for chunk in self.get_streaming_completion(
