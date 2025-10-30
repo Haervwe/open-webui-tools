@@ -9,7 +9,6 @@ license: MIT
 """
 
 import aiohttp
-import asyncio
 import json
 import random
 import uuid
