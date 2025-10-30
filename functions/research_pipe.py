@@ -5,8 +5,8 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
-git: https://github.com/Haervwe/open-webui-tools  
-version: 0.4.7
+git: https://github.com/Haervwe/open-webui-tools
+version: 0.4.8
 """
 
 import logging
@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from open_webui.constants import TASKS
 
 from open_webui.main import generate_chat_completions
-from open_webui.models.users import User ,Users
+from open_webui.models.users import User, Users
 
 
 name = "Research Pipe"
@@ -80,7 +80,7 @@ class Node:
 
     def mermaid(self, offset=0, selected=None):
         padding = " " * offset
-        
+
         # Sanitize content for Mermaid compatibility
         def sanitize_content(text):
             if not text:
@@ -88,22 +88,22 @@ class Node:
             # Remove problematic characters and limit length
             sanitized = text[:25].replace("\n", " ")
             # Replace special characters that could break Mermaid syntax
-            sanitized = re.sub(r'[(){}<>:"[\]]', '', sanitized)
+            sanitized = re.sub(r'[(){}<>:"[\]]', "", sanitized)
             # Replace multiple spaces with single space
-            sanitized = re.sub(r'\s+', ' ', sanitized)
+            sanitized = re.sub(r"\s+", " ", sanitized)
             # Ensure the text is not empty after sanitization
             return sanitized.strip() or "node"
 
         # Create node content
         content_preview = sanitize_content(self.content)
-        
+
         # Create node ID and label
         node_label = f"{self.id}:{self.visits} - {content_preview}"
         # Escape any remaining special characters in the label
-        node_label = node_label.replace('"', '&quot;')
-        
+        node_label = node_label.replace('"', "&quot;")
+
         # Generate node definition
-        msg = f"{padding}{self.id}[\"{node_label}\"]\n"
+        msg = f'{padding}{self.id}["{node_label}"]\n'
 
         # Add styling if node is selected
         if selected == self.id:
@@ -321,30 +321,38 @@ class Pipe:
                 return []
 
             results = []
-            for entry in entries[:self.valves.ARXIV_MAX_RESULTS]:
+            for entry in entries[: self.valves.ARXIV_MAX_RESULTS]:
                 title = entry.get("title", "Unknown Title").strip()
                 authors = entry.get("authors", "Unknown Authors")
                 summary = entry.get("abstract", "No summary available").strip()
                 arxiv_id = entry.get("id")
-                url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "No link available"
-                pdf_url = f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else "No link available"
+                url = (
+                    f"https://arxiv.org/abs/{arxiv_id}"
+                    if arxiv_id
+                    else "No link available"
+                )
+                pdf_url = (
+                    f"https://arxiv.org/pdf/{arxiv_id}"
+                    if arxiv_id
+                    else "No link available"
+                )
                 year = entry.get("year")
                 month = entry.get("month")
                 pub_date = f"{month}-{int(year)}" if year and month else "Unknown Date"
 
-                results.append({
-                    "title": title,
-                    "authors": authors,
-                    "summary": summary,
-                    "url": url,
-                    "pdf_url": pdf_url,
-                    "pub_date": pub_date,
-                    "content": summary,  # for compatibility with synthesis
-                })
+                results.append(
+                    {
+                        "title": title,
+                        "authors": authors,
+                        "summary": summary,
+                        "url": url,
+                        "pdf_url": pdf_url,
+                        "pub_date": pub_date,
+                        "content": summary,  # for compatibility with synthesis
+                    }
+                )
 
-            await self.emit_status(
-                "tool", f"arXiv papers found: {len(results)}", True
-            )
+            await self.emit_status("tool", f"arXiv papers found: {len(results)}", True)
             return results
 
         except aiohttp.ClientError as e:
@@ -355,6 +363,7 @@ class Pipe:
             error_msg = f"Unexpected error during arXiv search: {str(e)}"
             await self.emit_status("tool", error_msg, True)
             return []
+
     async def search_web(self, query: str) -> List[Dict]:
         """Simplified web search using Tavily API"""
         if not self.valves.TAVILY_API_KEY:
@@ -565,15 +574,24 @@ class Pipe:
                     return 0.0
             else:
                 logger.debug(f"No valid number in response: {result}")
-                return score 
+                return score
         except Exception as e:
 
             logger.debug(f"Error during evaluation: {e}")
             return score
 
     def get_chunk_content(self, chunk):
+        # Parse chunk into a string
+        if isinstance(chunk, str):  # Handle case if chunk is already a string
+            chunk_str = chunk
+        elif isinstance(chunk, bytes):  # If chunk is binary, assume it's utf-8
+            chunk_str = chunk.decode("utf-8")
+        else:
+            logger.debug(
+                f"Expected type of chunk to be either string or bytes, found: {type(chunk)}"
+            )
+            chunk_str = chunk
 
-        chunk_str = chunk
         if chunk_str.startswith("data: "):
             chunk_str = chunk_str[6:]
 
@@ -620,7 +638,7 @@ class Pipe:
         logger.debug(f"Model {model}")
         logger.debug(f"User: {__user__}")
         self.__user__ = Users.get_user_by_id(__user__["id"])
-        self.__request__=__request__
+        self.__request__ = __request__
         if __task__ and __task__ != TASKS.DEFAULT:
             logger.debug(f"Model {TASKS}")
             response = await generate_chat_completions(
