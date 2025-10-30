@@ -1,0 +1,260 @@
+{
+  "71": {
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Cargar CLIP"
+    }
+  },
+  "72": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "71",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "73": {
+    "inputs": {
+      "vae_name": "wan/wan_2.1_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Cargar VAE"
+    }
+  },
+  "74": {
+    "inputs": {
+      "width": 848,
+      "height": 480,
+      "length": 41,
+      "batch_size": 1
+    },
+    "class_type": "EmptyHunyuanLatentVideo",
+    "_meta": {
+      "title": "EmptyHunyuanLatentVideo"
+    }
+  },
+  "75": {
+    "inputs": {
+      "unet_name": "wan/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "fp8_e4m3fn_fast"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Cargar Modelo de Difusión"
+    }
+  },
+  "76": {
+    "inputs": {
+      "unet_name": "wan/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "fp8_e4m3fn_fast"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Cargar Modelo de Difusión"
+    }
+  },
+  "78": {
+    "inputs": {
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 2,
+      "end_at_step": 4,
+      "return_with_leftover_noise": "disable",
+      "model": [
+        "86",
+        0
+      ],
+      "positive": [
+        "89",
+        0
+      ],
+      "negative": [
+        "72",
+        0
+      ],
+      "latent_image": [
+        "81",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "KSampler (Avanzado)"
+    }
+  },
+  "80": {
+    "inputs": {
+      "filename_prefix": "video/ComfyUI",
+      "format": "auto",
+      "codec": "auto",
+      "video": [
+        "115",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Guardar video"
+    }
+  },
+  "81": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 742951153577776,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": 2,
+      "return_with_leftover_noise": "enable",
+      "model": [
+        "82",
+        0
+      ],
+      "positive": [
+        "89",
+        0
+      ],
+      "negative": [
+        "72",
+        0
+      ],
+      "latent_image": [
+        "74",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "KSampler (Avanzado)"
+    }
+  },
+  "82": {
+    "inputs": {
+      "shift": 5.000000000000001,
+      "model": [
+        "83",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "MuestreoDeModeloSD3"
+    }
+  },
+  "83": {
+    "inputs": {
+      "lora_name": "wan2_2/14b/lightning/high_noise_model.safetensors",
+      "strength_model": 1.0000000000000002,
+      "model": [
+        "75",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "CargadorLoRAModeloSolo"
+    }
+  },
+  "85": {
+    "inputs": {
+      "lora_name": "wan2_2/14b/lightning/low_noise_model.safetensors",
+      "strength_model": 1.0000000000000002,
+      "model": [
+        "76",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "CargadorLoRAModeloSolo"
+    }
+  },
+  "86": {
+    "inputs": {
+      "shift": 5.000000000000001,
+      "model": [
+        "85",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "MuestreoDeModeloSD3"
+    }
+  },
+  "88": {
+    "inputs": {
+      "fps": 16,
+      "images": [
+        "114",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Crear video"
+    }
+  },
+  "89": {
+    "inputs": {
+      "text": "Scene Setting:\nA vibrant, high-energy concert taking place in a massive stadium under a starry night sky. The stage is illuminated with dynamic neon lights, laser beams, and colorful spotlights creating a dazzling visual spectacle.\n\nMain Subject:\nA charismatic golden retriever wearing a leather jacket and sunglasses, passionately playing an electric guitar. The dog's paws are expertly moving along the fretboard, with glowing strings emitting a soft blue hue.\n\nSupporting Elements:\n\nA band of diverse dogs:\nA German shepherd on drums with a snare drum and cymbals\nA poodle on bass guitar with a mini amp\nA dachshund on keyboard with glowing keys\nA crowd of enthusiastic dogs in the audience with paw-print banners and LED bracelets\nConfetti cannons firing multicolored paper confetti\nA giant inflatable guitar backdrop\nAtmosphere:\nEnergetic rock music fills the air, with pyrotechnic sparks shooting from the stage. The dogs' fur glows slightly under the stage lights, and the stadium's massive speakers create visible sound waves.\n\nAdditional Details:\n\nThe lead dog has a custom guitar with a dog bone-shaped headstock\nThe stage has a circular design with a glowing ring of lights\nThe video includes slow-motion shots of the dogs' paws playing the guitar\nThe sky has a gradient from deep indigo to electric purple",
+      "clip": [
+        "71",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "114": {
+    "inputs": {
+      "tile_size": 128,
+      "overlap": 64,
+      "temporal_size": 20,
+      "temporal_overlap": 8,
+      "samples": [
+        "78",
+        0
+      ],
+      "vae": [
+        "73",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE Decodificar (Mosaico)"
+    }
+  },
+  "115": {
+    "inputs": {
+      "anything": [
+        "88",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  }
+}
