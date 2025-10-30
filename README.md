@@ -22,6 +22,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Native Image Generator** - Direct Open WebUI image generation with Ollama model management
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI ACE Step Audio** - Advanced music generation
+- **ComfyUI Text-to-Video** - Generate short videos from text using ComfyUI (default WAN 2.2 workflow)
 - **Flux Kontext ComfyUI** - Professional image editing
 
 ### 🔄 **Function Pipes**
@@ -100,26 +101,27 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 7. [Cloudflare Workers AI Image Generator](#cloudflare-workers-ai-image-generator)
 8. [SearxNG Image Search Tool](#searxng-image-search-tool)
 9. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
-10. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-11. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-12. [Planner Agent v2](#planner-agent-v2)
-13. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-14. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-15. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-16. [Mopidy Music Controller](#mopidy-music-controller)
-17. [Letta Agent Pipe](#letta-agent-pipe)
-18. [OpenRouter Image Pipe](#openrouter-image-pipe)
-19. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-20. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-21. [Semantic Router Filter](#semantic-router-filter)
-22. [Full Document Filter](#full-document-filter)
-23. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-24. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-25. [Installation](#installation)
-26. [Contributing](#contributing)
-27. [License](#license)
-28. [Credits](#credits)
-29. [Support](#support)
+10. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
+11. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+12. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+13. [Planner Agent v2](#planner-agent-v2)
+14. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+15. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+16. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+17. [Mopidy Music Controller](#mopidy-music-controller)
+18. [Letta Agent Pipe](#letta-agent-pipe)
+19. [OpenRouter Image Pipe](#openrouter-image-pipe)
+20. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+21. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+22. [Semantic Router Filter](#semantic-router-filter)
+23. [Full Document Filter](#full-document-filter)
+24. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+25. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+26. [Installation](#installation)
+27. [Contributing](#contributing)
+28. [License](#license)
+29. [Credits](#credits)
+30. [Support](#support)
 
 ---
 
@@ -493,6 +495,51 @@ Generate music using the ACE Step AI model via ComfyUI. This tool lets you creat
 - **Local Storage**: Optionally saves songs to Open WebUI cache for persistence
 
 *Returns an embedded audio player with download link or just the link, depending on configuration. Advanced users can fully customize the workflow for different genres, moods, or creative experiments.*
+
+---
+
+### ComfyUI Text-to-Video Tool
+
+### Description
+
+Generate short videos from text prompts using a ComfyUI workflow that defaults to the WAN 2.2 text-to-video models. This tool wraps the ComfyUI HTTP + WebSocket API, waits for the job to complete, extracts the produced video, and (optionally) uploads it to Open WebUI storage so it can be embedded in chat.
+
+The default workflow file included in this repository is `extras/video_wan2_2_14B_t2v.json` and the tool implementation lives at `tools/text_to_video_comfyui_tool.py`.
+
+### Configuration
+
+- `comfyui_api_url` (str): ComfyUI HTTP API endpoint (default: `http://localhost:8188`)
+- `prompt_node_id` (str): Node ID in the workflow that receives the text prompt (default: `"89"`)
+- `workflow` (json/dict): ComfyUI workflow JSON; if empty the bundled WAN 2.2 workflow is used
+- `max_wait_time` (int): Maximum seconds to wait for the ComfyUI run (default: `600`)
+- `unload_ollama_models` (bool): Whether to unload Ollama models from VRAM before running (default: `False`)
+- `ollama_api_url` (str): Ollama API URL used when unloading models (default: `http://localhost:11434`)
+
+### Usage
+
+1. **Import the workflow**
+  - In ComfyUI, import the workflow JSON `extras/video_wan2_2_14B_t2v.json` if you want to inspect or modify nodes.
+2. **Install / Configure the tool**
+  - Copy `tools/text_to_video_comfyui_tool.py` into your Open WebUI tools and set the `comfyui_api_url` and other valves as needed in the tool settings.
+3. **Generate a video**
+  - Call the tool with a prompt (e.g. "A cyberpunk panda skating through neon streets, 3s shot") and wait for the job to complete. The tool emits progress events and will provide an embedded HTML  player or a direct ComfyUI URL.
+
+**Example:**
+
+```
+Generate a 3 second shot of "a cyberpunk panda skating through neon city streets" using the default WAN 2.2 workflow
+```
+
+![Text-to-Video Example](img/text_to_video_comfyui.png)
+*Example short video generated via ComfyUI WAN 2.2 workflow (thumbnail).* 
+
+### Features
+
+- Uses WAN 2.2 text-to-video model workflow by default (`video_wan2_2_14B_t2v.json`)
+- Submits workflow to ComfyUI and listens on WebSocket for completion
+- Extracts produced video files and optionally uploads them to Open WebUI storage for inline embedding
+- Optional Ollama VRAM unloading to free memory before runs
+- Configurable prompt node and wait timeout
 
 ---
 
