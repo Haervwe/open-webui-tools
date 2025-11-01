@@ -4,7 +4,7 @@ description: Generate video from text prompt via ComfyUI workflow JSON. Uses Com
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.1
+version: 0.2.0
 license: MIT
 """
 
@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional, Callable, Awaitable, List, Tuple
 import time
 from urllib.parse import quote
 from pydantic import BaseModel, Field
-
+from fastapi.responses import HTMLResponse
 import requests
 from open_webui.models.users import Users
 
@@ -332,7 +332,7 @@ async def download_and_upload_to_owui(
 
         if request and user:
             file = UploadFile(file=io.BytesIO(content), filename=filename)
-            file_item = upload_file_handler(
+            file_item  = upload_file_handler(
                 request=request, file=file, metadata={}, process=False, user=user
             )
             file_id = getattr(file_item, "id", None)
@@ -397,6 +397,9 @@ class Tools:
             default="http://localhost:11434",
             description="Ollama API URL for unloading models.",
         )
+        return_html_embed: bool = Field(
+            default=True, description="Return an HTML video embed upon completion."
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -407,7 +410,7 @@ class Tools:
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __user__: Optional[Dict[str, Any]] = None,
         __request__: Optional[Any] = None,
-    ) -> str:
+    ) -> str | HTMLResponse:
         """Generate a video from a text prompt using the provided ComfyUI workflow."""
         try:
             if self.valves.unload_ollama_models:
@@ -421,7 +424,7 @@ class Tools:
             http_api_url = self.valves.comfyui_api_url.rstrip("/")
             ws_api_url = http_api_url.replace("http", "ws") + "/ws"
             client_id = str(uuid.uuid4())
-            payload = {"prompt": active_workflow, "client_id": client_id}
+            payload: Dict[str, Any] = {"prompt": active_workflow, "client_id": client_id}
 
             if __event_emitter__:
                 await __event_emitter__(
@@ -483,17 +486,18 @@ class Tools:
             )
 
             if __event_emitter__:
-                html_player = f'<video controls src="{final_url}" width="960" style="max-width:100%"></video>'
-                await __event_emitter__(
-                    {"type": "embeds", "data": {"embeds": [html_player]}}
-                )
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {"description": "✅ Video Generated!", "done": True},
                     }
                 )
-
+            if self.valves.return_html_embed:
+                html_player = f'<video controls src="{final_url}" width="960" style="max-width:100%"></video>'
+                return HTMLResponse(
+                    content=html_player,
+                    headers={"content-disposition": "inline"},
+                )
             return f"🎬 Video generated successfully. Link: {final_url}"
 
         except Exception as e:

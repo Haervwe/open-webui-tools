@@ -4,7 +4,7 @@ description: Search YouTube videos and display them in an embedded player
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.2
+version: 1.1.0
 license: MIT
 """
 
@@ -12,6 +12,8 @@ import aiohttp
 from typing import Any, Optional, Callable, Awaitable, Literal
 from pydantic import BaseModel, Field
 import logging
+from fastapi.responses import HTMLResponse
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,12 +32,11 @@ async def emit_status(
 
 
 async def emit_embed(
-    event_emitter: Optional[Callable[[Any], Awaitable[None]]],
     video_id: str,
-) -> None:
+) -> HTMLResponse:
     """Helper to emit embed events for displaying video player"""
-    if event_emitter:
-        iframe_html = f"""
+
+    iframe_html = f"""
 <div style="width:100%;max-width:1200px;margin:0 auto;">
   <div style="position:relative;width:100%;padding-top:56.25%;height:0;overflow:hidden;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,0.2);">
     <iframe src="https://www.youtube.com/embed/{video_id}"
@@ -46,12 +47,7 @@ async def emit_embed(
 </div>
 """.strip()
 
-        await event_emitter(
-            {
-                "type": "embeds",
-                "data": {"embeds": [iframe_html]},
-            }
-        )
+    return HTMLResponse(content=iframe_html, headers={"content-disposition": "inline"})
 
 
 class Tools:
@@ -83,7 +79,7 @@ class Tools:
         query: str,
         max_results: Optional[int] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
+    ) -> str | HTMLResponse:
         """
         Search YouTube for videos matching the query and display embedded player for first result.
 
@@ -152,7 +148,8 @@ class Tools:
 
                         # Embed first video if enabled
                         if i == 1 and self.valves.SHOW_EMBEDDED_PLAYER:
-                            await emit_embed(__event_emitter__, video_id)
+                            await emit_status(__event_emitter__, "Search completed", done=True)
+                            return await emit_embed(video_id)
 
                     await emit_status(__event_emitter__, "Search completed", done=True)
                     return result
@@ -168,7 +165,7 @@ class Tools:
         self,
         video_id: str,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
+    ) -> HTMLResponse:
         """
         Play a specific YouTube video by ID in an embedded player.
         This tool requires a valid YouTube video ID. and DOES NOT use the YouTube Data API for searching.
@@ -181,15 +178,11 @@ class Tools:
         """
         await emit_status(__event_emitter__, f"Loading video: {video_id}")
 
-        try:
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-            # Emit embed for the video
-            await emit_embed(__event_emitter__, video_id)
+        try:           
 
             await emit_status(__event_emitter__, "Video loaded", done=True)
 
-            return f"Playing video: {video_url}"
+            return await emit_embed(video_id)
 
         except Exception as e:
             logger.error(f"Error loading video: {str(e)}")

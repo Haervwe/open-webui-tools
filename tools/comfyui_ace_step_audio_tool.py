@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.1
+version: 0.5.0
 """
 
 import json
@@ -17,7 +17,7 @@ import os
 from pydantic import BaseModel, Field
 import requests
 from open_webui.config import CACHE_DIR
-
+from fastapi.responses import HTMLResponse
 
 async def wait_for_completion_ws(
     comfyui_ws_url: str,
@@ -736,7 +736,7 @@ class Tools:
         song_title: Optional[str] = None,
         __user__: Dict[str, Any] = {},
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
+    ) -> str | HTMLResponse:
         """
                 Tool used to generate music with AI local backend
                 Tags (prompt)
@@ -889,8 +889,7 @@ class Tools:
                 None,
             )
 
-            # No intermediate processing message
-
+           
             audio_files = extract_audio_files(job_data)
 
             if audio_files:
@@ -902,52 +901,33 @@ class Tools:
                     local_audio_url = await download_audio_to_cache(
                         http_api_url, filename, subfolder, self.valves.owui_base_url
                     )
-                    if local_audio_url:
-                        if __event_emitter__:
-                            if self.valves.show_player_embed:
-                                # Emit the minimalistic audio player
-                                html_player = generate_audio_player_embed(local_audio_url, song_title, tags, lyrics)
-                                await __event_emitter__(
-                                    {
-                                        "type": "embeds",
-                                        "data": {
-                                            "embeds": [html_player],
-                                        },
-                                    }
-                                )
-                            
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": "🎉 Song generated successfully!",
-                                        "done": True,
-                                    },
-                                }
-                            )
+                    if not local_audio_url:
+                        return "❌ Failed to download generated audio to local cache."
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": "🎉 Song generated successfully!",
+                                    "done": True,
+                                },
+                            }
+                        )                   
+                    if self.valves.show_player_embed:
+                        # Emit the minimalistic audio player
+                        html_player = generate_audio_player_embed(local_audio_url, song_title, tags, lyrics)
+                        response = HTMLResponse(content=html_player, headers={"content-disposition": "inline"})
+                    else:
+                        response = f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({local_audio_url})\n\n**Direct link:** {local_audio_url}"
+                    
 
-                        if self.valves.show_player_embed:
-                            return f"Song generated successfully! The audio is embedded above and can be downloaded from: {local_audio_url}"
-                        else:
-                            return f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({local_audio_url})\n\n**Direct link:** {local_audio_url}"
+                    return response
                 else:
                     # Fallback to ComfyUI direct link if download fails
                     subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
                     comfyui_url = f"{http_api_url}/view?filename={filename}&type=output{subfolder_param}"
 
                     if __event_emitter__:
-                        if self.valves.show_player_embed:
-                            # Emit the minimalistic audio player with ComfyUI URL
-                            html_player = generate_audio_player_embed(comfyui_url, song_title, tags, lyrics)
-                            await __event_emitter__(
-                                {
-                                    "type": "embeds",
-                                    "data": {
-                                        "embeds": [html_player],
-                                    },
-                                }
-                            )
-                        
                         await __event_emitter__(
                             {
                                 "type": "status",
@@ -957,11 +937,14 @@ class Tools:
                                 },
                             }
                         )
-
                     if self.valves.show_player_embed:
-                        return f"Song generated successfully! The audio is embedded above and can be downloaded from: {comfyui_url}"
+                        # Emit the minimalistic audio player with ComfyUI URL
+                        html_player = generate_audio_player_embed(comfyui_url, song_title, tags, lyrics)
+                        response = HTMLResponse(content=html_player, headers={"content-disposition": "inline"})
                     else:
-                        return f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({comfyui_url})\n\n**Direct link:** {comfyui_url}"
+                        response = f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({comfyui_url})\n\n**Direct link:** {comfyui_url}"
+
+                    return response
             else:
                 outputs_json = json.dumps(job_data.get("outputs", {}), indent=2)
                 if __event_emitter__:
