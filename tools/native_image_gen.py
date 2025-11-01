@@ -4,7 +4,7 @@ author: Haervwe
 Based on @justinrahb tool
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.2
+version: 0.2.3
 required_open_webui_version: 0.6.31
 """
 
@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from typing import Any, Callable, Optional, Dict, List
 from open_webui.routers.images import image_generations, GenerateImageForm
 from open_webui.models.users import Users
-
+from fastapi.responses import HTMLResponse
 
 def get_loaded_models(api_url: str = "http://localhost:11434") -> List[Dict[str, Any]]:
     """Get all currently loaded models in VRAM"""
@@ -80,7 +80,7 @@ class Tools:
         __request__: Request | None = None,
         __user__: dict[str, Any] | None = None,
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Any]] = None,
-    ) -> str:
+    ) -> str | HTMLResponse:
         """
         Generate an image given a prompt
 
@@ -127,18 +127,21 @@ class Tools:
             for image in images:
                 url = f"http://haervwe.ai:3000{image['url']}"
                 bare_urls.append(url)
-                img_html = f'<img src="{url}" style="max-width:100%; height:auto;" />'
+                img_html = f'<img src="{url}" style="max-width:100%; height:auto; display:block; border:none; margin:0 0 8px 0; padding:0; border-radius:12px;" />'
                 markdown_attachments.append(img_html)
 
-            if self.valves.emit_embeds and __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "embeds",
-                        "data": {
-                            "description": "Generated images",
-                            "embeds": markdown_attachments,
-                        },
-                    }
+            if self.valves.emit_embeds:
+                html_content = f'''<!DOCTYPE html>
+<html style="margin:0; padding:0; overflow:hidden;">
+<head><meta charset="UTF-8"></head>
+<body style="margin:0; padding:0; overflow:hidden;">
+<div style="margin:0; padding:0; border:none; line-height:0;">{"".join(markdown_attachments)}</div>
+</body>
+</html>'''
+                return HTMLResponse(
+                    content=html_content,
+                    media_type="text/html",
+                    headers={"content-disposition": "inline"},
                 )
 
             urls_line = " ".join(bare_urls)
