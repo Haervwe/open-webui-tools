@@ -521,40 +521,47 @@ class Tools:
         __messages__: Optional[List[Dict[str, Any]]] = None,
     ) -> str | HTMLResponse:
         """
-        Edit or transform images using AI-powered workflows. The tool automatically extracts images 
-        from your message attachments and applies your text instructions to modify them.
+        Edit or transform images using AI-powered workflows. Images are automatically extracted from the user's message.
         
-        **How it works:**
-        - Images are automatically extracted from your message (you don't need to specify them in the prompt)
-        - Up to 3 images are passed to the AI model along with your text prompt
-        - The AI interprets your instructions and modifies the image(s) accordingly
-        - First image is the main subject; additional images provide context, reference, or style guidance
+        **CRITICAL: You MUST enhance and expand the user's prompt before passing it to this tool.**
         
-        **Prompting Strategies:**
+        **Your Responsibilities:**
+        1. Take the user's brief instruction and expand it into a detailed, specific prompt
+        2. Add visual details, style descriptions, and technical specifications
+        3. Be explicit about what should change and what should remain
+        4. For vague requests, infer intent and add descriptive details
         
-        For precise edits (single or multiple images):
-        - Direct instructions: "Remove the background", "Change the sky to sunset", "Make the car red"
-        - Object-focused: "Remove all text from the image", "Delete the person on the left"
-        - Style transfer: "Apply the color grading from image 1 to image 2" (with 2+ images)
-        - Contextual edits: "Replace the background with a beach scene while keeping the subject"
+        **Prompt Enhancement Examples:**
         
-        For artistic transformations:
-        - Style descriptions: "Transform into a watercolor painting", "Make it look like a vintage photograph"
-        - Scene reimagining: "Place the subject in a cyberpunk city", "Transform into an anime art style"
-        - Atmospheric changes: "Add dramatic lighting", "Make it look like a rainy night"
+        User says: "put the cyberpunk dolphin in the beautiful natural background"
+        You should pass: "Seamlessly composite the cyberpunk-styled dolphin with neon accents and technological augmentations into a lush natural ocean environment with crystal clear turquoise water, coral reefs, and dappled sunlight filtering through the water surface. Blend the futuristic elements naturally while maintaining the dolphin as the focal point against the pristine underwater scenery. Ensure realistic lighting and color harmony between the cyberpunk subject and organic background."
         
-        For multi-image editing (2-3 images):
-        - "Blend the composition of image 1 with the style of image 2"
-        - "Use the lighting from the first image on the second image"
-        - "Transfer the color palette from image 1 to image 2"
+        User says: "make it look vintage"
+        You should pass: "Transform the image into a vintage photograph aesthetic from the 1970s with warm, faded color tones, slight yellow/sepia tint, subtle grain texture, soft vignetting around the edges, and slightly reduced contrast to mimic aged film photography. Add authentic period-appropriate color grading and a nostalgic, timeworn appearance."
         
-        **Tips:**
-        - Be specific and descriptive in your instructions
-        - Describe what to change rather than the entire scene
-        - When using multiple images, clearly indicate which image(s) to use as reference
-        - Images are automatically processed - no need to mention "the attached image" in your prompt
+        User says: "remove the background"
+        You should pass: "Completely remove and replace the background with a clean, transparent background while precisely preserving the main subject. Maintain sharp edges and fine details like hair, fur, or intricate outlines. Ensure professional cutout quality suitable for compositing."
+        
+        User says: "add dramatic lighting"
+        You should pass: "Add dramatic cinematic lighting with strong directional light source creating deep shadows and bright highlights. Incorporate rim lighting to separate the subject from the background, use warm golden hour tones or cool blue shadows depending on mood, and enhance contrast to create visual depth and emotional impact. Maintain natural light behavior and realistic shadow placement."
+        
+        **Enhancement Guidelines:**
+        - For object placement: Specify position, scale, blending method, and lighting integration
+        - For style changes: Include specific artistic period, technique, color palette, and texture details
+        - For removals: Specify what to fill the space with (transparent, similar background, specific content)
+        - For atmospheric effects: Detail time of day, weather, mood, color temperature, and quality
+        - For multi-image edits: Explicitly state which elements from which image should be combined and how
+        
+        **Technical Details to Include:**
+        - Lighting direction, quality (soft/hard), and color temperature
+        - Desired mood and atmosphere
+        - Specific colors, textures, and materials
+        - Level of detail and realism expected
+        - Composition and framing considerations
+        
+        Images are automatically extracted - never mention "the image" or "the attachment" in the prompt.
 
-        :param prompt: Natural language instruction describing the desired image transformation or edit
+        :param prompt: Detailed, enhanced instruction with specific visual details, style descriptions, and technical specifications for the image transformation
         """
         try:
             # Extract images from messages
