@@ -413,7 +413,7 @@ def prepare_workflow(
         if "194" in workflow and "inputs" in workflow["194"]:
             workflow["194"]["inputs"]["seed"] = random.randint(0, 2**32 - 1)
 
-    elif workflow_type == "QWen_Edit":
+    elif workflow_type == "Qwen_Image_Edit":
         if "111" in workflow:
             workflow["111"].setdefault("inputs", {})["prompt"] = prompt
 
@@ -433,7 +433,10 @@ def prepare_workflow(
                 del workflow[node_id]
 
         for conditioning_node_id in ["110", "111"]:
-            if conditioning_node_id in workflow and "inputs" in workflow[conditioning_node_id]:
+            if (
+                conditioning_node_id in workflow
+                and "inputs" in workflow[conditioning_node_id]
+            ):
                 for idx in range(num_images, len(image_input_keys)):
                     image_key = image_input_keys[idx]
                     if image_key in workflow[conditioning_node_id]["inputs"]:
@@ -489,25 +492,46 @@ def extract_images_from_messages(messages: List[Dict[str, Any]]) -> List[str]:
         for item in content:
             if isinstance(item, dict) and item.get("type") == "image_url":
                 image_url_obj = item.get("image_url", {})
-                url = image_url_obj.get("url") if isinstance(image_url_obj, dict) else None
+                url = (
+                    image_url_obj.get("url")
+                    if isinstance(image_url_obj, dict)
+                    else None
+                )
                 if url and isinstance(url, str) and url.startswith("data:image"):
                     base64_data = url.split(",", 1)[1] if "," in url else url
                     base64_images.append(base64_data)
 
     return base64_images
 
+
 # --- Main Tool Class ---
 
 
 class Tools:
     class Valves(BaseModel):
-        comfyui_api_url: str = Field(default="http://localhost:8188", description="ComfyUI HTTP API endpoint.")
-        workflow_type: Literal["Flux_Kontext", "QWen_Edit", "Custom"] = Field(default="QWen_Edit", description="Workflow to use for image editing.")
-        custom_workflow: Optional[Dict[str, Any]] = Field(default=None, description="Custom ComfyUI workflow JSON (only used if workflow_type='Custom').")
-        max_wait_time: int = Field(default=600, description="Max wait time in seconds for job completion.")
-        unload_ollama_models: bool = Field(default=False, description="Unload Ollama models before calling ComfyUI.")
-        ollama_api_url: str = Field(default="http://localhost:11434", description="Ollama API URL for unloading models.")
-        return_html_embed: bool = Field(default=True, description="Return an HTML image embed upon completion.")
+        comfyui_api_url: str = Field(
+            default="http://localhost:8188", description="ComfyUI HTTP API endpoint."
+        )
+        workflow_type: Literal["Flux_Kontext", "Qwen_Image_Edit", "Custom"] = Field(
+            default="Qwen_Image_Edit", description="Workflow to use for image editing."
+        )
+        custom_workflow: Optional[Dict[str, Any]] = Field(
+            default=None,
+            description="Custom ComfyUI workflow JSON (only used if workflow_type='Custom').",
+        )
+        max_wait_time: int = Field(
+            default=600, description="Max wait time in seconds for job completion."
+        )
+        unload_ollama_models: bool = Field(
+            default=False, description="Unload Ollama models before calling ComfyUI."
+        )
+        ollama_api_url: str = Field(
+            default="http://localhost:11434",
+            description="Ollama API URL for unloading models.",
+        )
+        return_html_embed: bool = Field(
+            default=True, description="Return an HTML image embed upon completion."
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -522,57 +546,56 @@ class Tools:
     ) -> str | HTMLResponse:
         """
         Edit or transform images using AI-powered workflows. Images are automatically extracted from the user's message.
-        
+
         **CRITICAL: You MUST enhance and expand the user's prompt before passing it to this tool.**
-        
+
         **Your Responsibilities:**
         1. Take the user's brief instruction and expand it into a detailed, specific prompt
         2. Add visual details, style descriptions, and technical specifications
         3. Be explicit about what should change and what should remain
         4. For vague requests, infer intent and add descriptive details
-        
+
         **Prompt Enhancement Examples:**
-        
+
         User says: "put the cyberpunk dolphin in the beautiful natural background"
         You should pass: "Seamlessly composite the cyberpunk-styled dolphin with neon accents and technological augmentations into a lush natural ocean environment with crystal clear turquoise water, coral reefs, and dappled sunlight filtering through the water surface. Blend the futuristic elements naturally while maintaining the dolphin as the focal point against the pristine underwater scenery. Ensure realistic lighting and color harmony between the cyberpunk subject and organic background."
-        
+
         User says: "make it look vintage"
         You should pass: "Transform the image into a vintage photograph aesthetic from the 1970s with warm, faded color tones, slight yellow/sepia tint, subtle grain texture, soft vignetting around the edges, and slightly reduced contrast to mimic aged film photography. Add authentic period-appropriate color grading and a nostalgic, timeworn appearance."
-        
+
         User says: "remove the background"
         You should pass: "Completely remove and replace the background with a clean, transparent background while precisely preserving the main subject. Maintain sharp edges and fine details like hair, fur, or intricate outlines. Ensure professional cutout quality suitable for compositing."
-        
+
         User says: "add dramatic lighting"
         You should pass: "Add dramatic cinematic lighting with strong directional light source creating deep shadows and bright highlights. Incorporate rim lighting to separate the subject from the background, use warm golden hour tones or cool blue shadows depending on mood, and enhance contrast to create visual depth and emotional impact. Maintain natural light behavior and realistic shadow placement."
-        
+
         **Enhancement Guidelines:**
         - For object placement: Specify position, scale, blending method, and lighting integration
         - For style changes: Include specific artistic period, technique, color palette, and texture details
         - For removals: Specify what to fill the space with (transparent, similar background, specific content)
         - For atmospheric effects: Detail time of day, weather, mood, color temperature, and quality
         - For multi-image edits: Explicitly state which elements from which image should be combined and how
-        
+
         **Technical Details to Include:**
         - Lighting direction, quality (soft/hard), and color temperature
         - Desired mood and atmosphere
         - Specific colors, textures, and materials
         - Level of detail and realism expected
         - Composition and framing considerations
-        
+
         Images are automatically extracted - never mention "the image" or "the attachment" in the prompt.
 
         :param prompt: Detailed, enhanced instruction with specific visual details, style descriptions, and technical specifications for the image transformation
         """
         try:
-            # Extract images from messages
+            
             if not __messages__:
                 return "Error: No messages provided. Please attach an image to your message."
 
             base64_images = extract_images_from_messages(__messages__)
             if not base64_images or len(base64_images) == 0:
                 return "Error: No images found in the last message. Please attach at least one image and try again."
-            
-            # Warn if more than 3 images were provided
+
             if len(base64_images) > 3 and __event_emitter__:
                 await __event_emitter__(
                     {
@@ -583,26 +606,23 @@ class Tools:
                         },
                     }
                 )
-            
-            # Keep only the first 3 images
+
             base64_images = base64_images[:3]
 
             if self.valves.unload_ollama_models:
                 unload_all_models(self.valves.ollama_api_url)
 
-            # Select workflow based on type
             if self.valves.workflow_type == "Flux_Kontext":
                 base_workflow = DEFAULT_FLUX_KONTEXT_WORKFLOW
-            elif self.valves.workflow_type == "QWen_Edit":
+            elif self.valves.workflow_type == "Qwen_Image_Edit":
                 base_workflow = DEFAULT_QWEN_EDIT_WORKFLOW
             elif self.valves.workflow_type == "Custom":
                 if not self.valves.custom_workflow:
                     return "Error: Custom workflow selected but no custom workflow JSON provided in valves."
                 base_workflow = self.valves.custom_workflow
             else:
-                return f"Error: Unknown workflow type '{self.valves.workflow_type}'. Use 'Flux_Kontext', 'QWen_Edit', or 'Custom'."
+                return f"Error: Unknown workflow type '{self.valves.workflow_type}'. Use 'Flux_Kontext', 'Qwen_Image_Edit', or 'Custom'."
 
-            # Prepare workflow
             active_workflow = prepare_workflow(
                 base_workflow, self.valves.workflow_type, prompt, base64_images
             )
@@ -616,11 +636,17 @@ class Tools:
             }
 
             if __event_emitter__:
+                if self.valves.workflow_type == "Custom":
+                    status_message = "🎨 Editing image..."
+                else:
+                    workflow_display = self.valves.workflow_type.replace("_", " ")
+                    status_message = f"🎨 Editing image using {workflow_display}..."
+
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": f"🎨 Editing image using {self.valves.workflow_type}...",
+                            "description": status_message,
                             "done": False,
                         },
                     }
@@ -638,7 +664,6 @@ class Tools:
                     prompt_id = result.get("prompt_id")
                     if not prompt_id:
                         return f"Error: No prompt_id from ComfyUI. Response: {json.dumps(result)}"
-
 
             job_data = await wait_for_completion_ws(
                 ws_api_url,
@@ -671,7 +696,6 @@ class Tools:
             filename = image_file_info["filename"]
             subfolder = image_file_info.get("subfolder", "")
 
-            # Try to upload to OpenWebUI
             user = None
             if __user__:
                 user_id = __user__.get("id")
@@ -693,117 +717,79 @@ class Tools:
                     }
                 )
 
-            if self.valves.return_html_embed:
-                # Return embedded image
-                # Prepare prompt display (truncate if too long)
-                prompt_display = prompt[:200] + ('...' if len(prompt) > 200 else '')
-                workflow_title = self.valves.workflow_type.replace('_', ' ').title()
-                
+            if self.valves.return_html_embed:      
+
                 html_content = f"""<!DOCTYPE html>
-<html>
+<html style="margin:0; padding:0; overflow:hidden;">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Edited Image</title>
     <style>
         * {{
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }}
-        html, body {{
-            background: transparent;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            overflow: hidden;
-        }}
         body {{
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }}
-        .image-container {{
-            background: rgba(20, 20, 25, 0.25);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 12px;
-            padding: 24px;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-            max-width: 800px;
-            width: 100%;
-        }}
-        .header {{
-            text-align: center;
-            margin-bottom: 20px;
-        }}
-        .title {{
-            font-size: 20px;
-            font-weight: 600;
-            color: #f0f0f0;
-            margin-bottom: 5px;
-        }}
-        .subtitle {{
-            font-size: 10px;
-            color: #888;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
+        .container {{
+            margin: 0;
+            padding: 0;
+            border: none;
+            line-height: 0;
         }}
         .image-wrapper {{
-            width: 100%;
-            border-radius: 8px;
+            margin: 0 0 8px 0;
+            padding: 0;
+            border-radius: 12px;
             overflow: hidden;
-            background: #000;
-            margin-bottom: 16px;
+            line-height: 0;
         }}
         .image-wrapper img {{
-            width: 100%;
+            max-width: 100%;
             height: auto;
             display: block;
+            border: none;
+            margin: 0;
+            padding: 0;
         }}
-        .info {{
+        .prompt-bubble {{
+            background: rgba(0, 0, 0, 0.05);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin: 8px 0 0 0;
             font-size: 13px;
-            color: #ccc;
-            line-height: 1.6;
-            margin-bottom: 16px;
+            line-height: 1.5;
+            color: #333;
+            word-wrap: break-word;
         }}
-        .download-btn {{
-            display: inline-block;
-            width: 100%;
-            padding: 11px 18px;
-            background: rgba(255, 255, 255, 0.08);
-            color: #e0e0e0;
-            text-align: center;
-            text-decoration: none;
-            border-radius: 8px;
-            font-weight: 500;
-            font-size: 13px;
-            transition: all 0.2s;
-            border: 1px solid rgba(255, 255, 255, 0.1);
+        .prompt-label {{
+            font-weight: 600;
+            color: #666;
+            margin-bottom: 4px;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }}
-        .download-btn:hover {{
-            background: rgba(255, 255, 255, 0.15);
-            border-color: rgba(255, 255, 255, 0.2);
+        .prompt-text {{
+            color: #444;
         }}
     </style>
 </head>
 <body>
-    <div class="image-container">
-        <div class="header">
-            <div class="title">Edited Image</div>
-            <div class="subtitle">{workflow_title}</div>
-        </div>
+    <div class="container">
         <div class="image-wrapper">
-            <img src="{image_url}" alt="Edited Image">
+            <img src="{image_url}" alt="Generated Image" />
         </div>
-        <div class="info">
-            <strong>Prompt:</strong> {prompt_display}
+        <div class="prompt-bubble">
+            <div class="prompt-label">Prompt</div>
+            <div class="prompt-text">{prompt}</div>
         </div>
-        <a href="{image_url}" download class="download-btn">
-            <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor;vertical-align:middle;margin-right:6px;">
-                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-            </svg>
-            Download Image
-        </a>
     </div>
 </body>
 </html>"""
