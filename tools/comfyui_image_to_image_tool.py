@@ -632,16 +632,6 @@ class Tools:
                     if not prompt_id:
                         return f"Error: No prompt_id from ComfyUI. Response: {json.dumps(result)}"
 
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "⏳ Processing image transformation...",
-                            "done": False,
-                        },
-                    }
-                )
 
             job_data = await wait_for_completion_ws(
                 ws_api_url,
@@ -658,7 +648,7 @@ class Tools:
                 if __event_emitter__:
                     await __event_emitter__(
                         {
-                            "type": "status",
+                            "type": "error",
                             "data": {
                                 "description": "No output image found.",
                                 "done": True,
@@ -690,7 +680,7 @@ class Tools:
                     {
                         "type": "status",
                         "data": {
-                            "description": "✅ Image transformation complete!",
+                            "description": "🖼️ Image Generated Successfully!",
                             "done": True,
                         },
                     }
