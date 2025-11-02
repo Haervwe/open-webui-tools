@@ -21,6 +21,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **YouTube Search & Embed** - Search YouTube and play videos in embedded player
 - **Native Image Generator** - Direct Open WebUI image generation with Ollama model management
 - **Hugging Face Image Generator** - AI-powered image creation
+- **ComfyUI Image-to-Image (Qwen Edit 2509)** - Advanced image editing with multi-image support
 - **ComfyUI ACE Step Audio** - Advanced music generation
 - **ComfyUI Text-to-Video** - Generate short videos from text using ComfyUI (default WAN 2.2 workflow)
 - **Flux Kontext ComfyUI** - Professional image editing
@@ -100,28 +101,29 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 6. [Hugging Face Image Generator](#hugging-face-image-generator)
 7. [Cloudflare Workers AI Image Generator](#cloudflare-workers-ai-image-generator)
 8. [SearxNG Image Search Tool](#searxng-image-search-tool)
-9. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
-10. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
-11. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-12. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-13. [Planner Agent v2](#planner-agent-v2)
-14. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-15. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-16. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-17. [Mopidy Music Controller](#mopidy-music-controller)
-18. [Letta Agent Pipe](#letta-agent-pipe)
-19. [OpenRouter Image Pipe](#openrouter-image-pipe)
-20. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-21. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-22. [Semantic Router Filter](#semantic-router-filter)
-23. [Full Document Filter](#full-document-filter)
-24. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-25. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-26. [Installation](#installation)
-27. [Contributing](#contributing)
-28. [License](#license)
-29. [Credits](#credits)
-30. [Support](#support)
+9. [ComfyUI Image-to-Image Tool (Qwen Image Edit 2509)](#comfyui-image-to-image-tool-qwen-image-edit-2509)
+10. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
+11. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
+12. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+13. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+14. [Planner Agent v2](#planner-agent-v2)
+15. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+16. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+17. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+18. [Mopidy Music Controller](#mopidy-music-controller)
+19. [Letta Agent Pipe](#letta-agent-pipe)
+20. [OpenRouter Image Pipe](#openrouter-image-pipe)
+21. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+22. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+23. [Semantic Router Filter](#semantic-router-filter)
+24. [Full Document Filter](#full-document-filter)
+25. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+26. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+27. [Installation](#installation)
+28. [Contributing](#contributing)
+29. [License](#license)
+30. [Credits](#credits)
+31. [Support](#support)
 
 ---
 
@@ -441,6 +443,98 @@ Search and retrieve images from the web using a self-hosted [SearxNG](https://se
 - **Direct Image Display:** Images are formatted for chat display
 - **Customizable:** Choose engines, result count, and more
 - **Error Handling:** Handles connection and search errors gracefully
+
+---
+
+### ComfyUI Image-to-Image Tool (Qwen Image Edit 2509)
+
+### Description
+
+Edit and transform images using ComfyUI workflows with AI-powered image editing. Features the **Qwen Image Edit 2509** model as default, supporting up to 3 images for advanced editing with context, style transfer, and multi-image blending. Also includes Flux Kontext workflow for artistic transformations. Images are automatically extracted from message attachments and rendered as beautiful HTML embeds.
+
+### Configuration
+
+- `comfyui_api_url` (str): ComfyUI HTTP API endpoint (default: `http://localhost:8188`)
+- `workflow_type` (str): Choose your workflow—"Flux_Kontext", "QWen_Edit", or "Custom" (default: `QWen_Edit`)
+- `custom_workflow` (Dict): Custom ComfyUI workflow JSON (only used when workflow_type='Custom')
+- `max_wait_time` (int): Maximum wait time in seconds for job completion (default: `600`)
+- `unload_ollama_models` (bool): Automatically unload Ollama models from VRAM before generating images (default: `False`)
+- `ollama_api_url` (str): Ollama API URL for model management (default: `http://localhost:11434`)
+- `return_html_embed` (bool): Return a beautiful HTML image embed with comparison view (default: `True`)
+
+**Prerequisites**: You must have ComfyUI installed and running with the required models and custom nodes:
+- For **Flux Kontext**: Flux Dev model, Flux Kontext LoRA, and required ComfyUI nodes
+- For **Qwen Edit 2509**: Qwen Image Edit 2509 model, Qwen CLIP, VAE, and ETN_LoadImageBase64 custom node
+- See the [Extras](Extras/) folder for workflow JSON files: `flux_context_owui_api_v1.json` and `image_qwen_image_edit_2509_api_owui.json`
+
+### Usage
+
+- **Example:**
+
+  ```python
+  # Attach image(s) and provide editing instructions
+  "Remove the background"
+  "Change car to red"
+  "Apply lighting from first image to second image"
+  ```
+
+### Features
+
+- **Qwen Edit 2509 (Default)**: State-of-the-art image editing with precise control and instruction-following
+- **Multi-Image Support**: Qwen Edit workflow accepts 1-3 images for advanced editing with context and style transfer
+- **Dual Workflow Support**: Switch to Flux Kontext for artistic transformations and creative reimagining
+- **Automatic Image Handling**: Images are extracted from messages and passed to the AI automatically
+- **VRAM Management**: Optional Ollama model unloading to free GPU memory before generation
+- **Beautiful HTML Embeds**: Displays results with elegant before/after comparison view
+- **OpenWebUI Integration**: Automatically uploads generated images to OpenWebUI storage
+- **Flexible Workflows**: Use built-in workflows or provide your own custom ComfyUI JSON
+
+### Workflow Details
+
+**Qwen Edit 2509 (Default):**
+- Supports 1-3 images with multi-image context and style transfer
+- Lightning-fast 4-step generation
+- Best for: precise edits, object manipulation, style transfer
+
+**Flux Kontext (Alternative):**
+- Single image input (multi-image support planned)
+- 20-step high-quality generation
+- Best for: artistic transformations, creative reimagining
+
+**Custom Workflow:**
+- Bring your own ComfyUI workflow JSON
+- Full flexibility for advanced users
+
+### Getting Started
+
+1. **Set up ComfyUI:**
+   - Install [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
+   - Download required models (Flux Dev, Qwen Edit 2509, etc.)
+   - Install necessary custom nodes (especially `ETN_LoadImageBase64` for Qwen workflow)
+
+2. **Import workflows:**
+   - Load `Extras/flux_context_owui_api_v1.json` or `Extras/image_qwen_image_edit_2509_api_owui.json` in ComfyUI
+   - Verify all nodes are recognized (install missing custom nodes if needed)
+
+3. **Configure the tool:**
+   - Set `comfyui_api_url` to your ComfyUI server address
+   - Choose your preferred workflow type
+   - Optionally enable Ollama model unloading if you have limited VRAM
+
+4. **Start editing:**
+   - Attach an image (or up to 3 for multi-image editing) to your message
+   - Describe your desired transformation in natural language
+   - Watch the magic happen!
+
+**Note for Custom Workflows:** If you're using a custom workflow with different capabilities (e.g., single-image only or different prompting requirements), you should modify the `edit_image` function's docstring in the tool code. The docstring instructs the AI on how to use the tool and what prompting strategies work best. Adjust it to match your workflow's specific capabilities and requirements.
+
+**Multi-Image Support Status:**
+- **Qwen Edit 2509**: Full support for 1-3 images (default workflow)
+- **Flux Kontext**: Single image currently; multi-image support planned for future release
+- **Custom workflows**: Depends on your workflow implementation
+
+![Qwen Image Edit Example](img/qwen_image_tool.png)
+*Example of Qwen Image Edit 2509 transforming a cyberpunk dolphin into a natural mountain scene*
 
 ---
 
