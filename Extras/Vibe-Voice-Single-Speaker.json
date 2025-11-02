@@ -1,0 +1,60 @@
+{
+  "15": {
+    "inputs": {
+      "audio": "Voice.mp3",
+      "audioUI": ""
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "CargarAudio"
+    }
+  },
+  "16": {
+    "inputs": {
+      "filename_prefix": "audio/ComfyUI",
+      "quality": "V0",
+      "audioUI": "",
+      "audio": [
+        "45",
+        0
+      ]
+    },
+    "class_type": "SaveAudioMP3",
+    "_meta": {
+      "title": "Save Audio (MP3)"
+    }
+  },
+  "44": {
+    "inputs": {
+      "text": "Hello, this is a test of the VibeVoice text-to-speech system.",
+      "model": "VibeVoice-1.5B",
+      "attention_type": "auto",
+      "quantize_llm": "full precision",
+      "free_memory_after_generate": true,
+      "diffusion_steps": 20,
+      "seed": 42,
+      "cfg_scale": 1.3,
+      "use_sampling": false,
+      "temperature": 0.95,
+      "top_p": 0.95,
+      "max_words_per_chunk": 250,
+      "voice_speed_factor": 1
+    },
+    "class_type": "VibeVoiceSingleSpeakerNode",
+    "_meta": {
+      "title": "VibeVoice Single Speaker"
+    }
+  },
+  "45": {
+    "inputs": {
+      "anything": [
+        "44",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  }
+}

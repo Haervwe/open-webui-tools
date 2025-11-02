@@ -1,0 +1,69 @@
+{
+  "15": {
+    "inputs": {
+      "audio": "Voice1.mp3",
+      "audioUI": ""
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "CargarAudio"
+    }
+  },
+  "16": {
+    "inputs": {
+      "filename_prefix": "audio/ComfyUI",
+      "quality": "V0",
+      "audioUI": "",
+      "audio": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "SaveAudioMP3",
+    "_meta": {
+      "title": "Save Audio (MP3)"
+    }
+  },
+  "17": {
+    "inputs": {
+      "audio": "Voice2.mp3",
+      "audioUI": ""
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "CargarAudio"
+    }
+  },
+  "36": {
+    "inputs": {
+      "text": "[1]: Hello, this is the first speaker.\n[2]: Hi there, I'm the second speaker.\n[1]: Nice to meet you!\n[2]: Nice to meet you too!",
+      "model": "VibeVoice-1.5B",
+      "attention_type": "auto",
+      "quantize_llm": "full precision",
+      "free_memory_after_generate": true,
+      "diffusion_steps": 20,
+      "seed": 42,
+      "cfg_scale": 1.3,
+      "use_sampling": false,
+      "temperature": 0.95,
+      "top_p": 0.95,
+      "voice_speed_factor": 1
+    },
+    "class_type": "VibeVoiceMultipleSpeakersNode",
+    "_meta": {
+      "title": "VibeVoice Multiple Speakers"
+    }
+  },
+  "39": {
+    "inputs": {
+      "anything": [
+        "36",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "Clean VRAM Used"
+    }
+  }
+}
