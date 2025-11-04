@@ -3,7 +3,7 @@ title: Prompt Enhancer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.6.3
+version: 0.6.4
 important note: if you are going to sue this filter with custom pipes, do not use the show enhanced prompt valve setting
 """
 
@@ -67,6 +67,8 @@ Example:
 Given Prompt: Write a poem about flowers.
 Enhanced Prompt: Craft a vivid and imaginative poem that explores the beauty and diversity of flowers, using rich imagery and metaphors to bring each bloom to life.
 
+IMPORTANT: DO NOT INCLUDE ANY HEADERS SUCH AS "Enhanced Prompt:" in the response. just the final refined enhaced prompt 
+
 Now, enhance the following prompt using the Context and The user prompt, return only the enhanced user prompt.:
 """,
             description="Prompt to use in the Prompt enhancer System Message",
@@ -91,6 +93,7 @@ Now, enhance the following prompt using the Context and The user prompt, return 
         self.__model__ = None
         self.__request__ = None
         self.toggle = True
+        self.icon = """data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMDAiIGhlaWdodD0iMjAwIiB2aWV3Qm94PSIwIDAgMjQgMjQiIGZpbGw9IiMwMDAwMDAiPjxnIGZpbGw9Im5vbmUiIGZpbGwtcnVsZT0iZXZlbm9kZCI+PHBhdGggZD0ibTEyLjU5NCAyMy4yNThsLS4wMTIuMDAybC0uMDcxLjAzNWwtLjAyLjAwNGwtLjAxNC0uMDA0bC0uMDcxLS4wMzZxLS4wMTYtLjAwNC0uMDI0LjAwNmwtLjAwNC4wMWwtLjAxNy40MjhsLjAwNS4wMmwuMDEuMDEzbC4xMDQuMDc0bC4wMTUuMDA0bC4wMTItLjAwNGwuMTA0LS4wNzRsLjAxMi0uMDE2bC4wMDQtLjAxN2wtLjAxNy0uNDI3cS0uMDA0LS4wMTYtLjAxNi0uMDE4bS4yNjQtLjExM2wtLjAxNC4wMDJsLS4xODQuMDkzbC0uMDEuMDFsLS4wMDMuMDExbC4wMTguNDNsLjAwNS4wMTJsLjAwOC4wMDhsLjIwMS4wOTJxLjAxOS4wMDUuMDI5LS4wMDhsLjAwNC0uMDE0bC0uMDM0LS42MTRxLS4wMDUtLjAxOS0uMDItLjAyMm0tLjcxNS4wMDJhLjAyLjAyIDAgMCAwLS4wMjcuMDA2bC0uMDA2LjAxNGwtLjAzNC42MTRxLjAwMS4wMTguMDE3LjAyNGwuMDE1LS4wMDJsLjIwMS0uMDkzbC4wMS0uMDA4bC4wMDMtLjAxMWwuMDE4LS40M2wtLjAwMy0uMDEybC0uMDEtLjAxeiIvPjxwYXRoIGZpbGw9IiMwMDAwMDAiIGQ9Ik0xOSAxOWExIDEgMCAwIDEgLjExNyAxLjk5M0wxOSAyMWgtN2ExIDEgMCAwIDEtLjExNy0xLjk5M0wxMiAxOXptLjYzMS0xNC42MzJhMi41IDIuNSAwIDAgMSAwIDMuNTM2TDguNzM1IDE4LjhhMS41IDEuNSAwIDAgMS0uNDQuMzA1bC0zLjgwNCAxLjcyOWMtLjg0Mi4zODMtMS43MDgtLjQ4NC0xLjMyNS0xLjMyNmwxLjczLTMuODA0YTEuNSAxLjUgMCAwIDEgLjMwNC0uNDRMMTYuMDk2IDQuMzY4YTIuNSAyLjUgMCAwIDEgMy41MzUgMG0tMi4xMiAxLjQxNEw2LjY3NyAxNi42MTRsLS41ODkgMS4yOTdsMS4yOTYtLjU5TDE4LjIxNyA2LjQ5YS41LjUgMCAxIDAtLjcwNy0uNzA3TTYgMWExIDEgMCAwIDEgLjk0Ni42NzdsLjEzLjM3OGEzIDMgMCAwIDAgMS44NjkgMS44N2wuMzc4LjEyOWExIDEgMCAwIDEgMCAxLjg5MmwtLjM3OC4xM2EzIDMgMCAwIDAtMS44NyAxLjg2OWwtLjEyOS4zNzhhMSAxIDAgMCAxLTEuODkyIDBsLS4xMy0uMzc4YTMgMyAwIDAgMC0xLjg2OS0xLjg3bC0uMzc4LS4xMjlhMSAxIDAgMCAxIDAtMS44OTJsLjM3OC0uMTNhMyAzIDAgMCAwIDEuODctMS44NjlsLjEyOS0uMzc4QTEgMSAwIDAgMSA2IDFtMCAzLjE5NkE1IDUgMCAwIDEgNS4xOTYgNXEuNDQ4LjM1NS44MDQuODA0cS4zNTUtLjQ0OC44MDQtLjgwNEE1IDUgMCAwIDEgNiA0LjE5NiIvPjwvZz48L3N2Zz4="""
 
     async def inlet(
         self,
@@ -206,12 +209,68 @@ Now, enhance the following prompt using the Context and The user prompt, return 
                     }
                 )
             if self.valves.show_enhanced_prompt:
-                enhanced_prompt_message = f"<details>\n<summary>Enhanced Prompt</summary>\n{enhanced_prompt}\n\n---\n\n</details>"
+                html_content = f"""<!DOCTYPE html>
+<html style="margin:0; padding:0; overflow:hidden;">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }}
+        .container {{
+            margin: 0;
+            padding: 0;
+            border: none;
+            line-height: 0;
+        }}
+        .prompt-bubble {{
+            background: rgba(0, 0, 0, 0.05);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin: 8px 0 0 0;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #333;
+            word-wrap: break-word;
+        }}
+        .prompt-label {{
+            font-weight: 600;
+            color: #666;
+            margin-bottom: 4px;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .prompt-text {{
+            color: #444;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="prompt-bubble">
+            <div class="prompt-label">Enhanced Prompt:</div>
+            <div class="prompt-text">{enhanced_prompt}</div>
+        </div>
+    </div>
+</body>
+</html>"""
+
                 await __event_emitter__(
                     {
-                        "type": "message",
+                        "type": "embeds",
                         "data": {
-                            "content": enhanced_prompt_message,
+                            "embeds": [html_content],
                         },
                     }
                 )
