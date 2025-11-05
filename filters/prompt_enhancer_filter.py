@@ -3,7 +3,7 @@ title: Prompt Enhancer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.6.4
+version: 0.6.5
 important note: if you are going to sue this filter with custom pipes, do not use the show enhanced prompt valve setting
 """
 
@@ -148,12 +148,15 @@ Now, enhance the following prompt using the Context and The user prompt, return 
         # Log the system prompt before sending to LLM
 
         logger.debug("System Prompt: %s", system_prompt)  # Fixed string formatting
-
+        logger.debug("User Prompt: %s", user_prompt)
         model_to_use = None
         if self.valves.model_id:
             model_to_use = self.valves.model_id
         else:
-            model_to_use = __model__["info"]["base_model_id"]
+            print("""##########################""")
+            print(json.dumps(__model__, indent=4))
+            base_model = __model__.get("base_model_id", "")
+            model_to_use = base_model if base_model else __model__["info"]["id"]
 
         # Check if the selected model has "-pipe" or "pipe" in its name.
         is_pipeline_model = False
