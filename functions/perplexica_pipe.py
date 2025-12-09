@@ -10,7 +10,7 @@ environment_variables: PERPLEXICA_API_URL
 """
 
 import json
-from typing import List, Union, Dict, Any
+from typing import List, Union, Dict, Any, Literal
 from pydantic import BaseModel, Field
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,8 +35,18 @@ class Pipe:
             default="550e8400-e29b-41d4-a716-446655440000"
         )
         perplexica_embedding_model: str = Field(default="text-embedding-3-large")
-        perplexica_focus_mode: str = Field(default="webSearch")
-        perplexica_optimization_mode: str = Field(default="balanced")
+        perplexica_focus_mode: Literal[
+            "webSearch",
+            "academicSearch",
+            "writingAssistant",
+            "wolframAlphaSearch",
+            "youtubeSearch",
+            "redditSearch",
+        ] = Field(default="webSearch", description="Focus mode for search")
+        perplexica_optimization_mode: Literal["speed", "balanced"] = Field(
+            default="balanced",
+            description="Search optimization mode: speed (fastest) or balanced (quality)",
+        )
         task_model: str = Field(default="gpt-4o-mini")
         max_history_pairs: int = Field(default=12)
         perplexica_timeout_ms: int = Field(
