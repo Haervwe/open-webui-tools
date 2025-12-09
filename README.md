@@ -513,7 +513,7 @@ AI-powered web search using Perplexica with streaming responses, intelligent cit
    - Ask questions or request web searches
    - View results with automatic citations and source links
 
-![Perplexica Pipe Example](img/Perplexioca_pipe.png)
+![Perplexica Pipe Example](img/Perplexica_pipe.png)
 *Example of Perplexica pipe search results with citations in Open WebUI*
 
 ---
