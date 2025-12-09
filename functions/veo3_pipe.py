@@ -452,6 +452,7 @@ class Pipe:
                         "status": "complete",
                         "level": "success",
                         "description": f"Video generated successfully in {total_elapsed} seconds!",
+                        "done": True,
                     },
                 }
             )
@@ -460,7 +461,9 @@ class Pipe:
             await self.__event_emitter__(
                 {
                     "type": "embeds",
-                    "data": {"embeds": [video_embed]},
+                    "data": {
+                        "embeds": [video_embed],
+                    },
                 }
             )
 

@@ -34,6 +34,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Resume Analyzer** - Professional resume analysis
 - **Mopidy Music Controller** - Music server management
 - **Letta Agent** - Autonomous agent integration
+- **Perplexica Pipe** - AI-powered web search with streaming responses and citations
 - **Google Veo Text-to-Video & Image-to-Video** - Generate videos from text or a single image using Google Veo (only one image supported as input)
 
 ### 🔧 **Filters**
@@ -112,19 +113,19 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 17. [Resume Analyzer Pipe](#resume-analyzer-pipe)
 18. [Mopidy Music Controller](#mopidy-music-controller)
 19. [Letta Agent Pipe](#letta-agent-pipe)
-20. [OpenRouter Image Pipe](#openrouter-image-pipe)
-21. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-22. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-23. [Semantic Router Filter](#semantic-router-filter)
-24. [Full Document Filter](#full-document-filter)
-25. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-26. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-27. [Installation](#installation)
-28. [Contributing](#contributing)
-29. [License](#license)
-30. [Credits](#credits)
-31. [Support](#support)
-
+20. [Perplexica Pipe](#perplexica-pipe)
+21. [OpenRouter Image Pipe](#openrouter-image-pipe)
+22. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+23. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+24. [Semantic Router Filter](#semantic-router-filter)
+25. [Full Document Filter](#full-document-filter)
+26. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+27. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+28. [Installation](#installation)
+29. [Contributing](#contributing)
+30. [License](#license)
+31. [Credits](#credits)
+32. [Support](#support)
 ---
 
 ## 🧪 Tools
@@ -443,6 +444,77 @@ Search and retrieve images from the web using a self-hosted [SearxNG](https://se
 - **Direct Image Display:** Images are formatted for chat display
 - **Customizable:** Choose engines, result count, and more
 - **Error Handling:** Handles connection and search errors gracefully
+
+---
+
+## 🔄 Function Pipes
+
+### Perplexica Pipe
+
+### Description
+
+AI-powered web search using Perplexica with streaming responses, intelligent citations, and comprehensive source tracking. This function pipe integrates with your self-hosted Perplexica instance to provide real-time web search capabilities with proper source attribution, making it perfect for research, fact-checking, and staying up-to-date with current events.
+
+### Configuration
+
+- `enable_perplexica` (bool): Enable or disable Perplexica search (default: `True`)
+- `perplexica_api_url` (str): Perplexica API endpoint (default: `http://localhost:3001/api/search`)
+- `perplexica_chat_provider` (str): Provider ID for chat model (default: `550e8400-e29b-41d4-a716-446655440000`)
+- `perplexica_chat_model` (str): Chat model to use (default: `gpt-4o-mini`)
+- `perplexica_embedding_provider` (str): Provider ID for embeddings (default: `550e8400-e29b-41d4-a716-446655440000`)
+- `perplexica_embedding_model` (str): Embedding model to use (default: `text-embedding-3-large`)
+- `perplexica_focus_mode` (str): Search focus mode (default: `webSearch`)
+- `perplexica_optimization_mode` (str): Optimization mode - "speed" or "balanced" (default: `balanced`)
+- `task_model` (str): Model for non-search tasks (default: `gpt-4o-mini`)
+- `max_history_pairs` (int): Maximum conversation history pairs to include (default: 12)
+- `perplexica_timeout_ms` (int): HTTP socket read timeout in milliseconds (default: 1500)
+
+**Prerequisites**: You must have [Perplexica](https://github.com/ItzCrazyKns/Perplexica) installed and running locally. Perplexica is an open-source AI-powered search engine that requires setup with Ollama or OpenAI-compatible providers.
+
+### Usage
+
+- **Example:**
+
+  ```
+  Investigate the latest news on AI regulation for different areas US europe , china, etc, do only one tool call
+  ```
+
+- Automatically routes search queries to Perplexica
+- Provides streaming responses with real-time updates
+- Emits citations with source metadata for each result
+- Handles conversation history for contextual searches
+
+### Features
+
+- **Streaming Support**: Real-time streaming responses for faster interaction
+- **Smart Citations**: Automatic citation generation with metadata (title, URL, content)
+- **Conversation History**: Maintains context from previous messages (configurable)
+- **Multiple Focus Modes**: webSearch, academicSearch, youtubeSearch, and more
+- **Status Updates**: Real-time progress updates during search
+- **Source Tracking**: Comprehensive source metadata with URLs and snippets
+- **Task Routing**: Intelligent routing between search and non-search tasks
+- **Error Handling**: Robust error handling with user-friendly messages
+
+### Getting Started
+
+1. **Install Perplexica:**
+   - Follow the [Perplexica installation guide](https://github.com/ItzCrazyKns/Perplexica)
+   - Set up your chat and embedding providers (Ollama, OpenAI, etc.)
+   - Start the Perplexica server (default: http://localhost:3001)
+
+2. **Configure the Pipe:**
+   - Open the pipe's Valves settings in Open WebUI
+   - Set `perplexica_api_url` to your Perplexica instance URL
+   - Configure your chat and embedding providers/models
+   - Adjust focus mode and optimization settings as needed
+
+3. **Start Searching:**
+   - Select the "Perplexica Pipe" model in Open WebUI
+   - Ask questions or request web searches
+   - View results with automatic citations and source links
+
+![Perplexica Pipe Example](img/Perplexioca_pipe.png)
+*Example of Perplexica pipe search results with citations in Open WebUI*
 
 ---
 

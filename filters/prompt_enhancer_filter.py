@@ -18,7 +18,7 @@ from open_webui.utils.misc import get_last_user_message
 from open_webui.models.users import User, Users
 from open_webui.routers.models import get_models
 from open_webui.constants import TASKS
-
+from datetime import datetime
 name = "enhancer"
 
 
@@ -137,6 +137,7 @@ Now, enhance the following prompt using the Context and The user prompt, return 
             [f"{msg['role'].upper()}: {msg['content']}" for msg in context_messages]
         )
         context = "\n".join(f"""Tools: {body.get("tool_ids")}""")
+        context += f'\nCurrent Date and Time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
         print(body.get("metadata"))
         # Build context block
         context_str = f'\n\nContext:\n"""{context}"""\n\n' if context else ""
