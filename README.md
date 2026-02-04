@@ -22,7 +22,8 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Native Image Generator** - Direct Open WebUI image generation with Ollama model management
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI Image-to-Image (Qwen Edit 2509)** - Advanced image editing with multi-image support
-- **ComfyUI ACE Step Audio** - Advanced music generation
+- **ComfyUI ACE Step 1.5 Audio** - Advanced music generation (New)
+- **ComfyUI ACE Step Audio (Legacy)** - Advanced music generation
 - **ComfyUI Text-to-Video** - Generate short videos from text using ComfyUI (default WAN 2.2 workflow)
 - **Flux Kontext ComfyUI** - Professional image editing
 
@@ -103,29 +104,30 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 7. [Cloudflare Workers AI Image Generator](#cloudflare-workers-ai-image-generator)
 8. [SearxNG Image Search Tool](#searxng-image-search-tool)
 9. [ComfyUI Image-to-Image Tool (Qwen Image Edit 2509)](#comfyui-image-to-image-tool-qwen-image-edit-2509)
-10. [ComfyUI ACE Step Audio Tool](#comfyui-ace-step-audio-tool)
-11. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
-12. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-13. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-14. [Planner Agent v2](#planner-agent-v2)
-15. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-16. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-17. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-18. [Mopidy Music Controller](#mopidy-music-controller)
-19. [Letta Agent Pipe](#letta-agent-pipe)
-20. [Perplexica Pipe](#perplexica-pipe)
-21. [OpenRouter Image Pipe](#openrouter-image-pipe)
-22. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-23. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-24. [Semantic Router Filter](#semantic-router-filter)
-25. [Full Document Filter](#full-document-filter)
-26. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-27. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-28. [Installation](#installation)
-29. [Contributing](#contributing)
-30. [License](#license)
-31. [Credits](#credits)
-32. [Support](#support)
+10. [ComfyUI ACE Step 1.5 Audio Tool](#comfyui-ace-step-1-5-audio-tool)
+11. [ComfyUI ACE Step Audio Tool (Legacy)](#comfyui-ace-step-audio-tool-legacy)
+12. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
+13. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+14. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+15. [Planner Agent v2](#planner-agent-v2)
+16. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+17. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+18. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+19. [Mopidy Music Controller](#mopidy-music-controller)
+20. [Letta Agent Pipe](#letta-agent-pipe)
+21. [Perplexica Pipe](#perplexica-pipe)
+22. [OpenRouter Image Pipe](#openrouter-image-pipe)
+23. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+24. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+25. [Semantic Router Filter](#semantic-router-filter)
+26. [Full Document Filter](#full-document-filter)
+27. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+28. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+29. [Installation](#installation)
+30. [Contributing](#contributing)
+31. [License](#license)
+32. [Credits](#credits)
+33. [Support](#support)
 ---
 
 ## 🧪 Tools
@@ -610,7 +612,49 @@ Edit and transform images using ComfyUI workflows with AI-powered image editing.
 
 ---
 
-### ComfyUI ACE Step Audio Tool
+### ComfyUI ACE Step 1.5 Audio Tool
+
+### Description
+
+Generate high-quality music using the improved ACE Step 1.5 model via ComfyUI. This tool builds upon the legacy version with enhanced control over musical elements like key, time signature, BPM, and language. It features the same beautiful embedded player and supports batch generation.
+
+### Configuration
+
+- `comfyui_api_url` (str): ComfyUI API endpoint (default: `http://localhost:8188`)
+- `model_name` (str): ACE Step 1.5 checkpoint name (default: `ace_step_1.5_turbo_aio.safetensors`)
+- `batch_size` (int): Number of tracks to generate per request (default: `1`)
+- `max_duration` (int): Maximum song duration in seconds (default: `180`)
+- `owui_base_url` (str): Open WebUI base URL (default: `http://localhost:3000`)
+- `save_local` (bool): Save generated audio to local storage (default: `True`)
+- `show_player_embed` (bool): Show the embedded audio player (default: `True`)
+
+### Usage
+
+- **Example:**
+
+  ```python
+  Generate a "cyberpunk, darkwave" song about "AI takeover" in E minor, 140 BPM, duration 60s
+  ```
+
+- **Advanced Features:**
+
+![ACE Step 1.5](img/ace_step_15.png)
+*ACE Step 1.5 Audio Player*
+
+  - Control Key Scale (e.g., "C Major", "F# Minor")
+  - Set Time Signature (e.g., 4/4, 3/4)
+  - Choose Language (e.g., "en", "ja", "zh")
+
+### Features
+
+- **New in 1.5**: Key scale, time signature, language support, and improved audio quality
+- **Batch Generation**: Generate multiple variations at once
+- **Embedded Player**: Sleek, transparent player with lyrics and waveform visualization
+- **Customizable**: Full control over generation parameters
+
+---
+
+### ComfyUI ACE Step Audio Tool (Legacy)
 
 ### Description
 
