@@ -25,7 +25,6 @@ async def wait_for_completion_ws(
     prompt_id: str,
     client_id: str,
     max_wait_time: int,
-    event_emitter: Optional[Callable[[Any], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """
     Waits for ComfyUI job completion using WebSocket for real-time updates.
