@@ -624,9 +624,25 @@ Generate high-quality music using the improved ACE Step 1.5 model via ComfyUI. T
 - `model_name` (str): ACE Step 1.5 checkpoint name (default: `ace_step_1.5_turbo_aio.safetensors`)
 - `batch_size` (int): Number of tracks to generate per request (default: `1`)
 - `max_duration` (int): Maximum song duration in seconds (default: `180`)
+- `max_number_of_steps` (int): Maximum allowed sampling steps (default: `50`)
+- `max_wait_time` (int): Max wait time for generation in seconds (default: `600`)
+- `workflow_json` (str): ComfyUI Workflow JSON (default: `ace_step_1.5_workflow`)
+- `checkpoint_node` (str): Node ID for CheckpointLoaderSimple (default: `"97"`)
+- `text_encoder_node` (str): Node ID for TextEncodeAceStepAudio1.5 (default: `"94"`)
+- `empty_latent_node` (str): Node ID for EmptyAceStep1.5LatentAudio (default: `"98"`)
+- `sampler_node` (str): Node ID for KSampler (default: `"3"`)
+- `save_node` (str): Node ID for SaveAudioMP3 (default: `"104"`)
 - `owui_base_url` (str): Open WebUI base URL (default: `http://localhost:3000`)
 - `save_local` (bool): Save generated audio to local storage (default: `True`)
 - `show_player_embed` (bool): Show the embedded audio player (default: `True`)
+
+### User Configuration (Per-User Valves)
+
+Users can customize these settings for their individual sessions by clicking the "Valves" icon in the chat interface:
+
+- `generate_audio_codes` (bool): Enable/disable audio code generation. Disabling it (Fast Mode) speeds up generation but may reduce quality (default: `True`)
+- `steps` (int): Number of sampling steps for generation. Higher values may improve quality but take longer (default: `8`, capped by Admin `max_number_of_steps`)
+- `seed` (int): Random seed for generation. Set to `-1` for random, or a specific number for reproducible results (default: `-1`)
 
 ### Usage
 

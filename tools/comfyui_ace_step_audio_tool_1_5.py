@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step 1.5 workflow via the Comf
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.0
+version: 0.1.1
 """
 
 import json
@@ -443,25 +443,71 @@ def generate_audio_player_embed(tracks: list[Dict[str, str]], song_title: str, t
     """
     return html
 
+
+DEFAULT_WORKFLOW = {
+    "3": {
+        "inputs": {
+            "seed": 0, "steps": 8, "cfg": 1, "sampler_name": "euler", 
+            "scheduler": "simple", "denoise": 1, 
+            "model": ["78", 0], "positive": ["94", 0], "negative": ["47", 0], 
+            "latent_image": ["98", 0]
+        },
+        "class_type": "KSampler",
+        "_meta": {"title": "KSampler"}
+    },
+    "18": {
+        "inputs": {"samples": ["3", 0], "vae": ["97", 2]},
+        "class_type": "VAEDecodeAudio",
+        "_meta": {"title": "VAEDecodeAudio"}
+    },
+    "47": {
+        "inputs": {"conditioning": ["94", 0]},
+        "class_type": "ConditioningZeroOut",
+        "_meta": {"title": "Acondicionamiento Cero"}
+    },
+    "78": {
+        "inputs": {"shift": 3, "model": ["97", 0]},
+        "class_type": "ModelSamplingAuraFlow",
+        "_meta": {"title": "ModelSamplingAuraFlow"}
+    },
+    "94": {
+        "inputs": {
+            "tags": "", "lyrics": "", "seed": 0, "bpm": 120, 
+            "duration": 180, "timesignature": "4", "language": "en", 
+            "keyscale": "E minor", "generate_audio_codes": True,
+            "cfg_scale": 2, "temperature": 0.85, "top_p": 0.9, "top_k": 0,
+            "clip": ["97", 1]
+        },
+        "class_type": "TextEncodeAceStepAudio1.5",
+        "_meta": {"title": "TextEncodeAceStepAudio1.5"}
+    },
+    "97": {
+        "inputs": {"ckpt_name": "ace_step_1.5_turbo_aio.safetensors"},
+        "class_type": "CheckpointLoaderSimple",
+        "_meta": {"title": "Cargar Punto de Control"}
+    },
+    "98": {
+        "inputs": {"seconds": 180, "batch_size": 1},
+        "class_type": "EmptyAceStep1.5LatentAudio",
+        "_meta": {"title": "Empty Ace Step 1.5 Latent Audio"}
+    },
+    "104": {
+        "inputs": {
+            "filename_prefix": "audio/ace_step_1_5", 
+            "quality": "V0", "audioUI": "", "audio": ["18", 0]
+        },
+        "class_type": "SaveAudioMP3",
+        "_meta": {"title": "Guardar Audio (MP3)"}
+    }
+}
+
 class Tools:
     class Valves(BaseModel):
         comfyui_api_url: str = Field(
             default="http://localhost:8188",
             description="ComfyUI HTTP API endpoint.",
         )
-        model_name: str = Field(
-            default="ace_step_1.5_turbo_aio.safetensors",
-            description="Checkpoint name for ACE Step 1.5.",
-        )
-        # Node IDs based on Extras/audio_ace_step_1_5_API.json
-        text_encoder_node: str = Field(default="94", description="Node ID for TextEncodeAceStepAudio1.5")
-        empty_latent_node: str = Field(default="98", description="Node ID for EmptyAceStep1.5LatentAudio")
-        sampler_node: str = Field(default="3", description="Node ID for KSampler")
-        save_node: str = Field(default="104", description="Node ID for SaveAudioMP3")
-        
-        max_wait_time: int = Field(
-            default=600, description="Max wait time for generation (seconds)."
-        )
+
         unload_ollama_models: bool = Field(
             default=False,
             description="Unload all Ollama models before calling ComfyUI.",
@@ -489,6 +535,43 @@ class Tools:
         max_duration: int = Field(
             default=180,
             description="Maximum allowed duration in seconds. Default is 180s.",
+        )
+        max_number_of_steps: int = Field(
+            default=50,
+            description="Maximum allowed sampling steps.",
+        )
+        max_wait_time: int = Field(
+            default=600, description="Max wait time for generation (seconds)."
+        )
+        # workflow configuration
+        workflow_json: str = Field(
+            default=json.dumps(DEFAULT_WORKFLOW),
+            description="ComfyUI Workflow JSON.",
+        )
+        model_name: str = Field(
+            default="ace_step_1.5_turbo_aio.safetensors",
+            description="Checkpoint name for ACE Step 1.5.",
+        )
+        # Node IDs based on Extras/audio_ace_step_1_5_API.json
+        checkpoint_node: str = Field(default="97", description="Node ID for CheckpointLoaderSimple")
+        text_encoder_node: str = Field(default="94", description="Node ID for TextEncodeAceStepAudio1.5")
+        empty_latent_node: str = Field(default="98", description="Node ID for EmptyAceStep1.5LatentAudio")
+        sampler_node: str = Field(default="3", description="Node ID for KSampler")
+        save_node: str = Field(default="104", description="Node ID for SaveAudioMP3")
+        
+    
+    class UserValves(BaseModel):
+        generate_audio_codes: bool = Field(
+            default=True,
+            description="Enable generate audio codes. If false, disables generate audio codes for faster generation but lower quality.",
+        )
+        steps: int = Field(
+            default=8,
+            description="Sampling steps.",
+        )
+        seed: int = Field(
+            default=-1,
+            description="Random seed (-1 for random).",
         )
 
     def __init__(self):
@@ -530,10 +613,16 @@ class Tools:
         :param time_signature: Time signature (e.g., 4 for 4/4, 3 for 3/4).
         """
         batch_size = self.valves.batch_size
+        user_valves = __user__.get("valves", self.UserValves())
         
         # Cap duration
         if duration > self.valves.max_duration:
             duration = self.valves.max_duration
+        
+        # Handle Steps
+        steps = user_valves.steps
+        if steps > self.valves.max_number_of_steps:
+             steps = self.valves.max_number_of_steps
         
         if self.valves.unload_ollama_models:
             if __event_emitter__:
@@ -557,72 +646,28 @@ class Tools:
                 "data": {"description": "Preparing ACE Step 1.5 workflow...", "done": False},
             })
 
-        # Base Workflow JSON
-        # Copied from Extras/audio_ace_step_1_5_API.json
-        workflow = {
-            "3": {
-                "inputs": {
-                    "seed": 0, "steps": 8, "cfg": 1, "sampler_name": "euler", 
-                    "scheduler": "simple", "denoise": 1, 
-                    "model": ["78", 0], "positive": ["94", 0], "negative": ["47", 0], 
-                    "latent_image": ["98", 0]
-                },
-                "class_type": "KSampler",
-                "_meta": {"title": "KSampler"}
-            },
-            "18": {
-                "inputs": {"samples": ["3", 0], "vae": ["97", 2]},
-                "class_type": "VAEDecodeAudio",
-                "_meta": {"title": "VAEDecodeAudio"}
-            },
-            "47": {
-                "inputs": {"conditioning": ["94", 0]},
-                "class_type": "ConditioningZeroOut",
-                "_meta": {"title": "Acondicionamiento Cero"}
-            },
-            "78": {
-                "inputs": {"shift": 3, "model": ["97", 0]},
-                "class_type": "ModelSamplingAuraFlow",
-                "_meta": {"title": "ModelSamplingAuraFlow"}
-            },
-            "94": {
-                "inputs": {
-                    "tags": "", "lyrics": "", "seed": 0, "bpm": 120, 
-                    "duration": 180, "timesignature": "4", "language": "en", 
-                    "keyscale": "E minor", "generate_audio_codes": True,
-                    "cfg_scale": 2, "temperature": 0.85, "top_p": 0.9, "top_k": 0,
-                    "clip": ["97", 1]
-                },
-                "class_type": "TextEncodeAceStepAudio1.5",
-                "_meta": {"title": "TextEncodeAceStepAudio1.5"}
-            },
-            "97": {
-                "inputs": {"ckpt_name": self.valves.model_name},
-                "class_type": "CheckpointLoaderSimple",
-                "_meta": {"title": "Cargar Punto de Control"}
-            },
-            "98": {
-                "inputs": {"seconds": 180, "batch_size": 1},
-                "class_type": "EmptyAceStep1.5LatentAudio",
-                "_meta": {"title": "Empty Ace Step 1.5 Latent Audio"}
-            },
-            "104": {
-                "inputs": {
-                    "filename_prefix": "audio/ace_step_1_5", 
-                    "quality": "V0", "audioUI": "", "audio": ["18", 0]
-                },
-                "class_type": "SaveAudioMP3",
-                "_meta": {"title": "Guardar Audio (MP3)"}
-            }
-        }
+        # Load Workflow from Valve
+        try:
+             workflow = json.loads(self.valves.workflow_json)
+        except json.JSONDecodeError as e:
+             raise Exception(f"Invalid Workflow JSON in valves: {e}")
 
         # Handle IDs from Valves
         text_node_id = self.valves.text_encoder_node
         latent_node_id = self.valves.empty_latent_node
         sampler_node_id = self.valves.sampler_node
+        checkpoint_node_id = self.valves.checkpoint_node
 
         # Parameter Injection
-        gen_seed = seed if seed is not None else random.randint(1, 1500000000000)
+        # Determine Seed:
+        # 1. Use function arg 'seed' if provided (not None).
+        # 2. Else use user_valves.seed.
+        # 3. If the resulting seed is -1 (or None), generate a random one.
+        target_seed = seed if seed is not None else user_valves.seed
+        if target_seed == -1 or target_seed is None:
+            gen_seed = random.randint(1, 1500000000000)
+        else:
+            gen_seed = target_seed
         
         # 1. Update Text Encoder Node (94)
         if text_node_id in workflow:
@@ -635,6 +680,11 @@ class Tools:
             inputs["keyscale"] = key
             inputs["timesignature"] = str(time_signature)
             inputs["seed"] = gen_seed
+            inputs["generate_audio_codes"] = user_valves.generate_audio_codes
+        
+        # 2. Update Checkpoint Loader (97) - Inject Model Name
+        if checkpoint_node_id in workflow:
+            workflow[checkpoint_node_id]["inputs"]["ckpt_name"] = self.valves.model_name
 
         # 2. Update Empty Latent (98) - Batch Size & Duration Sync
         if latent_node_id in workflow:
@@ -642,9 +692,10 @@ class Tools:
             inputs["batch_size"] = batch_size
             inputs["seconds"] = duration
             
-        # 3. Update KSampler (3) - Sync Seed
+        # 3. Update KSampler (3) - Sync Seed & Steps
         if sampler_node_id in workflow:
             workflow[sampler_node_id]["inputs"]["seed"] = gen_seed
+            workflow[sampler_node_id]["inputs"]["steps"] = steps
 
         client_id = str(uuid.uuid4())
         ws_url = self.valves.comfyui_api_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
