@@ -589,7 +589,9 @@ class Tools:
                 "inputs": {
                     "tags": "", "lyrics": "", "seed": 0, "bpm": 120, 
                     "duration": 180, "timesignature": "4", "language": "en", 
-                    "keyscale": "E minor", "clip": ["97", 1]
+                    "keyscale": "E minor", "generate_audio_codes": True,
+                    "cfg_scale": 2, "temperature": 0.85, "top_p": 0.9, "top_k": 0,
+                    "clip": ["97", 1]
                 },
                 "class_type": "TextEncodeAceStepAudio1.5",
                 "_meta": {"title": "TextEncodeAceStepAudio1.5"}
