@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step 1.5 workflow via the Comf
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.1
+version: 0.2.2
 """
 
 import json
