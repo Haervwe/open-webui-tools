@@ -632,9 +632,18 @@ Generate high-quality music using the improved ACE Step 1.5 model via ComfyUI. T
 - `empty_latent_node` (str): Node ID for EmptyAceStep1.5LatentAudio (default: `"98"`)
 - `sampler_node` (str): Node ID for KSampler (default: `"3"`)
 - `save_node` (str): Node ID for SaveAudioMP3 (default: `"104"`)
+- `vae_decode_node` (str): Node ID for VAEDecodeAudio (default: `"18"`)
+- `unload_node` (str): Node ID for UnloadAllModels (default: `"105"`)
 - `owui_base_url` (str): Open WebUI base URL (default: `http://localhost:3000`)
 - `save_local` (bool): Save generated audio to local storage (default: `True`)
 - `show_player_embed` (bool): Show the embedded audio player (default: `True`)
+- `unload_comfyui_models` (bool): Unload models after generation using ComfyUI-Unload-Model node (default: `False`)
+
+### Prerequisites
+
+- **ComfyUI-Unload-Model Node**: To use the model unloading feature (`unload_comfyui_models`), you must install the [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Model) custom node in your ComfyUI instance.
+
+  > **Note**: You can use other model unloading nodes in a custom workflow, but you must correctly configure the `unload_node` valve with the ID of that node.
 
 ### User Configuration (Per-User Valves)
 

@@ -1,6 +1,8 @@
 """
 title: ComfyUI ACE Step 1.5 Audio Generator
-description: Tool to generate songs using the ACE Step 1.5 workflow via the ComfyUI API. Supports advanced parameters like key, tempo, language, and batch size.
+description: Tool to generate songs using the ACE Step 1.5 workflow via the ComfyUI API.
+Supports advanced parameters like key, tempo, language, and batch size.
+Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Model) for model unloading functionality (can be customized via unload_node ID).
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
