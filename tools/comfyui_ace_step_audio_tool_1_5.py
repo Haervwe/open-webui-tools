@@ -18,93 +18,108 @@ from pydantic import BaseModel, Field
 from open_webui.config import CACHE_DIR
 from fastapi.responses import HTMLResponse
 
-async def wait_for_completion_ws(
+async def connect_submit_and_wait(
     comfyui_ws_url: str,
     comfyui_http_url: str,
-    prompt_id: str,
+    prompt_payload: Dict[str, Any],
     client_id: str,
     max_wait_time: int,
 ) -> Dict[str, Any]:
     """
-    Waits for ComfyUI job completion using WebSocket for real-time updates.
-    Returns the job output data upon successful execution.
+    Robustly executes a ComfyUI job:
+    1. Connects to WebSocket (preventing race conditions).
+    2. Submits the Prompt.
+    3. Waits for completion via WebSocket events OR Periodic HTTP Polling (fallback).
     """
     start_time = asyncio.get_event_loop().time()
-    job_data_output = None
+    prompt_id = None
 
-    try:
-        async with aiohttp.ClientSession().ws_connect(
-            f"{comfyui_ws_url}?clientId={client_id}"
-        ) as ws:
-            async for msg in ws:
-                if asyncio.get_event_loop().time() - start_time > max_wait_time:
-                    raise TimeoutError(
-                        f"WebSocket wait timed out after {max_wait_time}s"
-                    )
+    async with aiohttp.ClientSession() as session:
 
-                if msg.type == aiohttp.WSMsgType.TEXT:
+        ws_url = f"{comfyui_ws_url}?clientId={client_id}"
+        try:
+            async with session.ws_connect(ws_url) as ws:
+                async with session.post(f"{comfyui_http_url}/prompt", json=prompt_payload) as resp:
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        raise Exception(f"Failed to queue prompt: {resp.status} - {err_text}")
+                    resp_json = await resp.json()
+                    prompt_id = resp_json.get("prompt_id")
+                    if not prompt_id:
+                        raise Exception("No prompt_id received from ComfyUI")
+
+                last_poll_time = 0
+                poll_interval = 3.0
+
+                while True:
+                    execute_poll = False
+                    if asyncio.get_event_loop().time() - start_time > max_wait_time:
+                        raise TimeoutError(f"Generation timed out after {max_wait_time}s")
+
+                    if asyncio.get_event_loop().time() - last_poll_time > poll_interval:
+                        execute_poll = True
+                        last_poll_time = asyncio.get_event_loop().time()
+
+                    if execute_poll and prompt_id:
+                        try:
+                            async with session.get(f"{comfyui_http_url}/history/{prompt_id}") as history_resp:
+                                if history_resp.status == 200:
+                                    history = await history_resp.json()
+                                    if prompt_id in history:
+                                        return history[prompt_id]
+                        except Exception:
+                            pass
+
                     try:
-                        message = json.loads(msg.data)
-                        if "type" not in message:
-                            continue
-                        msg_type = message["type"]
-                        data = message.get("data", {})
-
-                        if msg_type == "execution_cached" and data.get("prompt_id") == prompt_id:
-                            async with aiohttp.ClientSession() as http_session:
-                                async with http_session.get(
-                                    f"{comfyui_http_url}/history/{prompt_id}"
-                                ) as resp:
-                                    if resp.status == 200:
-                                        history = await resp.json()
+                        msg = await ws.receive(timeout=1.0)
+                        
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            message = json.loads(msg.data)
+                            msg_type = message.get("type")
+                            data = message.get("data", {})
+                            
+                            if (msg_type == "execution_cached" or msg_type == "executed") and data.get("prompt_id") == prompt_id:
+                                # Fetch final result immediatey
+                                async with session.get(f"{comfyui_http_url}/history/{prompt_id}") as final_resp:
+                                    if final_resp.status == 200:
+                                        history = await final_resp.json()
                                         if prompt_id in history:
                                             return history[prompt_id]
-                            raise Exception("Job was cached, but failed to retrieve output from history.")
+                            
+                            elif msg_type == "execution_error" and data.get("prompt_id") == prompt_id:
+                                error_details = data.get("exception_message", "Unknown error")
+                                node_id = data.get("node_id", "N/A")
+                                raise Exception(f"ComfyUI job failed on node {node_id}. Error: {error_details}")
 
-                        elif msg_type == "executed" and data.get("prompt_id") == prompt_id:
-                            job_data_output = data.get("output", {})
-                            async with aiohttp.ClientSession() as http_session:
-                                async with http_session.get(
-                                    f"{comfyui_http_url}/history/{prompt_id}"
-                                ) as resp:
-                                    if resp.status == 200:
-                                        history = await resp.json()
-                                        if prompt_id in history:
-                                            return history[prompt_id]
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            print("[Warning] WebSocket connection lost. Switching to pure polling.")
+                            break
 
-                            if job_data_output:
-                                return {"outputs": job_data_output}
-                            raise Exception("Job executed, but failed to retrieve output from WebSocket or history.")
-
-                        elif msg_type == "execution_error" and data.get("prompt_id") == prompt_id:
-                            error_details = data.get("exception_message", "Unknown error")
-                            node_id = data.get("node_id", "N/A")
-                            node_type = data.get("node_type", "N/A")
-                            raise Exception(f"ComfyUI job failed on node {node_id} ({node_type}). Error: {error_details}")
-
-                    except json.JSONDecodeError:
-                        pass
+                    except asyncio.TimeoutError:
+                        continue
                     except Exception as e:
-                        if "ComfyUI job" in str(e) or isinstance(e, TimeoutError):
-                            raise
-                        pass
+                        print(f"[Warning] WS Error: {e}")
+                        break
 
-                elif msg.type == aiohttp.WSMsgType.ERROR:
-                    raise Exception(f"WebSocket connection error: {ws.exception()}")
-                elif msg.type == aiohttp.WSMsgType.CLOSED:
-                    if not job_data_output:
-                        raise Exception("WebSocket closed unexpectedly before completion.")
-                    break
+        except Exception as e:
+            if not prompt_id:
+                 raise e
+            print(f"[Warning] WebSocket failed ({e}). Fallback to pure polling.")
 
-            if not job_data_output:
-                raise TimeoutError("WebSocket connection closed or timed out without explicit completion event.")
-
-            return {"outputs": job_data_output}
-
-    except asyncio.TimeoutError:
-        raise TimeoutError(f"Overall wait/connection timed out after {max_wait_time}s")
-    except Exception as e:
-        raise Exception(f"Error during WebSocket communication: {e}")
+        if prompt_id:
+            while asyncio.get_event_loop().time() - start_time <= max_wait_time:
+                await asyncio.sleep(2)
+                try:
+                    async with session.get(f"{comfyui_http_url}/history/{prompt_id}") as h_resp:
+                        if h_resp.status == 200:
+                            history = await h_resp.json()
+                            if prompt_id in history:
+                                return history[prompt_id]
+                except:
+                    pass
+            raise TimeoutError(f"Generation timed out (polling) after {max_wait_time}s")
+        
+        raise Exception("Failed to start generation flow.")
 
 
 def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
@@ -703,15 +718,7 @@ class Tools:
         http_url = self.valves.comfyui_api_url
 
         try:
-            # Send Job
             prompt_payload = {"prompt": workflow, "client_id": client_id}
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{http_url}/prompt", json=prompt_payload) as resp:
-                    if resp.status != 200:
-                        err_text = await resp.text()
-                        raise Exception(f"Failed to queue prompt: {resp.status} - {err_text}")
-                    resp_json = await resp.json()
-                    prompt_id = resp_json.get("prompt_id")
 
             if __event_emitter__:
                 await __event_emitter__({
@@ -719,9 +726,9 @@ class Tools:
                     "data": {"description": f"Generating {song_title}...", "done": False},
                 })
 
-            # Wait for Result
-            result_data = await wait_for_completion_ws(
-                ws_url, http_url, prompt_id, client_id, self.valves.max_wait_time
+            # Connect, Submit, and Wait (Atomic Operation)
+            result_data = await connect_submit_and_wait(
+                ws_url, http_url, prompt_payload, client_id, self.valves.max_wait_time
             )
 
             # Process Outputs
