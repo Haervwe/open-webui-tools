@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step 1.5 workflow via the Comf
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.2
+version: 0.3.0
 """
 
 import json
@@ -17,6 +17,7 @@ import os
 from pydantic import BaseModel, Field
 from open_webui.config import CACHE_DIR
 from fastapi.responses import HTMLResponse
+
 
 async def connect_submit_and_wait(
     comfyui_ws_url: str,
@@ -35,14 +36,17 @@ async def connect_submit_and_wait(
     prompt_id = None
 
     async with aiohttp.ClientSession() as session:
-
         ws_url = f"{comfyui_ws_url}?clientId={client_id}"
         try:
             async with session.ws_connect(ws_url) as ws:
-                async with session.post(f"{comfyui_http_url}/prompt", json=prompt_payload) as resp:
+                async with session.post(
+                    f"{comfyui_http_url}/prompt", json=prompt_payload
+                ) as resp:
                     if resp.status != 200:
                         err_text = await resp.text()
-                        raise Exception(f"Failed to queue prompt: {resp.status} - {err_text}")
+                        raise Exception(
+                            f"Failed to queue prompt: {resp.status} - {err_text}"
+                        )
                     resp_json = await resp.json()
                     prompt_id = resp_json.get("prompt_id")
                     if not prompt_id:
@@ -54,7 +58,9 @@ async def connect_submit_and_wait(
                 while True:
                     execute_poll = False
                     if asyncio.get_event_loop().time() - start_time > max_wait_time:
-                        raise TimeoutError(f"Generation timed out after {max_wait_time}s")
+                        raise TimeoutError(
+                            f"Generation timed out after {max_wait_time}s"
+                        )
 
                     if asyncio.get_event_loop().time() - last_poll_time > poll_interval:
                         execute_poll = True
@@ -62,7 +68,9 @@ async def connect_submit_and_wait(
 
                     if execute_poll and prompt_id:
                         try:
-                            async with session.get(f"{comfyui_http_url}/history/{prompt_id}") as history_resp:
+                            async with session.get(
+                                f"{comfyui_http_url}/history/{prompt_id}"
+                            ) as history_resp:
                                 if history_resp.status == 200:
                                     history = await history_resp.json()
                                     if prompt_id in history:
@@ -72,27 +80,43 @@ async def connect_submit_and_wait(
 
                     try:
                         msg = await ws.receive(timeout=1.0)
-                        
+
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             message = json.loads(msg.data)
                             msg_type = message.get("type")
                             data = message.get("data", {})
-                            
-                            if (msg_type == "execution_cached" or msg_type == "executed") and data.get("prompt_id") == prompt_id:
+
+                            if (
+                                msg_type == "execution_cached" or msg_type == "executed"
+                            ) and data.get("prompt_id") == prompt_id:
                                 # Fetch final result immediatey
-                                async with session.get(f"{comfyui_http_url}/history/{prompt_id}") as final_resp:
+                                async with session.get(
+                                    f"{comfyui_http_url}/history/{prompt_id}"
+                                ) as final_resp:
                                     if final_resp.status == 200:
                                         history = await final_resp.json()
                                         if prompt_id in history:
                                             return history[prompt_id]
-                            
-                            elif msg_type == "execution_error" and data.get("prompt_id") == prompt_id:
-                                error_details = data.get("exception_message", "Unknown error")
-                                node_id = data.get("node_id", "N/A")
-                                raise Exception(f"ComfyUI job failed on node {node_id}. Error: {error_details}")
 
-                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                            print("[Warning] WebSocket connection lost. Switching to pure polling.")
+                            elif (
+                                msg_type == "execution_error"
+                                and data.get("prompt_id") == prompt_id
+                            ):
+                                error_details = data.get(
+                                    "exception_message", "Unknown error"
+                                )
+                                node_id = data.get("node_id", "N/A")
+                                raise Exception(
+                                    f"ComfyUI job failed on node {node_id}. Error: {error_details}"
+                                )
+
+                        elif msg.type in (
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.ERROR,
+                        ):
+                            print(
+                                "[Warning] WebSocket connection lost. Switching to pure polling."
+                            )
                             break
 
                     except asyncio.TimeoutError:
@@ -103,14 +127,16 @@ async def connect_submit_and_wait(
 
         except Exception as e:
             if not prompt_id:
-                 raise e
+                raise e
             print(f"[Warning] WebSocket failed ({e}). Fallback to pure polling.")
 
         if prompt_id:
             while asyncio.get_event_loop().time() - start_time <= max_wait_time:
                 await asyncio.sleep(2)
                 try:
-                    async with session.get(f"{comfyui_http_url}/history/{prompt_id}") as h_resp:
+                    async with session.get(
+                        f"{comfyui_http_url}/history/{prompt_id}"
+                    ) as h_resp:
                         if h_resp.status == 200:
                             history = await h_resp.json()
                             if prompt_id in history:
@@ -118,7 +144,7 @@ async def connect_submit_and_wait(
                 except:
                     pass
             raise TimeoutError(f"Generation timed out (polling) after {max_wait_time}s")
-        
+
         raise Exception("Failed to start generation flow.")
 
 
@@ -129,7 +155,13 @@ def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
     for _node_id, node_output_content in node_outputs_dict.items():
         if isinstance(node_output_content, dict):
             node_output_dict: Dict[str, Any] = cast(Dict[str, Any], node_output_content)
-            for key_holding_files in ["audio", "files", "filenames", "output", "outputs"]:
+            for key_holding_files in [
+                "audio",
+                "files",
+                "filenames",
+                "output",
+                "outputs",
+            ]:
                 if key_holding_files in node_output_dict:
                     potential_files_raw: Any = node_output_dict.get(key_holding_files)
                     if isinstance(potential_files_raw, list):
@@ -144,12 +176,23 @@ def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
                                 fn_val: Any = file_info_dict.get("filename")
                                 filename = fn_val if isinstance(fn_val, str) else None
                                 subfolder_val: Any = file_info_dict.get("subfolder", "")
-                                subfolder = str(subfolder_val) if subfolder_val is not None else ""
+                                subfolder = (
+                                    str(subfolder_val)
+                                    if subfolder_val is not None
+                                    else ""
+                                )
                             else:
                                 filename = str(file_info_item)
 
-                            if filename is not None and filename.lower().endswith((".wav", ".mp3", ".flac", ".ogg")):
-                                audio_files.append({"filename": filename, "subfolder": subfolder.strip("/")})
+                            if filename is not None and filename.lower().endswith(
+                                (".wav", ".mp3", ".flac", ".ogg")
+                            ):
+                                audio_files.append(
+                                    {
+                                        "filename": filename,
+                                        "subfolder": subfolder.strip("/"),
+                                    }
+                                )
     return audio_files
 
 
@@ -166,7 +209,9 @@ async def download_audio_to_cache(
         local_file_path = os.path.join(cache_audio_dir, local_filename)
 
         subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
-        comfyui_file_url = f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
+        comfyui_file_url = (
+            f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
+        )
 
         async with aiohttp.ClientSession() as session:
             async with session.get(comfyui_file_url) as response:
@@ -176,7 +221,9 @@ async def download_audio_to_cache(
                         audio_file.write(audio_content)
                     return f"{base_url}/cache/audio/generations/{local_filename}"
                 else:
-                    print(f"[DEBUG] Failed to download audio from ComfyUI: HTTP {response.status}")
+                    print(
+                        f"[DEBUG] Failed to download audio from ComfyUI: HTTP {response.status}"
+                    )
                     return None
 
     except Exception as e:
@@ -184,7 +231,9 @@ async def download_audio_to_cache(
         return None
 
 
-async def get_loaded_models_async(api_url: str = "http://localhost:11434") -> list[Dict[str, Any]]:
+async def get_loaded_models_async(
+    api_url: str = "http://localhost:11434",
+) -> list[Dict[str, Any]]:
     """Get all currently loaded models in VRAM (Async)"""
     try:
         async with aiohttp.ClientSession() as session:
@@ -196,6 +245,7 @@ async def get_loaded_models_async(api_url: str = "http://localhost:11434") -> li
     except Exception as e:
         print(f"Error fetching loaded models: {e}")
         return []
+
 
 async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bool:
     """Unload all currently loaded models from VRAM with verification (Async)"""
@@ -211,8 +261,10 @@ async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bo
                 model_name = model.get("name", model.get("model", ""))
                 if model_name:
                     payload = {"model": model_name, "keep_alive": 0}
-                    async with session.post(f"{api_url.rstrip('/')}/api/generate", json=payload) as resp:
-                        pass # Fire and forget the unload request properly
+                    async with session.post(
+                        f"{api_url.rstrip('/')}/api/generate", json=payload
+                    ) as resp:
+                        pass  # Fire and forget the unload request properly
 
         # 3. Wait/Verify cycle (max 5 seconds)
         for _ in range(5):
@@ -221,20 +273,32 @@ async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bo
             if not remaining:
                 print("All models successfully unloaded.")
                 return True
-        
+
         print("Warning: Some models might still be loaded after timeout.")
         return False
-        
+
     except Exception as e:
         print(f"Error unloading models: {e}")
         return False
 
 
-def generate_audio_player_embed(tracks: list[Dict[str, str]], song_title: str, tags: str, lyrics: Optional[str] = None) -> str:
+def generate_audio_player_embed(
+    tracks: list[Dict[str, str]],
+    song_title: str,
+    tags: str,
+    lyrics: Optional[str] = None,
+) -> str:
     """Generate a sleek custom audio player embed with version selector."""
-    safe_title = song_title.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-    safe_tags = tags.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-    safe_lyrics = (lyrics or "Instrumental").replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+    safe_title = (
+        song_title.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    safe_tags = tags.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    safe_lyrics = (
+        (lyrics or "Instrumental")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
     player_id = uuid.uuid4().hex[:8]
 
     # Prepare track data for JS
@@ -265,10 +329,10 @@ def generate_audio_player_embed(tracks: list[Dict[str, str]], song_title: str, t
         </div>
         
         <!-- Track Selector -->
-        <div id="trackSelectorContainer_{player_id}" style="margin-bottom: 20px; display: {'block' if len(tracks) > 1 else 'none'};">
+        <div id="trackSelectorContainer_{player_id}" style="margin-bottom: 20px; display: {"block" if len(tracks) > 1 else "none"};">
             <label style="display: block; font-size: 10px; color: #666; margin-bottom: 6px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Version Select</label>
             <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                {''.join([f'<button class="track-btn" data-index="{i}" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #ccc; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 11px; transition: all 0.2s;">v{i+1}</button>' for i in range(len(tracks))])}
+                {"".join([f'<button class="track-btn" data-index="{i}" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #ccc; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 11px; transition: all 0.2s;">v{i + 1}</button>' for i in range(len(tracks))])}
             </div>
         </div>
 
@@ -463,59 +527,82 @@ def generate_audio_player_embed(tracks: list[Dict[str, str]], song_title: str, t
 DEFAULT_WORKFLOW = {
     "3": {
         "inputs": {
-            "seed": 0, "steps": 8, "cfg": 1, "sampler_name": "euler", 
-            "scheduler": "simple", "denoise": 1, 
-            "model": ["78", 0], "positive": ["94", 0], "negative": ["47", 0], 
-            "latent_image": ["98", 0]
+            "seed": 0,
+            "steps": 8,
+            "cfg": 1,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "denoise": 1,
+            "model": ["78", 0],
+            "positive": ["94", 0],
+            "negative": ["47", 0],
+            "latent_image": ["98", 0],
         },
         "class_type": "KSampler",
-        "_meta": {"title": "KSampler"}
+        "_meta": {"title": "KSampler"},
     },
     "18": {
         "inputs": {"samples": ["3", 0], "vae": ["97", 2]},
         "class_type": "VAEDecodeAudio",
-        "_meta": {"title": "VAEDecodeAudio"}
+        "_meta": {"title": "VAEDecodeAudio"},
     },
     "47": {
         "inputs": {"conditioning": ["94", 0]},
         "class_type": "ConditioningZeroOut",
-        "_meta": {"title": "Acondicionamiento Cero"}
+        "_meta": {"title": "Acondicionamiento Cero"},
     },
     "78": {
         "inputs": {"shift": 3, "model": ["97", 0]},
         "class_type": "ModelSamplingAuraFlow",
-        "_meta": {"title": "ModelSamplingAuraFlow"}
+        "_meta": {"title": "ModelSamplingAuraFlow"},
     },
     "94": {
         "inputs": {
-            "tags": "", "lyrics": "", "seed": 0, "bpm": 120, 
-            "duration": 180, "timesignature": "4", "language": "en", 
-            "keyscale": "E minor", "generate_audio_codes": True,
-            "cfg_scale": 2, "temperature": 0.85, "top_p": 0.9, "top_k": 0,
-            "clip": ["97", 1]
+            "tags": "",
+            "lyrics": "",
+            "seed": 0,
+            "bpm": 120,
+            "duration": 180,
+            "timesignature": "4",
+            "language": "en",
+            "keyscale": "E minor",
+            "generate_audio_codes": True,
+            "cfg_scale": 2,
+            "temperature": 0.85,
+            "top_p": 0.9,
+            "top_k": 0,
+            "clip": ["97", 1],
         },
         "class_type": "TextEncodeAceStepAudio1.5",
-        "_meta": {"title": "TextEncodeAceStepAudio1.5"}
+        "_meta": {"title": "TextEncodeAceStepAudio1.5"},
     },
     "97": {
         "inputs": {"ckpt_name": "ace_step_1.5_turbo_aio.safetensors"},
         "class_type": "CheckpointLoaderSimple",
-        "_meta": {"title": "Cargar Punto de Control"}
+        "_meta": {"title": "Cargar Punto de Control"},
     },
     "98": {
         "inputs": {"seconds": 180, "batch_size": 1},
         "class_type": "EmptyAceStep1.5LatentAudio",
-        "_meta": {"title": "Empty Ace Step 1.5 Latent Audio"}
+        "_meta": {"title": "Empty Ace Step 1.5 Latent Audio"},
     },
     "104": {
         "inputs": {
-            "filename_prefix": "audio/ace_step_1_5", 
-            "quality": "V0", "audioUI": "", "audio": ["18", 0]
+            "filename_prefix": "audio/ace_step_1_5",
+            "quality": "V0",
+            "audioUI": "",
+            "audio": ["105", 0],
         },
         "class_type": "SaveAudioMP3",
-        "_meta": {"title": "Guardar Audio (MP3)"}
-    }
+        "_meta": {"title": "Guardar Audio (MP3)"},
+    },
+    "105": {
+        "inputs": {"value": ["18", 0]},
+        "class_type": "UnloadAllModels",
+        "_meta": {"title": "UnloadAllModels"},
+    },
 }
+
 
 class Tools:
     class Valves(BaseModel):
@@ -559,6 +646,10 @@ class Tools:
         max_wait_time: int = Field(
             default=600, description="Max wait time for generation (seconds)."
         )
+        unload_comfyui_models: bool = Field(
+            default=False,
+            description="Unload models after generation using ComfyUI-Unload-Model node. WARNING: Using custom workflows may break this functionality and possibly the whole worflow if node ids are not correclty setted.",
+        )
         # workflow configuration
         workflow_json: str = Field(
             default=json.dumps(DEFAULT_WORKFLOW),
@@ -569,13 +660,24 @@ class Tools:
             description="Checkpoint name for ACE Step 1.5.",
         )
         # Node IDs based on Extras/audio_ace_step_1_5_API.json
-        checkpoint_node: str = Field(default="97", description="Node ID for CheckpointLoaderSimple")
-        text_encoder_node: str = Field(default="94", description="Node ID for TextEncodeAceStepAudio1.5")
-        empty_latent_node: str = Field(default="98", description="Node ID for EmptyAceStep1.5LatentAudio")
+        checkpoint_node: str = Field(
+            default="97", description="Node ID for CheckpointLoaderSimple"
+        )
+        text_encoder_node: str = Field(
+            default="94", description="Node ID for TextEncodeAceStepAudio1.5"
+        )
+        empty_latent_node: str = Field(
+            default="98", description="Node ID for EmptyAceStep1.5LatentAudio"
+        )
         sampler_node: str = Field(default="3", description="Node ID for KSampler")
         save_node: str = Field(default="104", description="Node ID for SaveAudioMP3")
-        
-    
+        vae_decode_node: str = Field(
+            default="18", description="Node ID for VAEDecodeAudio"
+        )
+        unload_node: str = Field(
+            default="105", description="Node ID for UnloadAllModels"
+        )
+
     class UserValves(BaseModel):
         generate_audio_codes: bool = Field(
             default=True,
@@ -630,49 +732,59 @@ class Tools:
         """
         batch_size = self.valves.batch_size
         user_valves = __user__.get("valves", self.UserValves())
-        
+
         # Cap duration
         if duration > self.valves.max_duration:
             duration = self.valves.max_duration
-        
+
         # Handle Steps
         steps = user_valves.steps
         if steps > self.valves.max_number_of_steps:
-             steps = self.valves.max_number_of_steps
-        
+            steps = self.valves.max_number_of_steps
+
         if self.valves.unload_ollama_models:
             if __event_emitter__:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": "Unloading models...", "done": False},
-                })
-            
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": "Unloading models...", "done": False},
+                    }
+                )
+
             # Use the new async method and wait extra time for safety
             unloaded = await unload_all_models_async(self.valves.ollama_url)
-            
+
             # Add an extra safety buffer to ensure VRAM is truly released by the OS/Driver
             await asyncio.sleep(2)
-            
+
             if not unloaded:
                 print("Warning: Ollama models may not have fully unloaded.")
 
         if __event_emitter__:
-            await __event_emitter__({
-                "type": "status",
-                "data": {"description": "Preparing ACE Step 1.5 workflow...", "done": False},
-            })
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": "Preparing ACE Step 1.5 workflow...",
+                        "done": False,
+                    },
+                }
+            )
 
         # Load Workflow from Valve
         try:
-             workflow = json.loads(self.valves.workflow_json)
+            workflow = json.loads(self.valves.workflow_json)
         except json.JSONDecodeError as e:
-             raise Exception(f"Invalid Workflow JSON in valves: {e}")
+            raise Exception(f"Invalid Workflow JSON in valves: {e}")
 
         # Handle IDs from Valves
         text_node_id = self.valves.text_encoder_node
         latent_node_id = self.valves.empty_latent_node
         sampler_node_id = self.valves.sampler_node
         checkpoint_node_id = self.valves.checkpoint_node
+        save_node_id = self.valves.save_node
+        vae_node_id = self.valves.vae_decode_node
+        unload_node_id = self.valves.unload_node
 
         # Parameter Injection
         # Determine Seed:
@@ -684,7 +796,7 @@ class Tools:
             gen_seed = random.randint(1, 1500000000000)
         else:
             gen_seed = target_seed
-        
+
         # 1. Update Text Encoder Node (94)
         if text_node_id in workflow:
             inputs = workflow[text_node_id]["inputs"]
@@ -697,7 +809,7 @@ class Tools:
             inputs["timesignature"] = str(time_signature)
             inputs["seed"] = gen_seed
             inputs["generate_audio_codes"] = user_valves.generate_audio_codes
-        
+
         # 2. Update Checkpoint Loader (97) - Inject Model Name
         if checkpoint_node_id in workflow:
             workflow[checkpoint_node_id]["inputs"]["ckpt_name"] = self.valves.model_name
@@ -707,24 +819,58 @@ class Tools:
             inputs = workflow[latent_node_id]["inputs"]
             inputs["batch_size"] = batch_size
             inputs["seconds"] = duration
-            
+
         # 3. Update KSampler (3) - Sync Seed & Steps
         if sampler_node_id in workflow:
             workflow[sampler_node_id]["inputs"]["seed"] = gen_seed
             workflow[sampler_node_id]["inputs"]["steps"] = steps
 
+        # 4. Handle Unload Node (Remove if disabled)
+        if not self.valves.unload_comfyui_models:
+            if unload_node_id in workflow:
+                # Get the input attached to the unload node (pass-through)
+                unload_inputs = workflow[unload_node_id].get("inputs", {})
+                source_link = unload_inputs.get("value")
+
+                if source_link:
+                    # Re-route the Save Node to bypass the unload node
+                    if save_node_id in workflow:
+                        save_inputs = workflow[save_node_id].get("inputs", {})
+                        current_audio_input = save_inputs.get("audio")
+                        # Verify connection: SaveAudio -> UnloadNode
+                        if (
+                            isinstance(current_audio_input, list)
+                            and len(current_audio_input) > 0
+                        ):
+                            if str(current_audio_input[0]) == str(unload_node_id):
+                                # Bypass: Connect SaveAudio directly to VAE (source_link)
+                                workflow[save_node_id]["inputs"]["audio"] = source_link
+
+                # Remove the node from generation
+                del workflow[unload_node_id]
+
         client_id = str(uuid.uuid4())
-        ws_url = self.valves.comfyui_api_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
+        ws_url = (
+            self.valves.comfyui_api_url.replace("http://", "ws://").replace(
+                "https://", "wss://"
+            )
+            + "/ws"
+        )
         http_url = self.valves.comfyui_api_url
 
         try:
             prompt_payload = {"prompt": workflow, "client_id": client_id}
 
             if __event_emitter__:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": f"Generating {song_title}...", "done": False},
-                })
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"Generating {song_title}...",
+                            "done": False,
+                        },
+                    }
+                )
 
             # Connect, Submit, and Wait (Atomic Operation)
             result_data = await connect_submit_and_wait(
@@ -737,12 +883,12 @@ class Tools:
                 raise Exception("No audio files generated.")
 
             track_list = []
-            
+
             # Loop through all generated files (batch support)
             for idx, finfo in enumerate(audio_files):
                 fname = finfo["filename"]
                 subfolder = finfo["subfolder"]
-                
+
                 # Title differentiation for batches
                 track_title = song_title
                 if batch_size > 1:
@@ -752,7 +898,7 @@ class Tools:
                     cache_url = await download_audio_to_cache(
                         http_url, fname, subfolder, self.valves.owui_base_url
                     )
-                    
+
                     if cache_url:
                         track_list.append({"title": track_title, "url": cache_url})
                 else:
@@ -761,23 +907,39 @@ class Tools:
                     track_list.append({"title": track_title, "url": direct_url})
 
             if __event_emitter__:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": "Generation complete!", "done": True},
-                })
-            
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": "Generation complete!", "done": True},
+                    }
+                )
+            message = "Song successfully generated, tell the user"
             if self.valves.show_player_embed and track_list:
-                final_html = generate_audio_player_embed(track_list, song_title, tags, lyrics)
-                return HTMLResponse(content=final_html, headers={"content-disposition": "inline"})
+                final_html = generate_audio_player_embed(
+                    track_list, song_title, tags, lyrics
+                )
+                await __event_emitter__(
+                    {
+                        "type": "embeds",
+                        "data": {
+                            "embeds": [final_html],
+                        },
+                    }
+                )
+                message = "The audio player has been successfully embedded above. Inform the user that their song is ready to listen to."
             else:
-                # Fallback text list if player disabled or failed
-                links = [f'[{t["title"]}]({t["url"]})' for t in track_list]
-                return "\n".join(links)
+                message += "to use the following download links:"
+
+            links = [f"[{t['title']}]({t['url']})" for t in track_list]
+            message += "\n\n" + "\n".join(links)
+            return {"message": message, "tracks": track_list}
 
         except Exception as e:
             if __event_emitter__:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": f"Error: {str(e)}", "done": True},
-                })
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": f"Error: {str(e)}", "done": True},
+                    }
+                )
             return f"Error generating song: {str(e)}"
