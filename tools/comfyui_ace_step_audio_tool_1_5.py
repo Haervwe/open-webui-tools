@@ -928,12 +928,10 @@ class Tools:
                         },
                     }
                 )
-                message = "The audio player has been successfully embedded above. Inform the user that their song is ready to listen to."
+                message = "The audio player has been successfully embedded above. Inform the user that their song is ready to listen to or download in the above UI component."
             else:
                 message += "to use the following download links:"
 
-            links = [f"[{t['title']}]({t['url']})" for t in track_list]
-            message += "\n\n" + "\n".join(links)
             return {"message": message, "tracks": track_list}
 
         except Exception as e:
