@@ -7,6 +7,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# llm docs folder
+llm_docs/
+
 # Distribution / packaging
 .Python
 build/

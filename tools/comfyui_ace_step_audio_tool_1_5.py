@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step 1.5 workflow via the Comf
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
+version: 0.2.1
 """
 
 import json
@@ -15,7 +15,6 @@ import asyncio
 import uuid
 import os
 from pydantic import BaseModel, Field
-import requests
 from open_webui.config import CACHE_DIR
 from fastapi.responses import HTMLResponse
 
@@ -226,7 +225,9 @@ def generate_audio_player_embed(tracks: list[Dict[str, str]], song_title: str, t
     # Prepare track data for JS
     tracks_json = json.dumps(tracks)
 
-    html = f"""<div class="player-container" style="background: rgba(20, 20, 25, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 20px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); max-width: 480px; width: 100%; margin-bottom: 20px; font-family: system-ui, -apple-system, sans-serif;">
+    html = f"""
+    <div style="display: flex; justify-content: center; width: 100%;">
+        <div class="player-container" style="background: rgba(20, 20, 25, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); max-width: 480px; width: 100%; margin-bottom: 20px; font-family: system-ui, -apple-system, sans-serif; box-sizing: border-box;">
         <style>
              #{player_id}_lyrics::-webkit-scrollbar {{
                 width: 5px;
@@ -266,8 +267,8 @@ def generate_audio_player_embed(tracks: list[Dict[str, str]], song_title: str, t
             
             <div class="controls" style="display: flex; align-items: center; justify-content: space-between;">
                 <div style="display: flex; align-items: center; gap: 16px;">
-                    <button class="play-btn" id="playBtn_{player_id}" style="width: 40px; height: 40px; min-width: 40px; border-radius: 50%; background: #fff; border: none; color: #000; font-size: 16px; cursor: pointer; transition: transform 0.2s; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 4px 12px rgba(255,255,255,0.15);">
-                        <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M8 5v14l11-7z"/></svg>
+                    <button class="play-btn" id="playBtn_{player_id}" type="button" style="width: 50px; height: 50px; min-width: 50px; border-radius: 50%; background: linear-gradient(145deg, #333, #222); border: 1px solid rgba(255,255,255,0.1); color: #fff; font-size: 16px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+                        <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='60%' height='60%' style="fill: #ffffff; pointer-events: none;"><path d="M8 5.14v13.72a1.14 1.14 0 0 0 1.76.99l10.86-6.86a1.14 1.14 0 0 0 0-1.98L9.76 4.15A1.14 1.14 0 0 0 8 5.14z"/></svg>
                     </button>
                     <div class="time-display" id="timeDisplay_{player_id}" style="font-size: 11px; color: #888; font-variant-numeric: tabular-nums; letter-spacing: 0.5px;">0:00 / 0:00</div>
                     
@@ -276,7 +277,7 @@ def generate_audio_player_embed(tracks: list[Dict[str, str]], song_title: str, t
                         <button id="volumeBtn_{player_id}" style="background: none; border: none; color: #888; cursor: pointer; padding: 0; display: flex; align-items: center;">
                             <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
                         </button>
-                        <div id="volumeContainer_{player_id}" style="width: 60px; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; cursor: pointer; position: relative; overflow: hidden;">
+                        <div id="volumeContainer_{player_id}" style="width: 40px; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; cursor: pointer; position: relative; overflow: hidden;">
                             <div id="volumeBar_{player_id}" style="height: 100%; background: #aaa; border-radius: 2px; width: 100%;"></div>
                         </div>
                     </div>
@@ -298,7 +299,8 @@ def generate_audio_player_embed(tracks: list[Dict[str, str]], song_title: str, t
                 <div class="info-label" style="font-size: 8px; font-weight: 700; color: #555; text-transform: uppercase; margin-bottom: 4px; letter-spacing: 0.5px;">Lyrics</div>
                 <div id="{player_id}_lyrics" class="lyrics-container" style="max-height: 120px; overflow-y: auto; font-size: 12px; color: #aaa; white-space: pre-wrap; word-wrap: break-word; line-height: 1.6; padding-right: 4px; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.25) rgba(255, 255, 255, 0.05);">{safe_lyrics}</div>
             </div>
-        </div>
+            </div>
+    </div>
     </div>
     
     <script>
@@ -315,9 +317,9 @@ def generate_audio_player_embed(tracks: list[Dict[str, str]], song_title: str, t
             const trackBtns = document.querySelectorAll('#trackSelectorContainer_{player_id} .track-btn');
             const loadingText = document.getElementById('loadingText_{player_id}');
             
-            const playIcon = '<svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M8 5v14l11-7z"/></svg>';
-            const pauseIcon = '<svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/></svg>';
-            const resetIcon = '<svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>';
+            const playIcon = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='60%' height='60%' style="fill: #ffffff; pointer-events: none;"><path d="M8 5.14v13.72a1.14 1.14 0 0 0 1.76.99l10.86-6.86a1.14 1.14 0 0 0 0-1.98L9.76 4.15A1.14 1.14 0 0 0 8 5.14z"/></svg>`;
+            const pauseIcon = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='60%' height='60%' style="fill: #ffffff; pointer-events: none;"><rect x="6" y="4" width="4" height="16" rx="1.5" /><rect x="14" y="4" width="4" height="16" rx="1.5" /></svg>`;
+            const resetIcon = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='60%' height='60%' style="fill: #ffffff; pointer-events: none;"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>`;
             const volumeUpIcon = '<svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
             const volumeOffIcon = '<svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
             
