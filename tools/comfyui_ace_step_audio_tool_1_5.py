@@ -679,6 +679,25 @@ class Tools:
         unload_node: str = Field(
             default="105", description="Node ID for UnloadAllModels"
         )
+        # Non-AIO workflow support - leave empty to disable
+        clip_name_1: str = Field(
+            default="",
+            description="First CLIP model for DualCLIPLoader (non-AIO workflows). Leave empty for AIO. e.g. qwen_0.6b_ace15.safetensors",
+        )
+        clip_name_2: str = Field(
+            default="",
+            description="Second CLIP model for DualCLIPLoader (non-AIO workflows). Leave empty for AIO. e.g. qwen_1.7b_ace15.safetensors",
+        )
+        vae_name: str = Field(
+            default="",
+            description="VAE model for VAELoader (non-AIO workflows). Leave empty for AIO. e.g. ace_step/ace_1.5_vae.safetensors",
+        )
+        dual_clip_loader_node: str = Field(
+            default="111", description="Node ID for DualCLIPLoader (non-AIO workflows)"
+        )
+        vae_loader_node: str = Field(
+            default="110", description="Node ID for VAELoader (non-AIO workflows)"
+        )
 
     class UserValves(BaseModel):
         generate_audio_codes: bool = Field(
@@ -814,9 +833,39 @@ class Tools:
 
         # 2. Update Checkpoint Loader (97) - Inject Model Name
         if checkpoint_node_id in workflow:
-            workflow[checkpoint_node_id]["inputs"]["ckpt_name"] = self.valves.model_name
+            ckpoint_node = workflow[checkpoint_node_id]["inputs"].get("ckpt_name", "")
+            unet_name = workflow[checkpoint_node_id]["inputs"].get("unet_name", "")
 
-        # 2. Update Empty Latent (98) - Batch Size & Duration Sync
+            if ckpoint_node:
+                workflow[checkpoint_node_id]["inputs"]["ckpt_name"] = (
+                    self.valves.model_name
+                )
+            if unet_name:
+                workflow[checkpoint_node_id]["inputs"]["unet_name"] = (
+                    self.valves.model_name
+                )
+
+        # 2b. Non-AIO Workflow Support - DualCLIPLoader and VAELoader
+        dual_clip_node_id = self.valves.dual_clip_loader_node
+        vae_loader_node_id = self.valves.vae_loader_node
+
+        # DualCLIPLoader - only update if valve is set and node exists
+        if self.valves.clip_name_1 and dual_clip_node_id in workflow:
+            node_inputs = workflow[dual_clip_node_id].get("inputs", {})
+            if "clip_name1" in node_inputs:
+                node_inputs["clip_name1"] = self.valves.clip_name_1
+            if "clip_name2" in node_inputs:
+                node_inputs["clip_name2"] = (
+                    self.valves.clip_name_2 or self.valves.clip_name_1
+                )
+
+        # VAELoader - only update if valve is set and node exists
+        if self.valves.vae_name and vae_loader_node_id in workflow:
+            node_inputs = workflow[vae_loader_node_id].get("inputs", {})
+            if "vae_name" in node_inputs:
+                node_inputs["vae_name"] = self.valves.vae_name
+
+        # 3. Update Empty Latent (98) - Batch Size & Duration Sync
         if latent_node_id in workflow:
             inputs = workflow[latent_node_id]["inputs"]
             inputs["batch_size"] = batch_size
