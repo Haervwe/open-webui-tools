@@ -6,7 +6,7 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.2
+version: 0.3.3
 """
 
 import json
@@ -573,6 +573,7 @@ DEFAULT_WORKFLOW = {
             "temperature": 0.85,
             "top_p": 0.9,
             "top_k": 0,
+            "min_p": 0,
             "clip": ["97", 1],
         },
         "class_type": "TextEncodeAceStepAudio1.5",
