@@ -11,6 +11,7 @@ version: 0.4.1
 
 import json
 import io
+import re
 import random
 from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union
 import aiohttp
@@ -207,11 +208,17 @@ async def download_audio_to_storage(
     comfyui_http_url: str,
     filename: str,
     subfolder: str = "",
+    song_name: str = "",
 ) -> Optional[str]:
     """Download audio file from ComfyUI and store via OpenWebUI's native file handler."""
     try:
         file_extension = os.path.splitext(filename)[1] or ".mp3"
-        local_filename = f"ace_step_{uuid.uuid4().hex[:8]}{file_extension}"
+        # Use sanitized song name for the stored filename
+        if song_name:
+            safe_name = re.sub(r"[^\w\s-]", "", song_name).strip().replace(" ", "_")
+            local_filename = f"{safe_name}{file_extension}"
+        else:
+            local_filename = f"ace_step_{uuid.uuid4().hex[:8]}{file_extension}"
 
         # Map common audio extensions to MIME types
         mime_map = {
@@ -903,6 +910,11 @@ class Tools:
             workflow[sampler_node_id]["inputs"]["seed"] = gen_seed
             workflow[sampler_node_id]["inputs"]["steps"] = steps
 
+        # 5. Update Save Node filename_prefix with song title
+        if save_node_id in workflow:
+            safe_title = re.sub(r"[^\w\s-]", "", song_title).strip().replace(" ", "_")
+            workflow[save_node_id]["inputs"]["filename_prefix"] = f"audio/{safe_title}"
+
         # 4. Handle Unload Node (Remove if disabled)
         if not self.valves.unload_comfyui_models:
             if unload_node_id in workflow:
@@ -979,7 +991,7 @@ class Tools:
 
                 if user_obj and __request__:
                     storage_url = await download_audio_to_storage(
-                        __request__, user_obj, http_url, fname, subfolder
+                        __request__, user_obj, http_url, fname, subfolder, track_title
                     )
 
                     if storage_url:
