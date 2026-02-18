@@ -6,10 +6,11 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.3
+version: 0.4.0
 """
 
 import json
+import io
 import random
 from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union
 import aiohttp
@@ -17,8 +18,10 @@ import asyncio
 import uuid
 import os
 from pydantic import BaseModel, Field
-from open_webui.config import CACHE_DIR
+from fastapi import Request, UploadFile
 from fastapi.responses import HTMLResponse
+from open_webui.models.users import Users
+from open_webui.routers.files import upload_file_handler
 
 
 async def connect_submit_and_wait(
@@ -198,17 +201,26 @@ def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
     return audio_files
 
 
-async def download_audio_to_cache(
-    comfyui_http_url: str, filename: str, subfolder: str = "", base_url: str = ""
+async def download_audio_to_storage(
+    request: Request,
+    user,
+    comfyui_http_url: str,
+    filename: str,
+    subfolder: str = "",
 ) -> Optional[str]:
-    """Download audio file from ComfyUI to OpenWebUI cache directory."""
+    """Download audio file from ComfyUI and store via OpenWebUI's native file handler."""
     try:
-        cache_audio_dir = os.path.join(CACHE_DIR, "audio", "generations")
-        os.makedirs(cache_audio_dir, exist_ok=True)
-
         file_extension = os.path.splitext(filename)[1] or ".mp3"
-        local_filename = f"{uuid.uuid4()}{file_extension}"
-        local_file_path = os.path.join(cache_audio_dir, local_filename)
+        local_filename = f"ace_step_{uuid.uuid4().hex[:8]}{file_extension}"
+
+        # Map common audio extensions to MIME types
+        mime_map = {
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".flac": "audio/flac",
+            ".ogg": "audio/ogg",
+        }
+        content_type = mime_map.get(file_extension.lower(), "audio/mpeg")
 
         subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
         comfyui_file_url = (
@@ -219,9 +231,25 @@ async def download_audio_to_cache(
             async with session.get(comfyui_file_url) as response:
                 if response.status == 200:
                     audio_content = await response.read()
-                    with open(local_file_path, "wb") as audio_file:
-                        audio_file.write(audio_content)
-                    return f"{base_url}/cache/audio/generations/{local_filename}"
+
+                    upload_file = UploadFile(
+                        file=io.BytesIO(audio_content),
+                        filename=local_filename,
+                        headers={"content-type": content_type},
+                    )
+
+                    file_item = upload_file_handler(
+                        request,
+                        file=upload_file,
+                        process=False,
+                        user=user,
+                    )
+
+                    if file_item and file_item.id:
+                        return f"/api/v1/files/{file_item.id}/content"
+
+                    print("[DEBUG] upload_file_handler returned no file item")
+                    return None
                 else:
                     print(
                         f"[DEBUG] Failed to download audio from ComfyUI: HTTP {response.status}"
@@ -229,7 +257,7 @@ async def download_audio_to_cache(
                     return None
 
     except Exception as e:
-        print(f"[DEBUG] Error downloading audio to cache: {str(e)}")
+        print(f"[DEBUG] Error uploading audio to storage: {str(e)}")
         return None
 
 
@@ -622,13 +650,9 @@ class Tools:
             default="http://host.docker.internal:11434",
             description="Ollama API URL.",
         )
-        save_local: bool = Field(
+        save_to_storage: bool = Field(
             default=True,
-            description="Copy the generated song to the Open Webui Storage Backend",
-        )
-        owui_base_url: str = Field(
-            default="http://localhost:3000",
-            description="Your owui base url",
+            description="Save the generated audio to Open WebUI's file storage. Files are tracked in the file manager and persist across restarts.",
         )
         show_player_embed: bool = Field(
             default=True,
@@ -729,6 +753,7 @@ class Tools:
         language: str = "en",
         time_signature: int = 4,
         __user__: Dict[str, Any] = {},
+        __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> str | HTMLResponse:
         """
@@ -936,6 +961,11 @@ class Tools:
 
             track_list = []
 
+            # Resolve user object once for all batch uploads
+            user_obj = None
+            if self.valves.save_to_storage and __request__:
+                user_obj = Users.get_user_by_id(__user__["id"])
+
             # Loop through all generated files (batch support)
             for idx, finfo in enumerate(audio_files):
                 fname = finfo["filename"]
@@ -946,13 +976,17 @@ class Tools:
                 if batch_size > 1:
                     track_title = f"{song_title} (Track {idx + 1})"
 
-                if self.valves.save_local:
-                    cache_url = await download_audio_to_cache(
-                        http_url, fname, subfolder, self.valves.owui_base_url
+                if user_obj and __request__:
+                    storage_url = await download_audio_to_storage(
+                        __request__, user_obj, http_url, fname, subfolder
                     )
 
-                    if cache_url:
-                        track_list.append({"title": track_title, "url": cache_url})
+                    if storage_url:
+                        track_list.append({"title": track_title, "url": storage_url})
+                    else:
+                        # Fallback to direct link if storage upload failed
+                        direct_url = f"{http_url}/view?filename={fname}&type=output&subfolder={subfolder}"
+                        track_list.append({"title": track_title, "url": direct_url})
                 else:
                     # Direct link fallback
                     direct_url = f"{http_url}/view?filename={fname}&type=output&subfolder={subfolder}"
