@@ -6,7 +6,7 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.0
+version: 0.4.1
 """
 
 import json
@@ -241,6 +241,7 @@ async def download_audio_to_storage(
                     file_item = upload_file_handler(
                         request,
                         file=upload_file,
+                        metadata={},
                         process=False,
                         user=user,
                     )
