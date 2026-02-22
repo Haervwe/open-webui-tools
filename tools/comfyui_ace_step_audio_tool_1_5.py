@@ -6,7 +6,7 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.2
+version: 0.5.0
 """
 
 import json
@@ -32,12 +32,6 @@ async def connect_submit_and_wait(
     client_id: str,
     max_wait_time: int,
 ) -> Dict[str, Any]:
-    """
-    Robustly executes a ComfyUI job:
-    1. Connects to WebSocket (preventing race conditions).
-    2. Submits the Prompt.
-    3. Waits for completion via WebSocket events OR Periodic HTTP Polling (fallback).
-    """
     start_time = asyncio.get_event_loop().time()
     prompt_id = None
 
@@ -95,7 +89,6 @@ async def connect_submit_and_wait(
                             if (
                                 msg_type == "execution_cached" or msg_type == "executed"
                             ) and data.get("prompt_id") == prompt_id:
-                                # Fetch final result immediatey
                                 async with session.get(
                                     f"{comfyui_http_url}/history/{prompt_id}"
                                 ) as final_resp:
@@ -155,7 +148,6 @@ async def connect_submit_and_wait(
 
 
 def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
-    """Extract audio file paths from completed job data."""
     audio_files: list[Dict[str, str]] = []
     node_outputs_dict = cast(Dict[str, Any], job_data.get("outputs", {}))
     for _node_id, node_output_content in node_outputs_dict.items():
@@ -210,17 +202,14 @@ async def download_audio_to_storage(
     subfolder: str = "",
     song_name: str = "",
 ) -> Optional[str]:
-    """Download audio file from ComfyUI and store via OpenWebUI's native file handler."""
     try:
         file_extension = os.path.splitext(filename)[1] or ".mp3"
-        # Use sanitized song name for the stored filename
         if song_name:
             safe_name = re.sub(r"[^\w\s-]", "", song_name).strip().replace(" ", "_")
             local_filename = f"{safe_name}{file_extension}"
         else:
             local_filename = f"ace_step_{uuid.uuid4().hex[:8]}{file_extension}"
 
-        # Map common audio extensions to MIME types
         mime_map = {
             ".mp3": "audio/mpeg",
             ".wav": "audio/wav",
@@ -272,7 +261,6 @@ async def download_audio_to_storage(
 async def get_loaded_models_async(
     api_url: str = "http://localhost:11434",
 ) -> list[Dict[str, Any]]:
-    """Get all currently loaded models in VRAM (Async)"""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{api_url.rstrip('/')}/api/ps") as response:
@@ -286,14 +274,11 @@ async def get_loaded_models_async(
 
 
 async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bool:
-    """Unload all currently loaded models from VRAM with verification (Async)"""
     try:
-        # 1. Get loaded models
         loaded_models = await get_loaded_models_async(api_url)
         if not loaded_models:
             return True
 
-        # 2. Unload each
         async with aiohttp.ClientSession() as session:
             for model in loaded_models:
                 model_name = model.get("name", model.get("model", ""))
@@ -302,9 +287,8 @@ async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bo
                     async with session.post(
                         f"{api_url.rstrip('/')}/api/generate", json=payload
                     ) as resp:
-                        pass  # Fire and forget the unload request properly
+                        pass
 
-        # 3. Wait/Verify cycle (max 5 seconds)
         for _ in range(5):
             await asyncio.sleep(1)
             remaining = await get_loaded_models_async(api_url)
@@ -320,245 +304,429 @@ async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bo
         return False
 
 
+# ---------------------------------------------------------------------------
+# PALETTE — generate 5 vivid rainbow colors from a random seed.
+# Hues are spaced evenly around the wheel (72° apart) from a random start.
+# ---------------------------------------------------------------------------
+
+
+def _hsl_to_hex(h: float, s: float, l: float) -> str:
+    """Convert HSL (h 0-360, s 0-1, l 0-1) → #RRGGBB"""
+    c = (1 - abs(2 * l - 1)) * s
+    x = c * (1 - abs((h / 60) % 2 - 1))
+    m = l - c / 2
+    if h < 60:
+        r1, g1, b1 = c, x, 0.0
+    elif h < 120:
+        r1, g1, b1 = x, c, 0.0
+    elif h < 180:
+        r1, g1, b1 = 0.0, c, x
+    elif h < 240:
+        r1, g1, b1 = 0.0, x, c
+    elif h < 300:
+        r1, g1, b1 = x, 0.0, c
+    else:
+        r1, g1, b1 = c, 0.0, x
+    r, g, b = int((r1 + m) * 255), int((g1 + m) * 255), int((b1 + m) * 255)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def _random_rainbow_palette(seed_val: int) -> list:
+    """5 vivid colors evenly spread around the hue wheel from a random start."""
+    rng = random.Random(seed_val)
+    start_hue = rng.randint(0, 359)
+    colors = []
+    for i in range(5):
+        hue = (start_hue + i * 72) % 360
+        sat = rng.uniform(0.88, 1.0)
+        light = rng.uniform(0.50, 0.60)
+        colors.append(_hsl_to_hex(hue, sat, light))
+    return colors
+
+
 def generate_audio_player_embed(
     tracks: list[Dict[str, str]],
     song_title: str,
     tags: str,
     lyrics: Optional[str] = None,
+    palette_seed: Optional[int] = None,
 ) -> str:
-    """Generate a sleek custom audio player embed with version selector."""
-    safe_title = (
-        song_title.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
-    )
-    safe_tags = tags.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
-    safe_lyrics = (
-        (lyrics or "Instrumental")
-        .replace('"', "&quot;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-    player_id = uuid.uuid4().hex[:8]
+    """
+    Generate a vivid rainbow-gradient audio player embed.
+    Each generation creates a unique 5-color palette from a random hue start.
+    Tags are collapsed by default; lyrics are the main focus.
+    Pure vanilla HTML/CSS/JS — no external dependencies.
+    """
+    if palette_seed is None:
+        palette_seed = random.randint(0, 9999999)
 
-    # Prepare track data for JS
+    c0, c1, c2, c3, c4 = _random_rainbow_palette(palette_seed)
+
+    def _esc(s: str) -> str:
+        return (
+            s.replace("&", "&amp;")
+            .replace('"', "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    safe_title = _esc(song_title)
+    safe_tags = _esc(tags)
+    safe_lyrics = _esc(lyrics or "Instrumental")
+
+    pid = uuid.uuid4().hex[:8]
     tracks_json = json.dumps(tracks)
+    multi = len(tracks) > 1
+
+    # Version selector buttons
+    version_btns = "".join(
+        f'<button class="vbtn_{pid}" data-idx="{i}" '
+        f'style="border:none;cursor:pointer;padding:5px 16px;border-radius:999px;'
+        f"font-size:11px;font-weight:700;letter-spacing:0.4px;transition:all .18s;"
+        f'background:rgba(255,255,255,0.18);color:#fff;">'
+        f"v{i + 1}</button>"
+        for i in range(len(tracks))
+    )
+
+    # 24 waveform bars — heights & speeds vary naturally
+    bars_html = "".join(
+        f'<div style="width:3px;min-width:3px;border-radius:3px;'
+        f"background:rgba(255,255,255,0.92);"
+        f"animation:bb_{pid} {0.55 + (i % 8) * 0.07:.2f}s ease-in-out infinite alternate;"
+        f"animation-delay:{i * 0.04:.2f}s;"
+        f'animation-play-state:paused;height:4px;" class="wavebar_{pid}"></div>'
+        for i in range(24)
+    )
 
     html = f"""
-    <div style="display: flex; justify-content: center; width: 100%;">
-        <div class="player-container" style="background: rgba(20, 20, 25, 0.4); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); max-width: 480px; width: 100%; margin-bottom: 20px; font-family: system-ui, -apple-system, sans-serif; box-sizing: border-box;">
-        <style>
-             #{player_id}_lyrics::-webkit-scrollbar {{
-                width: 5px;
-            }}
-             #{player_id}_lyrics::-webkit-scrollbar-track {{
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 3px;
-            }}
-             #{player_id}_lyrics::-webkit-scrollbar-thumb {{
-                background: rgba(255, 255, 255, 0.25);
-                border-radius: 3px;
-            }}
-             #{player_id}_lyrics::-webkit-scrollbar-thumb:hover {{
-                background: rgba(255, 255, 255, 0.35);
-            }}
-        </style>
-        <div class="player-header" style="text-align: center; margin-bottom: 20px;">
-            <div class="player-title" style="font-size: 18px; font-weight: 600; color: #f0f0f0; margin-bottom: 4px; letter-spacing: -0.2px;">{safe_title}</div>
-            <div class="player-subtitle" style="font-size: 10px; color: #888; font-weight: 500; text-transform: uppercase; letter-spacing: 1px;">ACE Step 1.5 Generation</div>
-        </div>
-        
-        <!-- Track Selector -->
-        <div id="trackSelectorContainer_{player_id}" style="margin-bottom: 20px; display: {"block" if len(tracks) > 1 else "none"};">
-            <label style="display: block; font-size: 10px; color: #666; margin-bottom: 6px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Version Select</label>
-            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                {"".join([f'<button class="track-btn" data-index="{i}" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #ccc; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 11px; transition: all 0.2s;">v{i + 1}</button>' for i in range(len(tracks))])}
-            </div>
-        </div>
+<div style="display:flex;justify-content:center;width:100%;
+  font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
 
-        <audio id="audioPlayer_{player_id}" preload="auto" style="display: none;"></audio>
-        
-        <div class="custom-player" style="margin: 0 0 18px 0;">
-            <div id="loadingText_{player_id}" style="position: absolute; color: #666; font-size: 10px; margin-top: -15px; display: none;">Loading...</div>
-            <div class="progress-container" id="progressContainer_{player_id}" style="width: 100%; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; cursor: pointer; margin-bottom: 16px; position: relative; overflow: hidden; transition: height 0.2s;">
-                <div class="progress-bar" id="progressBar_{player_id}" style="height: 100%; background: #fff; border-radius: 2px; width: 0%; box-shadow: 0 0 10px rgba(255,255,255,0.3); transition: width 0.1s linear;"></div>
-            </div>
-            
-            <div class="controls" style="display: flex; align-items: center; justify-content: space-between;">
-                <div style="display: flex; align-items: center; gap: 16px;">
-                    <button class="play-btn" id="playBtn_{player_id}" type="button" style="width: 50px; height: 50px; min-width: 50px; border-radius: 50%; background: linear-gradient(145deg, #333, #222); border: 1px solid rgba(255,255,255,0.1); color: #fff; font-size: 16px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
-                        <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='60%' height='60%' style="fill: #ffffff; pointer-events: none;"><path d="M8 5.14v13.72a1.14 1.14 0 0 0 1.76.99l10.86-6.86a1.14 1.14 0 0 0 0-1.98L9.76 4.15A1.14 1.14 0 0 0 8 5.14z"/></svg>
-                    </button>
-                    <div class="time-display" id="timeDisplay_{player_id}" style="font-size: 11px; color: #888; font-variant-numeric: tabular-nums; letter-spacing: 0.5px;">0:00 / 0:00</div>
-                    
-                    <!-- Volume Control -->
-                    <div style="display: flex; align-items: center; gap: 8px; margin-left: 8px;">
-                        <button id="volumeBtn_{player_id}" style="background: none; border: none; color: #888; cursor: pointer; padding: 0; display: flex; align-items: center;">
-                            <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
-                        </button>
-                        <div id="volumeContainer_{player_id}" style="width: 40px; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; cursor: pointer; position: relative; overflow: hidden;">
-                            <div id="volumeBar_{player_id}" style="height: 100%; background: #aaa; border-radius: 2px; width: 100%;"></div>
-                        </div>
-                    </div>
-                </div>
-                
-                <a id="downloadBtn_{player_id}" href="#" download style="color: #666; text-decoration: none; font-size: 11px; display: flex; align-items: center; gap: 4px; transition: color 0.2s; padding: 6px 10px; border-radius: 4px; background: rgba(255,255,255,0.03);">
-                    <svg viewBox="0 0 24 24" style="width: 12px; height: 12px; fill: currentColor;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-                    Download
-                </a>
-            </div>
-        </div>
-        
-        <div class="info-section" style="margin-top: 16px; padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.05);">
-            <div class="info-item" style="margin-bottom: 12px;">
-                <div class="info-label" style="font-size: 8px; font-weight: 700; color: #555; text-transform: uppercase; margin-bottom: 4px; letter-spacing: 0.5px;">Style</div>
-                <div class="info-content" style="font-size: 12px; color: #aaa; line-height: 1.4;">{safe_tags}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label" style="font-size: 8px; font-weight: 700; color: #555; text-transform: uppercase; margin-bottom: 4px; letter-spacing: 0.5px;">Lyrics</div>
-                <div id="{player_id}_lyrics" class="lyrics-container" style="max-height: 120px; overflow-y: auto; font-size: 12px; color: #aaa; white-space: pre-wrap; word-wrap: break-word; line-height: 1.6; padding-right: 4px; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.25) rgba(255, 255, 255, 0.05);">{safe_lyrics}</div>
-            </div>
-            </div>
+<div style="position:relative;overflow:hidden;border-radius:22px;
+  max-width:420px;width:100%;
+  box-shadow:0 24px 64px rgba(0,0,0,0.45),0 0 0 1px rgba(255,255,255,0.1);
+  color:#fff;box-sizing:border-box;margin-bottom:18px;">
+
+  <!-- ── Animated rainbow gradient background ── -->
+  <div style="position:absolute;inset:0;z-index:0;
+    background:linear-gradient(125deg,{c0},{c1},{c2},{c3},{c4},{c0});
+    background-size:500% 500%;
+    animation:mesh_{pid} 10s ease infinite;"></div>
+
+  <!-- Soft dark overlay so text is always legible -->
+  <div style="position:absolute;inset:0;z-index:1;background:rgba(0,0,0,0.22);"></div>
+
+  <!-- Floating glow orbs for depth -->
+  <div style="position:absolute;z-index:1;width:220px;height:220px;border-radius:50%;
+    background:radial-gradient(circle,rgba(255,255,255,0.16) 0%,transparent 68%);
+    top:-70px;right:-50px;
+    animation:orb_{pid} 7s ease-in-out infinite;pointer-events:none;"></div>
+  <div style="position:absolute;z-index:1;width:160px;height:160px;border-radius:50%;
+    background:radial-gradient(circle,rgba(255,255,255,0.10) 0%,transparent 68%);
+    bottom:-40px;left:-30px;
+    animation:orb_{pid} 11s ease-in-out infinite reverse;pointer-events:none;"></div>
+
+  <!-- ── CONTENT ── -->
+  <div style="position:relative;z-index:2;padding:24px 22px 22px;">
+
+    <!-- Title -->
+    <div style="text-align:center;margin-bottom:18px;">
+      <div style="font-size:9px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;
+        opacity:0.65;margin-bottom:5px;">♪ ACE Step 1.5</div>
+      <div style="font-size:19px;font-weight:800;letter-spacing:-0.2px;line-height:1.2;
+        text-shadow:0 2px 14px rgba(0,0,0,0.35);">{safe_title}</div>
     </div>
+
+    <!-- Waveform bars -->
+    <div id="ww_{pid}" style="display:flex;align-items:center;justify-content:center;
+      gap:3px;height:28px;margin-bottom:18px;opacity:0.45;transition:opacity .3s;">
+      {bars_html}
     </div>
-    
-    <script>
-        (function() {{
-            const tracks = {tracks_json};
-            let currentTrackIndex = 0;
-            
-            const audio = document.getElementById('audioPlayer_{player_id}');
-            const playBtn = document.getElementById('playBtn_{player_id}');
-            const progressBar = document.getElementById('progressBar_{player_id}');
-            const progressContainer = document.getElementById('progressContainer_{player_id}');
-            const timeDisplay = document.getElementById('timeDisplay_{player_id}');
-            const downloadBtn = document.getElementById('downloadBtn_{player_id}');
-            const trackBtns = document.querySelectorAll('#trackSelectorContainer_{player_id} .track-btn');
-            const loadingText = document.getElementById('loadingText_{player_id}');
-            
-            const playIcon = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='60%' height='60%' style="fill: #ffffff; pointer-events: none;"><path d="M8 5.14v13.72a1.14 1.14 0 0 0 1.76.99l10.86-6.86a1.14 1.14 0 0 0 0-1.98L9.76 4.15A1.14 1.14 0 0 0 8 5.14z"/></svg>`;
-            const pauseIcon = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='60%' height='60%' style="fill: #ffffff; pointer-events: none;"><rect x="6" y="4" width="4" height="16" rx="1.5" /><rect x="14" y="4" width="4" height="16" rx="1.5" /></svg>`;
-            const resetIcon = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='60%' height='60%' style="fill: #ffffff; pointer-events: none;"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>`;
-            const volumeUpIcon = '<svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
-            const volumeOffIcon = '<svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
-            
-            function loadTrack(index) {{
-                const track = tracks[index];
-                audio.src = track.url;
-                downloadBtn.href = track.url;
-                downloadBtn.download = track.title + ".mp3";
-                
-                // Update active button state
-                trackBtns.forEach(btn => {{
-                    if (parseInt(btn.dataset.index) === index) {{
-                        btn.style.background = '#fff';
-                        btn.style.color = '#000';
-                        btn.style.borderColor = '#fff';
-                    }} else {{
-                        btn.style.background = 'rgba(255,255,255,0.05)';
-                        btn.style.color = '#ccc';
-                        btn.style.borderColor = 'rgba(255,255,255,0.1)';
-                    }}
-                }});
-                
-                // Reset UI
-                playBtn.innerHTML = playIcon;
-                progressBar.style.width = '0%';
-                timeDisplay.textContent = '0:00 / 0:00';
-            }}
 
-            // Initialize first track
-            if (tracks.length > 0) {{
-                loadTrack(0);
-            }}
-            
-            // Track selection
-            trackBtns.forEach(btn => {{
-                btn.addEventListener('click', () => {{
-                    const index = parseInt(btn.dataset.index);
-                    if (index !== currentTrackIndex) {{
-                        const wasPlaying = !audio.paused;
-                        currentTrackIndex = index;
-                        loadTrack(index);
-                        if (wasPlaying) audio.play();
-                    }}
-                }});
-            }});
-            
-            playBtn.addEventListener('click', () => {{
-                if (audio.paused) {{
-                    const playPromise = audio.play();
-                    if (playPromise !== undefined) {{
-                        playPromise.catch(error => {{
-                            console.error("Playback failed:", error);
-                        }});
-                    }}
-                    playBtn.innerHTML = pauseIcon;
-                }} else {{
-                    audio.pause();
-                    playBtn.innerHTML = playIcon;
-                }}
-            }});
-            
-            audio.addEventListener('waiting', () => {{ loadingText.style.display = 'block'; }});
-            audio.addEventListener('playing', () => {{ loadingText.style.display = 'none'; }});
-            audio.addEventListener('ended', () => {{ playBtn.innerHTML = resetIcon; }});
-            
-            audio.addEventListener('timeupdate', () => {{
-                const progress = (audio.currentTime / audio.duration) * 100;
-                progressBar.style.width = progress + '%';
-                
-                const current = formatTime(audio.currentTime);
-                const duration = formatTime(audio.duration);
-                timeDisplay.textContent = current + ' / ' + duration;
-            }});
-            
-            progressContainer.addEventListener('click', (e) => {{
-                const rect = progressContainer.getBoundingClientRect();
-                const percent = (e.clientX - rect.left) / rect.width;
-                audio.currentTime = percent * audio.duration;
-            }});
-            
-            // Volume Control Logic
-            const volumeBtn = document.getElementById('volumeBtn_{player_id}');
-            const volumeContainer = document.getElementById('volumeContainer_{player_id}');
-            const volumeBar = document.getElementById('volumeBar_{player_id}');
-            let lastVolume = 1.0;
+    <!-- Progress bar -->
+    <div id="pt_{pid}" style="width:100%;height:5px;border-radius:99px;cursor:pointer;
+      background:rgba(255,255,255,0.22);margin-bottom:8px;position:relative;">
+      <div id="pf_{pid}" style="height:100%;border-radius:99px;width:0%;
+        background:rgba(255,255,255,0.92);
+        box-shadow:0 0 10px rgba(255,255,255,0.55);
+        transition:width .1s linear;pointer-events:none;"></div>
+      <div id="pthumb_{pid}" style="position:absolute;top:50%;width:13px;height:13px;
+        border-radius:50%;background:#fff;transform:translate(-50%,-50%);left:0%;
+        box-shadow:0 0 8px rgba(255,255,255,0.7);transition:left .1s linear;
+        opacity:0;pointer-events:none;"></div>
+    </div>
 
-            volumeBtn.addEventListener('click', () => {{
-                if (audio.muted) {{
-                    audio.muted = false;
-                    audio.volume = lastVolume;
-                    volumeBtn.innerHTML = volumeUpIcon;
-                    volumeBar.style.width = (lastVolume * 100) + '%';
-                }} else {{
-                    lastVolume = audio.volume;
-                    audio.muted = true;
-                    volumeBtn.innerHTML = volumeOffIcon;
-                    volumeBar.style.width = '0%';
-                }}
-            }});
+    <!-- Time row -->
+    <div style="display:flex;justify-content:space-between;font-size:10px;font-weight:600;
+      opacity:0.65;margin-bottom:18px;font-variant-numeric:tabular-nums;letter-spacing:0.3px;">
+      <span id="tc_{pid}">0:00</span>
+      <span id="td_{pid}">0:00</span>
+    </div>
 
-            volumeContainer.addEventListener('click', (e) => {{
-                const rect = volumeContainer.getBoundingClientRect();
-                const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                audio.volume = percent;
-                audio.muted = false;
-                
-                volumeBar.style.width = (percent * 100) + '%';
-                volumeBtn.innerHTML = percent === 0 ? volumeOffIcon : volumeUpIcon;
-            }});
+    <!-- Controls -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:{"16px" if multi else "20px"};">
 
-            // Init volume
-            audio.volume = 1.0;
-            
-            function formatTime(seconds) {{
-                if (isNaN(seconds)) return '0:00';
-                const mins = Math.floor(seconds / 60);
-                const secs = Math.floor(seconds % 60);
-                return mins + ':' + (secs < 10 ? '0' : '') + secs;
-            }}
-        }})();
-    </script>
-    """
+      <!-- Volume pill -->
+      <div style="display:flex;align-items:center;gap:7px;">
+        <button id="vbtn_{pid}" style="background:rgba(255,255,255,0.2);border:none;
+          color:#fff;width:30px;height:30px;border-radius:50%;cursor:pointer;
+          display:flex;align-items:center;justify-content:center;transition:background .18s;">
+          <svg viewBox="0 0 24 24" style="width:13px;height:13px;fill:#fff;pointer-events:none;">
+            <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
+          </svg>
+        </button>
+        <div id="vtrack_{pid}" style="width:48px;height:4px;border-radius:99px;cursor:pointer;
+          background:rgba(255,255,255,0.22);">
+          <div id="vfill_{pid}" style="height:100%;width:100%;border-radius:99px;
+            background:rgba(255,255,255,0.85);pointer-events:none;"></div>
+        </div>
+      </div>
+
+      <!-- Play button -->
+      <button id="pb_{pid}" style="width:60px;height:60px;border-radius:50%;border:none;
+        cursor:pointer;background:#fff;
+        box-shadow:0 0 28px rgba(255,255,255,0.55),0 6px 20px rgba(0,0,0,0.28);
+        display:flex;align-items:center;justify-content:center;
+        transition:transform .14s,box-shadow .14s;outline:none;flex-shrink:0;">
+        <svg id="pi_{pid}" viewBox="0 0 24 24"
+          style="width:26px;height:26px;pointer-events:none;fill:{c0};margin-left:3px;">
+          <path d="M8 5.14v13.72a1.14 1.14 0 0 0 1.76.99l10.86-6.86a1.14 1.14 0 0 0 0-1.98L9.76 4.15A1.14 1.14 0 0 0 8 5.14z"/>
+        </svg>
+      </button>
+
+      <!-- Download -->
+      <a id="dl_{pid}" href="#" download style="background:rgba(255,255,255,0.2);
+        border-radius:999px;padding:7px 13px;font-size:10px;font-weight:700;
+        letter-spacing:0.4px;color:#fff;text-decoration:none;
+        display:flex;align-items:center;gap:5px;transition:background .18s;">
+        <svg viewBox="0 0 24 24" style="width:11px;height:11px;fill:#fff;flex-shrink:0;">
+          <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+        </svg>
+        Save
+      </a>
+    </div>
+
+    <!-- Version selector (only when batch > 1) -->
+    <div id="ver_{pid}" style="display:{"flex" if multi else "none"};
+      gap:7px;flex-wrap:wrap;justify-content:center;margin-bottom:18px;">
+      <div style="width:100%;font-size:8px;font-weight:800;letter-spacing:1.5px;
+        text-transform:uppercase;opacity:0.55;text-align:center;margin-bottom:3px;">Versions</div>
+      {version_btns}
+    </div>
+
+    <!-- ── Info panel ── -->
+    <div style="border-radius:14px;overflow:hidden;
+      background:rgba(0,0,0,0.22);border:1px solid rgba(255,255,255,0.1);">
+
+      <!-- Style row — collapsed by default, click to expand -->
+      <div id="styleHdr_{pid}" style="display:flex;align-items:center;justify-content:space-between;
+        padding:10px 14px;cursor:pointer;user-select:none;">
+        <div style="display:flex;align-items:center;gap:8px;overflow:hidden;">
+          <span style="font-size:8px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;
+            opacity:0.55;flex-shrink:0;">Style</span>
+          <span id="stylePrev_{pid}" style="font-size:11px;opacity:0.75;
+            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;">
+            {safe_tags[:60] + ("…" if len(safe_tags) > 60 else "")}
+          </span>
+        </div>
+        <svg id="styleChev_{pid}" viewBox="0 0 24 24"
+          style="width:14px;height:14px;fill:rgba(255,255,255,0.6);flex-shrink:0;
+          transition:transform .22s;transform:rotate(0deg);">
+          <path d="M7 10l5 5 5-5z"/>
+        </svg>
+      </div>
+
+      <!-- Style body — hidden by default -->
+      <div id="styleBody_{pid}" style="display:none;padding:0 14px 12px;
+        font-size:11px;line-height:1.55;opacity:0.85;
+        border-top:1px solid rgba(255,255,255,0.08);">
+        {safe_tags}
+      </div>
+
+      <!-- Divider -->
+      <div style="height:1px;background:rgba(255,255,255,0.08);margin:0;"></div>
+
+      <!-- Lyrics — always visible, scrollable -->
+      <div style="padding:12px 14px 14px;">
+        <div style="font-size:8px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;
+          opacity:0.55;margin-bottom:8px;">Lyrics</div>
+        <div id="lyr_{pid}" style="max-height:160px;overflow-y:auto;font-size:13px;
+          line-height:1.75;white-space:pre-wrap;word-wrap:break-word;opacity:0.92;
+          scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.25) transparent;">
+          {safe_lyrics}
+        </div>
+      </div>
+
+    </div><!-- /info panel -->
+
+  </div><!-- /content -->
+</div><!-- /card -->
+</div>
+
+<style>
+  @keyframes mesh_{pid} {{
+    0%   {{ background-position:0% 50%; }}
+    50%  {{ background-position:100% 50%; }}
+    100% {{ background-position:0% 50%; }}
+  }}
+  @keyframes orb_{pid} {{
+    0%,100% {{ transform:translateY(0) scale(1); }}
+    50%     {{ transform:translateY(-18px) scale(1.07); }}
+  }}
+  @keyframes bb_{pid} {{
+    from {{ height:3px;  opacity:0.45; }}
+    to   {{ height:24px; opacity:1; }}
+  }}
+  #pb_{pid}:hover  {{ transform:scale(1.07) !important; box-shadow:0 0 38px rgba(255,255,255,0.7),0 8px 24px rgba(0,0,0,0.3) !important; }}
+  #pb_{pid}:active {{ transform:scale(0.95) !important; }}
+  #vbtn_{pid}:hover, #dl_{pid}:hover {{ background:rgba(255,255,255,0.34) !important; }}
+  .vbtn_{pid}:hover {{ background:rgba(255,255,255,0.34) !important; }}
+  #styleHdr_{pid}:hover {{ background:rgba(255,255,255,0.05); }}
+  #pt_{pid}:hover #pthumb_{pid} {{ opacity:1 !important; }}
+  #lyr_{pid}::-webkit-scrollbar {{ width:3px; }}
+  #lyr_{pid}::-webkit-scrollbar-thumb {{ background:rgba(255,255,255,0.25);border-radius:3px; }}
+</style>
+
+<audio id="aud_{pid}" preload="auto" style="display:none;"></audio>
+
+<script>
+(function() {{
+  var tracks  = {tracks_json};
+  var curIdx  = 0;
+  var c0      = "{c0}";
+  var styleOpen = false;
+
+  var aud    = document.getElementById('aud_{pid}');
+  var pb     = document.getElementById('pb_{pid}');
+  var pi     = document.getElementById('pi_{pid}');
+  var pt     = document.getElementById('pt_{pid}');
+  var pf     = document.getElementById('pf_{pid}');
+  var pthumb = document.getElementById('pthumb_{pid}');
+  var tc     = document.getElementById('tc_{pid}');
+  var td     = document.getElementById('td_{pid}');
+  var dl     = document.getElementById('dl_{pid}');
+  var vbtn   = document.getElementById('vbtn_{pid}');
+  var vtrack = document.getElementById('vtrack_{pid}');
+  var vfill  = document.getElementById('vfill_{pid}');
+  var ww     = document.getElementById('ww_{pid}');
+  var vBtns  = document.querySelectorAll('.vbtn_{pid}');
+
+  // Style toggle
+  var styleHdr  = document.getElementById('styleHdr_{pid}');
+  var styleBody = document.getElementById('styleBody_{pid}');
+  var styleChev = document.getElementById('styleChev_{pid}');
+  styleHdr.addEventListener('click', function() {{
+    styleOpen = !styleOpen;
+    styleBody.style.display = styleOpen ? 'block' : 'none';
+    styleChev.style.transform = styleOpen ? 'rotate(180deg)' : 'rotate(0deg)';
+  }});
+
+  var PLAY  = '<path d="M8 5.14v13.72a1.14 1.14 0 0 0 1.76.99l10.86-6.86a1.14 1.14 0 0 0 0-1.98L9.76 4.15A1.14 1.14 0 0 0 8 5.14z"/>';
+  var PAUSE = '<rect x="6" y="4" width="4" height="16" rx="2"/><rect x="14" y="4" width="4" height="16" rx="2"/>';
+  var REDO  = '<path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>';
+  var VON   = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>';
+  var VOFF  = '<path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>';
+
+  function fmt(s) {{
+    if (!s || isNaN(s)) return '0:00';
+    var m = Math.floor(s/60), sec = Math.floor(s%60);
+    return m + ':' + (sec < 10 ? '0' : '') + sec;
+  }}
+
+  function setWave(on) {{
+    ww.style.opacity = on ? '1' : '0.45';
+    ww.querySelectorAll('.wavebar_{pid}').forEach(function(b) {{
+      b.style.animationPlayState = on ? 'running' : 'paused';
+    }});
+  }}
+
+  function setProgress(pct) {{
+    pf.style.width     = pct + '%';
+    pthumb.style.left  = pct + '%';
+  }}
+
+  function loadTrack(idx) {{
+    var t = tracks[idx];
+    aud.src = t.url;
+    dl.href = t.url;
+    dl.download = t.title + '.mp3';
+    pi.innerHTML = PLAY;
+    pi.style.marginLeft = '3px';
+    setProgress(0);
+    tc.textContent = '0:00';
+    td.textContent = '0:00';
+    vBtns.forEach(function(b) {{
+      var a = parseInt(b.dataset.idx) === idx;
+      b.style.background = a ? 'rgba(255,255,255,0.88)' : 'rgba(255,255,255,0.18)';
+      b.style.color      = a ? c0 : '#fff';
+    }});
+  }}
+
+  if (tracks.length > 0) loadTrack(0);
+
+  vBtns.forEach(function(b) {{
+    b.addEventListener('click', function() {{
+      var idx = parseInt(b.dataset.idx);
+      if (idx !== curIdx) {{
+        var wasPlaying = !aud.paused;
+        curIdx = idx;
+        loadTrack(idx);
+        if (wasPlaying) aud.play();
+      }}
+    }});
+  }});
+
+  pb.addEventListener('click', function() {{
+    if (aud.ended) {{
+      aud.currentTime = 0; aud.play();
+    }} else if (aud.paused) {{
+      aud.play().catch(function(e) {{ console.error(e); }});
+    }} else {{
+      aud.pause();
+    }}
+  }});
+
+  aud.addEventListener('play',  function() {{ pi.innerHTML = PAUSE; pi.style.marginLeft = '0';  setWave(true);  }});
+  aud.addEventListener('pause', function() {{ pi.innerHTML = PLAY;  pi.style.marginLeft = '3px'; setWave(false); }});
+  aud.addEventListener('ended', function() {{ pi.innerHTML = REDO;  pi.style.marginLeft = '0';  setWave(false); }});
+
+  aud.addEventListener('timeupdate', function() {{
+    var pct = aud.duration ? (aud.currentTime / aud.duration * 100) : 0;
+    setProgress(pct);
+    tc.textContent = fmt(aud.currentTime);
+    td.textContent = fmt(aud.duration);
+  }});
+
+  pt.addEventListener('click', function(e) {{
+    var r = pt.getBoundingClientRect();
+    aud.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * aud.duration;
+  }});
+
+  // Volume
+  var lastVol = 1.0;
+  vbtn.addEventListener('click', function() {{
+    if (aud.muted) {{
+      aud.muted = false; aud.volume = lastVol;
+      vfill.style.width = (lastVol * 100) + '%';
+      vbtn.querySelector('svg').innerHTML = VON;
+    }} else {{
+      lastVol = aud.volume; aud.muted = true;
+      vfill.style.width = '0%';
+      vbtn.querySelector('svg').innerHTML = VOFF;
+    }}
+  }});
+  vtrack.addEventListener('click', function(e) {{
+    var r   = vtrack.getBoundingClientRect();
+    var pct = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    aud.volume = pct; aud.muted = false;
+    vfill.style.width = (pct * 100) + '%';
+    vbtn.querySelector('svg').innerHTML = pct === 0 ? VOFF : VON;
+  }});
+  aud.volume = 1.0;
+
+}})();
+</script>
+"""
     return html
 
 
@@ -649,7 +817,6 @@ class Tools:
             default="http://localhost:8188",
             description="ComfyUI HTTP API endpoint.",
         )
-
         unload_ollama_models: bool = Field(
             default=False,
             description="Unload all Ollama models before calling ComfyUI.",
@@ -660,11 +827,11 @@ class Tools:
         )
         save_to_storage: bool = Field(
             default=True,
-            description="Save the generated audio to Open WebUI's file storage. Files are tracked in the file manager and persist across restarts.",
+            description="Save the generated audio to Open WebUI's file storage.",
         )
         show_player_embed: bool = Field(
             default=True,
-            description="Show the embedded audio player. If false, only returns download link.",
+            description="Show the embedded audio player.",
         )
         batch_size: int = Field(
             default=1,
@@ -672,7 +839,7 @@ class Tools:
         )
         max_duration: int = Field(
             default=180,
-            description="Maximum allowed duration in seconds. Default is 180s.",
+            description="Maximum allowed duration in seconds.",
         )
         max_number_of_steps: int = Field(
             default=50,
@@ -683,9 +850,8 @@ class Tools:
         )
         unload_comfyui_models: bool = Field(
             default=False,
-            description="Unload models after generation using ComfyUI-Unload-Model node. WARNING: Using custom workflows may break this functionality and possibly the whole worflow if node ids are not correclty setted.",
+            description="Unload models after generation using ComfyUI-Unload-Model node.",
         )
-        # workflow configuration
         workflow_json: str = Field(
             default=json.dumps(DEFAULT_WORKFLOW),
             description="ComfyUI Workflow JSON.",
@@ -694,7 +860,6 @@ class Tools:
             default="ace_step_1.5_turbo_aio.safetensors",
             description="Checkpoint name for ACE Step 1.5.",
         )
-        # Node IDs based on Extras/audio_ace_step_1_5_API.json
         checkpoint_node: str = Field(
             default="97", description="Node ID for CheckpointLoaderSimple"
         )
@@ -712,39 +877,32 @@ class Tools:
         unload_node: str = Field(
             default="105", description="Node ID for UnloadAllModels"
         )
-        # Non-AIO workflow support - leave empty to disable
         clip_name_1: str = Field(
             default="",
-            description="First CLIP model for DualCLIPLoader (non-AIO workflows). Leave empty for AIO. e.g. qwen_0.6b_ace15.safetensors",
+            description="First CLIP model for DualCLIPLoader (non-AIO). Leave empty for AIO.",
         )
         clip_name_2: str = Field(
             default="",
-            description="Second CLIP model for DualCLIPLoader (non-AIO workflows). Leave empty for AIO. e.g. qwen_1.7b_ace15.safetensors",
+            description="Second CLIP model for DualCLIPLoader (non-AIO). Leave empty for AIO.",
         )
         vae_name: str = Field(
             default="",
-            description="VAE model for VAELoader (non-AIO workflows). Leave empty for AIO. e.g. ace_step/ace_1.5_vae.safetensors",
+            description="VAE model for VAELoader (non-AIO). Leave empty for AIO.",
         )
         dual_clip_loader_node: str = Field(
-            default="111", description="Node ID for DualCLIPLoader (non-AIO workflows)"
+            default="111", description="Node ID for DualCLIPLoader (non-AIO)"
         )
         vae_loader_node: str = Field(
-            default="110", description="Node ID for VAELoader (non-AIO workflows)"
+            default="110", description="Node ID for VAELoader (non-AIO)"
         )
 
     class UserValves(BaseModel):
         generate_audio_codes: bool = Field(
             default=True,
-            description="Enable generate audio codes. If false, disables generate audio codes for faster generation but lower quality.",
+            description="Enable generate audio codes for better quality.",
         )
-        steps: int = Field(
-            default=8,
-            description="Sampling steps.",
-        )
-        seed: int = Field(
-            default=-1,
-            description="Random seed (-1 for random).",
-        )
+        steps: int = Field(default=8, description="Sampling steps.")
+        seed: int = Field(default=-1, description="Random seed (-1 for random).")
 
     def __init__(self):
         self.valves = self.Valves()
@@ -774,7 +932,6 @@ class Tools:
           For instrumental, use `[inst]` or describe instruments as tags.
         - **Languages**: Supports 50+ languages. Best performance in EN, ZH, JA. For Japanese, use Katakana.
 
-
         :param tags: Comma-separated tags describing style, genre, instruments, mood.
         :param lyrics: Full lyrics with structure tags [verse], [chorus], etc.
         :param song_title: Display title for the player.
@@ -788,11 +945,9 @@ class Tools:
         batch_size = self.valves.batch_size
         user_valves = __user__.get("valves", self.UserValves())
 
-        # Cap duration
         if duration > self.valves.max_duration:
             duration = self.valves.max_duration
 
-        # Handle Steps
         steps = user_valves.steps
         if steps > self.valves.max_number_of_steps:
             steps = self.valves.max_number_of_steps
@@ -805,13 +960,8 @@ class Tools:
                         "data": {"description": "Unloading models...", "done": False},
                     }
                 )
-
-            # Use the new async method and wait extra time for safety
             unloaded = await unload_all_models_async(self.valves.ollama_url)
-
-            # Add an extra safety buffer to ensure VRAM is truly released by the OS/Driver
             await asyncio.sleep(2)
-
             if not unloaded:
                 print("Warning: Ollama models may not have fully unloaded.")
 
@@ -826,13 +976,11 @@ class Tools:
                 }
             )
 
-        # Load Workflow from Valve
         try:
             workflow = json.loads(self.valves.workflow_json)
         except json.JSONDecodeError as e:
             raise Exception(f"Invalid Workflow JSON in valves: {e}")
 
-        # Handle IDs from Valves
         text_node_id = self.valves.text_encoder_node
         latent_node_id = self.valves.empty_latent_node
         sampler_node_id = self.valves.sampler_node
@@ -841,18 +989,12 @@ class Tools:
         vae_node_id = self.valves.vae_decode_node
         unload_node_id = self.valves.unload_node
 
-        # Parameter Injection
-        # Determine Seed:
-        # 1. Use function arg 'seed' if provided (not None).
-        # 2. Else use user_valves.seed.
-        # 3. If the resulting seed is -1 (or None), generate a random one.
         target_seed = seed if seed is not None else user_valves.seed
         if target_seed == -1 or target_seed is None:
             gen_seed = random.randint(1, 1500000000000)
         else:
             gen_seed = target_seed
 
-        # 1. Update Text Encoder Node (94)
         if text_node_id in workflow:
             inputs = workflow[text_node_id]["inputs"]
             inputs["tags"] = tags
@@ -865,25 +1007,21 @@ class Tools:
             inputs["seed"] = gen_seed
             inputs["generate_audio_codes"] = user_valves.generate_audio_codes
 
-        # 2. Update Checkpoint Loader (97) - Inject Model Name
         if checkpoint_node_id in workflow:
             ckpoint_node = workflow[checkpoint_node_id]["inputs"].get("ckpt_name", "")
             unet_name = workflow[checkpoint_node_id]["inputs"].get("unet_name", "")
-
             if ckpoint_node:
-                workflow[checkpoint_node_id]["inputs"]["ckpt_name"] = (
-                    self.valves.model_name
-                )
+                workflow[checkpoint_node_id]["inputs"][
+                    "ckpt_name"
+                ] = self.valves.model_name
             if unet_name:
-                workflow[checkpoint_node_id]["inputs"]["unet_name"] = (
-                    self.valves.model_name
-                )
+                workflow[checkpoint_node_id]["inputs"][
+                    "unet_name"
+                ] = self.valves.model_name
 
-        # 2b. Non-AIO Workflow Support - DualCLIPLoader and VAELoader
         dual_clip_node_id = self.valves.dual_clip_loader_node
         vae_loader_node_id = self.valves.vae_loader_node
 
-        # DualCLIPLoader - only update if valve is set and node exists
         if self.valves.clip_name_1 and dual_clip_node_id in workflow:
             node_inputs = workflow[dual_clip_node_id].get("inputs", {})
             if "clip_name1" in node_inputs:
@@ -893,50 +1031,38 @@ class Tools:
                     self.valves.clip_name_2 or self.valves.clip_name_1
                 )
 
-        # VAELoader - only update if valve is set and node exists
         if self.valves.vae_name and vae_loader_node_id in workflow:
             node_inputs = workflow[vae_loader_node_id].get("inputs", {})
             if "vae_name" in node_inputs:
                 node_inputs["vae_name"] = self.valves.vae_name
 
-        # 3. Update Empty Latent (98) - Batch Size & Duration Sync
         if latent_node_id in workflow:
             inputs = workflow[latent_node_id]["inputs"]
             inputs["batch_size"] = batch_size
             inputs["seconds"] = duration
 
-        # 3. Update KSampler (3) - Sync Seed & Steps
         if sampler_node_id in workflow:
             workflow[sampler_node_id]["inputs"]["seed"] = gen_seed
             workflow[sampler_node_id]["inputs"]["steps"] = steps
 
-        # 5. Update Save Node filename_prefix with song title
         if save_node_id in workflow:
             safe_title = re.sub(r"[^\w\s-]", "", song_title).strip().replace(" ", "_")
             workflow[save_node_id]["inputs"]["filename_prefix"] = f"audio/{safe_title}"
 
-        # 4. Handle Unload Node (Remove if disabled)
         if not self.valves.unload_comfyui_models:
             if unload_node_id in workflow:
-                # Get the input attached to the unload node (pass-through)
                 unload_inputs = workflow[unload_node_id].get("inputs", {})
                 source_link = unload_inputs.get("value")
-
                 if source_link:
-                    # Re-route the Save Node to bypass the unload node
                     if save_node_id in workflow:
                         save_inputs = workflow[save_node_id].get("inputs", {})
                         current_audio_input = save_inputs.get("audio")
-                        # Verify connection: SaveAudio -> UnloadNode
                         if (
                             isinstance(current_audio_input, list)
                             and len(current_audio_input) > 0
+                            and str(current_audio_input[0]) == str(unload_node_id)
                         ):
-                            if str(current_audio_input[0]) == str(unload_node_id):
-                                # Bypass: Connect SaveAudio directly to VAE (source_link)
-                                workflow[save_node_id]["inputs"]["audio"] = source_link
-
-                # Remove the node from generation
+                            workflow[save_node_id]["inputs"]["audio"] = source_link
                 del workflow[unload_node_id]
 
         client_id = str(uuid.uuid4())
@@ -947,6 +1073,9 @@ class Tools:
             + "/ws"
         )
         http_url = self.valves.comfyui_api_url
+
+        # Use the gen_seed to deterministically pick a palette colour
+        palette_seed = gen_seed % 1000000
 
         try:
             prompt_payload = {"prompt": workflow, "client_id": client_id}
@@ -962,46 +1091,37 @@ class Tools:
                     }
                 )
 
-            # Connect, Submit, and Wait (Atomic Operation)
             result_data = await connect_submit_and_wait(
                 ws_url, http_url, prompt_payload, client_id, self.valves.max_wait_time
             )
 
-            # Process Outputs
             audio_files = extract_audio_files(result_data)
             if not audio_files:
                 raise Exception("No audio files generated.")
 
             track_list = []
 
-            # Resolve user object once for all batch uploads
             user_obj = None
             if self.valves.save_to_storage and __request__:
                 user_obj = Users.get_user_by_id(__user__["id"])
 
-            # Loop through all generated files (batch support)
             for idx, finfo in enumerate(audio_files):
                 fname = finfo["filename"]
                 subfolder = finfo["subfolder"]
-
-                # Title differentiation for batches
-                track_title = song_title
-                if batch_size > 1:
-                    track_title = f"{song_title} (Track {idx + 1})"
+                track_title = (
+                    song_title if batch_size <= 1 else f"{song_title} (Track {idx + 1})"
+                )
 
                 if user_obj and __request__:
                     storage_url = await download_audio_to_storage(
                         __request__, user_obj, http_url, fname, subfolder, track_title
                     )
-
                     if storage_url:
                         track_list.append({"title": track_title, "url": storage_url})
                     else:
-                        # Fallback to direct link if storage upload failed
                         direct_url = f"{http_url}/view?filename={fname}&type=output&subfolder={subfolder}"
                         track_list.append({"title": track_title, "url": direct_url})
                 else:
-                    # Direct link fallback
                     direct_url = f"{http_url}/view?filename={fname}&type=output&subfolder={subfolder}"
                     track_list.append({"title": track_title, "url": direct_url})
 
@@ -1012,22 +1132,18 @@ class Tools:
                         "data": {"description": "Generation complete!", "done": True},
                     }
                 )
+
             message = "Song successfully generated, tell the user"
             if self.valves.show_player_embed and track_list:
                 final_html = generate_audio_player_embed(
-                    track_list, song_title, tags, lyrics
+                    track_list, song_title, tags, lyrics, palette_seed=palette_seed
                 )
                 await __event_emitter__(
-                    {
-                        "type": "embeds",
-                        "data": {
-                            "embeds": [final_html],
-                        },
-                    }
+                    {"type": "embeds", "data": {"embeds": [final_html]}}
                 )
                 message = "The audio player has been successfully embedded above. Inform the user that their song is ready to listen to or download in the above UI component."
             else:
-                message += "to use the following download links:"
+                message += " to use the following download links:"
 
             return {"message": message, "tracks": track_list}
 
