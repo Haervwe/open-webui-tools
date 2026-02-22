@@ -6,7 +6,7 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.0
+version: 0.5.1
 """
 
 import json
@@ -350,17 +350,23 @@ def generate_audio_player_embed(
     tags: str,
     lyrics: Optional[str] = None,
     palette_seed: Optional[int] = None,
+    colorful: bool = True,
 ) -> str:
     """
-    Generate a vivid rainbow-gradient audio player embed.
-    Each generation creates a unique 5-color palette from a random hue start.
+    Generate an audio player embed.
+    When *colorful* is True, uses a vivid rainbow-gradient style.
+    When False, uses a minimalistic grey card style.
     Tags are collapsed by default; lyrics are the main focus.
     Pure vanilla HTML/CSS/JS — no external dependencies.
     """
     if palette_seed is None:
         palette_seed = random.randint(0, 9999999)
 
-    c0, c1, c2, c3, c4 = _random_rainbow_palette(palette_seed)
+    if colorful:
+        c0, c1, c2, c3, c4 = _random_rainbow_palette(palette_seed)
+    else:
+        # Minimalistic grey palette
+        c0 = c1 = c2 = c3 = c4 = "#3a3a3e"
 
     def _esc(s: str) -> str:
         return (
@@ -398,16 +404,9 @@ def generate_audio_player_embed(
         for i in range(24)
     )
 
-    html = f"""
-<div style="display:flex;justify-content:center;width:100%;
-  font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
-
-<div style="position:relative;overflow:hidden;border-radius:22px;
-  max-width:420px;width:100%;
-  box-shadow:0 24px 64px rgba(0,0,0,0.45),0 0 0 1px rgba(255,255,255,0.1);
-  color:#fff;box-sizing:border-box;margin-bottom:18px;">
-
-  <!-- ── Animated rainbow gradient background ── -->
+    # Build background layers based on colorful flag
+    if colorful:
+        bg_layer = f"""  <!-- ── Animated rainbow gradient background ── -->
   <div style="position:absolute;inset:0;z-index:0;
     background:linear-gradient(125deg,{c0},{c1},{c2},{c3},{c4},{c0});
     background-size:500% 500%;
@@ -424,7 +423,22 @@ def generate_audio_player_embed(
   <div style="position:absolute;z-index:1;width:160px;height:160px;border-radius:50%;
     background:radial-gradient(circle,rgba(255,255,255,0.10) 0%,transparent 68%);
     bottom:-40px;left:-30px;
-    animation:orb_{pid} 11s ease-in-out infinite reverse;pointer-events:none;"></div>
+    animation:orb_{pid} 11s ease-in-out infinite reverse;pointer-events:none;"></div>"""
+    else:
+        bg_layer = """  <!-- ── Transparent backdrop ── -->
+  <div style="position:absolute;inset:0;z-index:0;background:rgba(0,0,0,0.12);
+    backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);"></div>"""
+
+    html = f"""
+<div style="display:flex;justify-content:center;width:100%;
+  font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
+
+<div style="position:relative;overflow:hidden;border-radius:22px;
+  max-width:420px;width:100%;
+  box-shadow:{"0 24px 64px rgba(0,0,0,0.45),0 0 0 1px rgba(255,255,255,0.1)" if colorful else "0 4px 24px rgba(0,0,0,0.18),0 0 0 1px rgba(255,255,255,0.06)"};
+  color:#fff;box-sizing:border-box;margin-bottom:18px;">
+
+{bg_layer}
 
   <!-- ── CONTENT ── -->
   <div style="position:relative;z-index:2;padding:24px 22px 22px;">
@@ -489,7 +503,7 @@ def generate_audio_player_embed(
         display:flex;align-items:center;justify-content:center;
         transition:transform .14s,box-shadow .14s;outline:none;flex-shrink:0;">
         <svg id="pi_{pid}" viewBox="0 0 24 24"
-          style="width:26px;height:26px;pointer-events:none;fill:{c0};margin-left:3px;">
+          style="width:26px;height:26px;pointer-events:none;fill:{c0 if colorful else "#888"};margin-left:3px;">
           <path d="M8 5.14v13.72a1.14 1.14 0 0 0 1.76.99l10.86-6.86a1.14 1.14 0 0 0 0-1.98L9.76 4.15A1.14 1.14 0 0 0 8 5.14z"/>
         </svg>
       </button>
@@ -564,20 +578,13 @@ def generate_audio_player_embed(
 </div>
 
 <style>
-  @keyframes mesh_{pid} {{
-    0%   {{ background-position:0% 50%; }}
-    50%  {{ background-position:100% 50%; }}
-    100% {{ background-position:0% 50%; }}
-  }}
-  @keyframes orb_{pid} {{
-    0%,100% {{ transform:translateY(0) scale(1); }}
-    50%     {{ transform:translateY(-18px) scale(1.07); }}
-  }}
+  {"@keyframes mesh_" + pid + " { 0% { background-position:0% 50%; } 50% { background-position:100% 50%; } 100% { background-position:0% 50%; } }" if colorful else ""}
+  {"@keyframes orb_" + pid + " { 0%,100% { transform:translateY(0) scale(1); } 50% { transform:translateY(-18px) scale(1.07); } }" if colorful else ""}
   @keyframes bb_{pid} {{
     from {{ height:3px;  opacity:0.45; }}
     to   {{ height:24px; opacity:1; }}
   }}
-  #pb_{pid}:hover  {{ transform:scale(1.07) !important; box-shadow:0 0 38px rgba(255,255,255,0.7),0 8px 24px rgba(0,0,0,0.3) !important; }}
+  #pb_{pid}:hover  {{ transform:scale(1.07) !important; box-shadow:0 0 38px rgba(255,255,255,{"0.7" if colorful else "0.3"}),0 8px 24px rgba(0,0,0,0.3) !important; }}
   #pb_{pid}:active {{ transform:scale(0.95) !important; }}
   #vbtn_{pid}:hover, #dl_{pid}:hover {{ background:rgba(255,255,255,0.34) !important; }}
   .vbtn_{pid}:hover {{ background:rgba(255,255,255,0.34) !important; }}
@@ -833,9 +840,9 @@ class Tools:
             default=True,
             description="Show the embedded audio player.",
         )
-        batch_size: int = Field(
-            default=1,
-            description="Number of tracks to generate per request.",
+        max_batch_size: int = Field(
+            default=4,
+            description="Maximum batch size users can set.",
         )
         max_duration: int = Field(
             default=180,
@@ -901,6 +908,14 @@ class Tools:
             default=True,
             description="Enable generate audio codes for better quality.",
         )
+        colorful_player: bool = Field(
+            default=True,
+            description="Use colorful rainbow gradient player. When off, a minimalistic grey style is used.",
+        )
+        batch_size: int = Field(
+            default=1,
+            description="Number of tracks to generate per request.",
+        )
         steps: int = Field(default=8, description="Sampling steps.")
         seed: int = Field(default=-1, description="Random seed (-1 for random).")
 
@@ -942,8 +957,8 @@ class Tools:
         :param language: Language code (e.g. "en", "zh", "ja").
         :param time_signature: Time signature (e.g., 4 for 4/4, 3 for 3/4).
         """
-        batch_size = self.valves.batch_size
         user_valves = __user__.get("valves", self.UserValves())
+        batch_size = min(user_valves.batch_size, self.valves.max_batch_size)
 
         if duration > self.valves.max_duration:
             duration = self.valves.max_duration
@@ -1011,13 +1026,13 @@ class Tools:
             ckpoint_node = workflow[checkpoint_node_id]["inputs"].get("ckpt_name", "")
             unet_name = workflow[checkpoint_node_id]["inputs"].get("unet_name", "")
             if ckpoint_node:
-                workflow[checkpoint_node_id]["inputs"][
-                    "ckpt_name"
-                ] = self.valves.model_name
+                workflow[checkpoint_node_id]["inputs"]["ckpt_name"] = (
+                    self.valves.model_name
+                )
             if unet_name:
-                workflow[checkpoint_node_id]["inputs"][
-                    "unet_name"
-                ] = self.valves.model_name
+                workflow[checkpoint_node_id]["inputs"]["unet_name"] = (
+                    self.valves.model_name
+                )
 
         dual_clip_node_id = self.valves.dual_clip_loader_node
         vae_loader_node_id = self.valves.vae_loader_node
@@ -1136,7 +1151,12 @@ class Tools:
             message = "Song successfully generated, tell the user"
             if self.valves.show_player_embed and track_list:
                 final_html = generate_audio_player_embed(
-                    track_list, song_title, tags, lyrics, palette_seed=palette_seed
+                    track_list,
+                    song_title,
+                    tags,
+                    lyrics,
+                    palette_seed=palette_seed,
+                    colorful=user_valves.colorful_player,
                 )
                 await __event_emitter__(
                     {"type": "embeds", "data": {"embeds": [final_html]}}
