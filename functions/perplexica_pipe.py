@@ -3,7 +3,7 @@ title: Perplexica Pipe
 author: haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/open-webui
-version: 0.1.0
+version: 0.2.0
 license: MIT
 requirements: aiohttp
 environment_variables: PERPLEXICA_API_URL
@@ -27,14 +27,14 @@ class Pipe:
     class Valves(BaseModel):
         enable_perplexica: bool = Field(default=True)
         perplexica_api_url: str = Field(default="http://localhost:3001/api/search")
-        perplexica_chat_provider: str = Field(
-            default="550e8400-e29b-41d4-a716-446655440000"
+        perplexica_chat_model: str = Field(
+            default="gpt-4o-mini",
+            description="Chat model key as listed in Perplexica providers",
         )
-        perplexica_chat_model: str = Field(default="gpt-4o-mini")
-        perplexica_embedding_provider: str = Field(
-            default="550e8400-e29b-41d4-a716-446655440000"
+        perplexica_embedding_model: str = Field(
+            default="text-embedding-3-large",
+            description="Embedding model key as listed in Perplexica providers",
         )
-        perplexica_embedding_model: str = Field(default="text-embedding-3-large")
         perplexica_focus_mode: Literal[
             "webSearch",
             "academicSearch",
@@ -254,6 +254,50 @@ class Pipe:
             pairs = pairs[-max_items:]
         return pairs
 
+    # ---------- Provider resolver ----------
+    async def _resolve_provider_ids(self, session: aiohttp.ClientSession) -> dict:
+        """Fetch /api/providers from Perplexica and resolve provider IDs for the configured models."""
+        base = self.valves.perplexica_api_url.rstrip("/")
+        # Derive base URL: strip /api/search if present to get the root
+        if base.endswith("/api/search"):
+            base = base[: -len("/api/search")]
+        providers_url = f"{base}/api/providers"
+
+        async with session.get(providers_url) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+
+        providers = data.get("providers", [])
+        chat_provider_id = None
+        embedding_provider_id = None
+
+        for provider in providers:
+            pid = provider.get("id", "")
+            if not chat_provider_id:
+                for m in provider.get("chatModels", []):
+                    if m.get("key") == self.valves.perplexica_chat_model:
+                        chat_provider_id = pid
+                        break
+            if not embedding_provider_id:
+                for m in provider.get("embeddingModels", []):
+                    if m.get("key") == self.valves.perplexica_embedding_model:
+                        embedding_provider_id = pid
+                        break
+
+        if not chat_provider_id:
+            raise ValueError(
+                f"Chat model '{self.valves.perplexica_chat_model}' not found in any Perplexica provider"
+            )
+        if not embedding_provider_id:
+            raise ValueError(
+                f"Embedding model '{self.valves.perplexica_embedding_model}' not found in any Perplexica provider"
+            )
+
+        return {
+            "chat_provider_id": chat_provider_id,
+            "embedding_provider_id": embedding_provider_id,
+        }
+
     # ---------- Perplexica search ----------
     async def _search_perplexica(
         self,
@@ -265,29 +309,8 @@ class Pipe:
         if not self.valves.enable_perplexica:
             return "Perplexica search is disabled"
 
-        request_body: Dict[str, Any] = {
-            "chatModel": {
-                "providerId": self.valves.perplexica_chat_provider,
-                "key": self.valves.perplexica_chat_model,
-            },
-            "embeddingModel": {
-                "providerId": self.valves.perplexica_embedding_provider,
-                "key": self.valves.perplexica_embedding_model,
-            },
-            "optimizationMode": self.valves.perplexica_optimization_mode,
-            "focusMode": self.valves.perplexica_focus_mode,
-            "query": query,
-            "history": history_pairs,
-            "systemInstructions": system_instructions or None,
-            "stream": stream,
-        }
-
-        request_body = {
-            k: v for k, v in request_body.items() if v not in (None, "", "default")
-        }
-
         headers = {"Content-Type": "application/json"}
-        print("[DEBUG] request_body", request_body)
+        print("[DEBUG] Resolving provider IDs from Perplexica...")
 
         timeout = aiohttp.ClientTimeout(
             total=None, sock_read=self.valves.perplexica_timeout_ms / 1000
@@ -295,6 +318,35 @@ class Pipe:
 
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                # Auto-resolve provider IDs
+                resolved = await self._resolve_provider_ids(session)
+                print(f"[DEBUG] Resolved providers: {resolved}")
+
+                request_body: Dict[str, Any] = {
+                    "chatModel": {
+                        "providerId": resolved["chat_provider_id"],
+                        "key": self.valves.perplexica_chat_model,
+                    },
+                    "embeddingModel": {
+                        "providerId": resolved["embedding_provider_id"],
+                        "key": self.valves.perplexica_embedding_model,
+                    },
+                    "optimizationMode": self.valves.perplexica_optimization_mode,
+                    "focusMode": self.valves.perplexica_focus_mode,
+                    "query": query,
+                    "history": history_pairs,
+                    "systemInstructions": system_instructions or None,
+                    "stream": stream,
+                }
+
+                request_body = {
+                    k: v
+                    for k, v in request_body.items()
+                    if v not in (None, "", "default")
+                }
+
+                print("[DEBUG] request_body", request_body)
+
                 async with session.post(
                     self.valves.perplexica_api_url, json=request_body, headers=headers
                 ) as resp:
