@@ -16,6 +16,50 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def resolve_provider_ids(
+    session: aiohttp.ClientSession,
+    base_url: str,
+    chat_model: str,
+    embedding_model: str,
+) -> dict:
+    """Fetch /api/providers from Perplexica and resolve provider IDs for the configured models."""
+    providers_url = f"{base_url.rstrip('/')}/api/providers"
+    async with session.get(providers_url) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+
+    providers = data.get("providers", [])
+    chat_provider_id = None
+    embedding_provider_id = None
+
+    for provider in providers:
+        pid = provider.get("id", "")
+        if not chat_provider_id:
+            for m in provider.get("chatModels", []):
+                if m.get("key") == chat_model:
+                    chat_provider_id = pid
+                    break
+        if not embedding_provider_id:
+            for m in provider.get("embeddingModels", []):
+                if m.get("key") == embedding_model:
+                    embedding_provider_id = pid
+                    break
+
+    if not chat_provider_id:
+        raise ValueError(
+            f"Chat model '{chat_model}' not found in any Perplexica provider"
+        )
+    if not embedding_provider_id:
+        raise ValueError(
+            f"Embedding model '{embedding_model}' not found in any Perplexica provider"
+        )
+
+    return {
+        "chat_provider_id": chat_provider_id,
+        "embedding_provider_id": embedding_provider_id,
+    }
+
+
 class Tools:
     class Valves(BaseModel):
         BASE_URL: str = Field(
@@ -77,44 +121,6 @@ class Tools:
             }
         ]
 
-    async def _resolve_provider_ids(self, session: aiohttp.ClientSession) -> dict:
-        """Fetch /api/providers from Perplexica and resolve provider IDs for the configured models."""
-        providers_url = f"{self.valves.BASE_URL.rstrip('/')}/api/providers"
-        async with session.get(providers_url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-
-        providers = data.get("providers", [])
-        chat_provider_id = None
-        embedding_provider_id = None
-
-        for provider in providers:
-            pid = provider.get("id", "")
-            if not chat_provider_id:
-                for m in provider.get("chatModels", []):
-                    if m.get("key") == self.valves.CHAT_MODEL:
-                        chat_provider_id = pid
-                        break
-            if not embedding_provider_id:
-                for m in provider.get("embeddingModels", []):
-                    if m.get("key") == self.valves.EMBEDDING_MODEL:
-                        embedding_provider_id = pid
-                        break
-
-        if not chat_provider_id:
-            raise ValueError(
-                f"Chat model '{self.valves.CHAT_MODEL}' not found in any Perplexica provider"
-            )
-        if not embedding_provider_id:
-            raise ValueError(
-                f"Embedding model '{self.valves.EMBEDDING_MODEL}' not found in any Perplexica provider"
-            )
-
-        return {
-            "chat_provider_id": chat_provider_id,
-            "embedding_provider_id": embedding_provider_id,
-        }
-
     async def web_search(
         self, query: str, __event_emitter__: Optional[Callable[[Dict], Any]] = None
     ) -> str:
@@ -151,7 +157,12 @@ class Tools:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 # Auto-resolve provider IDs from Perplexica
                 await emit_status("Resolving model providers...")
-                resolved = await self._resolve_provider_ids(session)
+                resolved = await resolve_provider_ids(
+                    session,
+                    self.valves.BASE_URL,
+                    self.valves.CHAT_MODEL,
+                    self.valves.EMBEDDING_MODEL,
+                )
 
                 if self.valves.DEBUG:
                     logger.info(f"Resolved providers: {resolved}")
