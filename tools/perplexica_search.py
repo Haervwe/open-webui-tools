@@ -3,7 +3,7 @@ title: Perplexica Search API Tool
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.0
+version: 0.4.1
 license: MIT
 """
 

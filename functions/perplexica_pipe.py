@@ -3,7 +3,7 @@ title: Perplexica Pipe
 author: haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/open-webui
-version: 0.2.0
+version: 0.2.1
 license: MIT
 requirements: aiohttp
 environment_variables: PERPLEXICA_API_URL
