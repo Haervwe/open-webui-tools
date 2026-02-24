@@ -66,21 +66,6 @@ class Tools:
             default="http://host.docker.internal:3001",
             description="Base URL for the Perplexica API",
         )
-        FOCUS_MODE: Literal[
-            "webSearch",
-            "academicSearch",
-            "writingAssistant",
-            "wolframAlphaSearch",
-            "youtubeSearch",
-            "redditSearch",
-        ] = Field(
-            default="webSearch",
-            description="Focus mode for search",
-        )
-        OPTIMIZATION_MODE: Literal["speed", "balanced"] = Field(
-            default="balanced",
-            description="Search optimization mode: speed (fastest) or balanced (quality)",
-        )
         CHAT_MODEL: str = Field(
             default="gpt-4o-mini",
             description="Chat model key as listed in Perplexica providers",
@@ -98,8 +83,19 @@ class Tools:
             description="Enable debug logging",
         )
 
+    class UserValves(BaseModel):
+        SOURCES: Literal["web", "academic", "discussions"] = Field(
+            default="web",
+            description="Search sources: web, academic, or discussions",
+        )
+        OPTIMIZATION_MODE: Literal["speed", "balanced", "quality"] = Field(
+            default="balanced",
+            description="Search optimization mode: speed (fastest), balanced, or quality (slowest)",
+        )
+
     def __init__(self):
         self.valves = self.Valves()
+        self.user_valves = self.UserValves()
         self.citation = False
         self.tools = [
             {
@@ -121,8 +117,11 @@ class Tools:
             }
         ]
 
-    async def web_search(
-        self, query: str, __event_emitter__: Optional[Callable[[Dict], Any]] = None
+    async def perplexica_web_search(
+        self,
+        query: str,
+        __user__: dict = None,
+        __event_emitter__: Optional[Callable[[Dict], Any]] = None,
     ) -> str:
         """Search using the Perplexica API with streaming support."""
 
@@ -140,6 +139,10 @@ class Tools:
                         },
                     }
                 )
+
+        user_valves = (
+            __user__.get("valves") if __user__ else None
+        ) or self.UserValves()
 
         await emit_status(f"Initiating search for: {query}")
 
@@ -176,8 +179,8 @@ class Tools:
                         "providerId": resolved["embedding_provider_id"],
                         "key": self.valves.EMBEDDING_MODEL,
                     },
-                    "optimizationMode": self.valves.OPTIMIZATION_MODE,
-                    "focusMode": self.valves.FOCUS_MODE,
+                    "optimizationMode": user_valves.OPTIMIZATION_MODE,
+                    "sources": [user_valves.SOURCES],
                     "query": query,
                     "history": [],
                     "systemInstructions": None,

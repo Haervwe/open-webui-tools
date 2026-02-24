@@ -35,28 +35,27 @@ class Pipe:
             default="text-embedding-3-large",
             description="Embedding model key as listed in Perplexica providers",
         )
-        perplexica_focus_mode: Literal[
-            "webSearch",
-            "academicSearch",
-            "writingAssistant",
-            "wolframAlphaSearch",
-            "youtubeSearch",
-            "redditSearch",
-        ] = Field(default="webSearch", description="Focus mode for search")
-        perplexica_optimization_mode: Literal["speed", "balanced"] = Field(
-            default="balanced",
-            description="Search optimization mode: speed (fastest) or balanced (quality)",
-        )
         task_model: str = Field(default="gpt-4o-mini")
         max_history_pairs: int = Field(default=12)
         perplexica_timeout_ms: int = Field(
             default=1500, description="Perplexica HTTP socket read timeout (ms)"
         )
 
+    class UserValves(BaseModel):
+        perplexica_sources: Literal["web", "academic", "discussions"] = Field(
+            default="web",
+            description="Search sources: web, academic, or discussions",
+        )
+        perplexica_optimization_mode: Literal["speed", "balanced", "quality"] = Field(
+            default="balanced",
+            description="Search optimization mode: speed (fastest), balanced, or quality (slowest)",
+        )
+
     def __init__(self):
         self.type = "manifold"
         self.id = "perplexica_pipe"
         self.valves = self.Valves()
+        self.user_valves = self.UserValves()
         self.__current_event_emitter__ = None
         self.__request__ = None
         self.__user__ = None
@@ -77,7 +76,6 @@ class Pipe:
         if error:
             data["error"] = True
         payload = {"type": "status", "data": data}
-        print("[DEBUG] emit_status_basic", payload)
         if not self.__current_event_emitter__:
             return
         await self.__current_event_emitter__(payload)
@@ -93,7 +91,6 @@ class Pipe:
             "items": items,
         }
         payload = {"type": "status", "data": data}
-        print("[DEBUG] emit_web_results", payload)
         if not self.__current_event_emitter__:
             return
         await self.__current_event_emitter__(payload)
@@ -103,7 +100,6 @@ class Pipe:
             "type": "message",
             "data": {"content": message, "is_stream": is_stream},
         }
-        print("[DEBUG] emit_message", payload)
         if not self.__current_event_emitter__:
             return
         await self.__current_event_emitter__(payload)
@@ -123,7 +119,6 @@ class Pipe:
                 "source": {"name": title or url, "url": url},
             },
         }
-        print("[DEBUG] emit_citation", payload)
         if not self.__current_event_emitter__:
             return
         await self.__current_event_emitter__(payload)
@@ -140,6 +135,7 @@ class Pipe:
         results=None,
     ) -> Union[str, dict]:
         user_input = self._extract_user_input(body)
+        self.__user_valves__ = __user__.pop("valves", None) or self.UserValves()
         self.__user__ = User(**__user__)
         self.__request__ = __request__
         self.__current_event_emitter__ = __event_emitter__
@@ -310,7 +306,6 @@ class Pipe:
             return "Perplexica search is disabled"
 
         headers = {"Content-Type": "application/json"}
-        print("[DEBUG] Resolving provider IDs from Perplexica...")
 
         timeout = aiohttp.ClientTimeout(
             total=None, sock_read=self.valves.perplexica_timeout_ms / 1000
@@ -320,7 +315,6 @@ class Pipe:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 # Auto-resolve provider IDs
                 resolved = await self._resolve_provider_ids(session)
-                print(f"[DEBUG] Resolved providers: {resolved}")
 
                 request_body: Dict[str, Any] = {
                     "chatModel": {
@@ -331,8 +325,8 @@ class Pipe:
                         "providerId": resolved["embedding_provider_id"],
                         "key": self.valves.perplexica_embedding_model,
                     },
-                    "optimizationMode": self.valves.perplexica_optimization_mode,
-                    "focusMode": self.valves.perplexica_focus_mode,
+                    "optimizationMode": self.__user_valves__.perplexica_optimization_mode,
+                    "sources": [self.__user_valves__.perplexica_sources],
                     "query": query,
                     "history": history_pairs,
                     "systemInstructions": system_instructions or None,
@@ -344,8 +338,6 @@ class Pipe:
                     for k, v in request_body.items()
                     if v not in (None, "", "default")
                 }
-
-                print("[DEBUG] request_body", request_body)
 
                 async with session.post(
                     self.valves.perplexica_api_url, json=request_body, headers=headers
@@ -419,11 +411,9 @@ class Pipe:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
-                print("[DEBUG] skip malformed line", line)
                 continue
 
             etype = event.get("type")
-            print("[DEBUG] stream event", etype, event)
             if etype == "init":
                 continue
             if etype == "sources":
