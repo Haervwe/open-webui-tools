@@ -1,34 +1,34 @@
 """
 title: ComfyUI Text-to-Video Tool
-description: Generate video from text prompt via ComfyUI workflow JSON. Uses ComfyUI HTTP+WebSocket API, supports unloading Ollama models before run, randomizes seed when missing, downloads the final video to OpenWebUI cache and emits an HTML video embed.
+description: Generate video from text prompt via ComfyUI workflow JSON. Uses ComfyUI HTTP+WebSocket API with robust fallback polling, supports unloading Ollama models before run, randomizes seed, downloads the final video to OpenWebUI storage and emits an HTML video embed.
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
+version: 0.3.0
 license: MIT
 """
 
 import aiohttp
+import asyncio
 import json
 import random
 import uuid
 import os
-import logging
 import io
-from fastapi import UploadFile
-from open_webui.routers.files import upload_file_handler  # type: ignore
-from typing import Any, Dict, Optional, Callable, Awaitable, List, Tuple
+import logging
 import time
+from typing import Any, Dict, Optional, Callable, Awaitable, List, Tuple, cast
 from urllib.parse import quote
 from pydantic import BaseModel, Field
+from fastapi import UploadFile
 from fastapi.responses import HTMLResponse
-import requests
 from open_webui.models.users import Users
+from open_webui.routers.files import upload_file_handler  # type: ignore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Constants and Default Workflow ---
+# --- Constants ---
 
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov")
 
@@ -185,86 +185,178 @@ DEFAULT_WORKFLOW: Dict[str, Any] = {
 # --- Helper Functions (Module-level) ---
 
 
-def get_loaded_models(api_url: str) -> List[Dict[str, Any]]:
-    """Get loaded Ollama models via the local Ollama API."""
+async def get_loaded_models_async(
+    api_url: str = "http://localhost:11434",
+) -> list[Dict[str, Any]]:
     try:
-        resp = requests.get(f"{api_url.rstrip('/')}/api/ps", timeout=5)
-        resp.raise_for_status()
-        return resp.json().get("models", [])
-    except requests.RequestException as e:
-        logger.debug("Error fetching loaded Ollama models: %s", e)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{api_url.rstrip('/')}/api/ps") as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return cast(list[Dict[str, Any]], data.get("models", []))
+    except Exception as e:
+        logger.debug("Error fetching loaded models: %s", e)
         return []
 
 
-def unload_all_models(api_url: str) -> None:
-    """Unload all Ollama models from VRAM."""
-    models = get_loaded_models(api_url)
-    if not models:
-        return
-    logger.debug("Unloading %d Ollama models...", len(models))
-    for model in models:
-        model_name = model.get("name") or model.get("model")
-        if model_name:
-            try:
-                requests.post(
-                    f"{api_url.rstrip('/')}/api/generate",
-                    json={"model": model_name, "keep_alive": 0},
-                    timeout=10,
-                )
-            except requests.RequestException:
-                pass
+async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bool:
+    try:
+        loaded_models = await get_loaded_models_async(api_url)
+        if not loaded_models:
+            return True
+
+        async with aiohttp.ClientSession() as session:
+            for model in loaded_models:
+                model_name = model.get("name", model.get("model", ""))
+                if model_name:
+                    payload = {"model": model_name, "keep_alive": 0}
+                    async with session.post(
+                        f"{api_url.rstrip('/')}/api/generate", json=payload
+                    ) as resp:
+                        pass
+
+        for _ in range(5):
+            await asyncio.sleep(1)
+            remaining = await get_loaded_models_async(api_url)
+            if not remaining:
+                logger.info("All models successfully unloaded.")
+                return True
+
+        logger.warning("Some models might still be loaded after timeout.")
+        return False
+
+    except Exception as e:
+        logger.error("Error unloading models: %s", e)
+        return False
 
 
-async def wait_for_completion_ws(
+async def connect_submit_and_wait(
     comfyui_ws_url: str,
     comfyui_http_url: str,
-    prompt_id: str,
+    prompt_payload: Dict[str, Any],
     client_id: str,
     max_wait_time: int,
 ) -> Dict[str, Any]:
-    """Wait for ComfyUI websocket to report job completion and return history."""
-    start_time = time.monotonic()
-    async with aiohttp.ClientSession().ws_connect(
-        f"{comfyui_ws_url}?clientId={client_id}"
-    ) as ws:
-        async for msg in ws:
-            if time.monotonic() - start_time > max_wait_time:
-                raise TimeoutError(f"WebSocket wait timed out after {max_wait_time}s")
+    start_time = asyncio.get_event_loop().time()
+    prompt_id = None
 
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                try:
-                    message = json.loads(msg.data)
-                    data = message.get("data", {})
-                    msg_type = message.get("type")
+    async with aiohttp.ClientSession() as session:
+        ws_url = f"{comfyui_ws_url}?clientId={client_id}"
+        try:
+            async with session.ws_connect(ws_url) as ws:
+                async with session.post(
+                    f"{comfyui_http_url}/prompt", json=prompt_payload
+                ) as resp:
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        raise Exception(
+                            f"Failed to queue prompt: {resp.status} - {err_text}"
+                        )
+                    resp_json = await resp.json()
+                    prompt_id = resp_json.get("prompt_id")
+                    if not prompt_id:
+                        raise Exception("No prompt_id received from ComfyUI")
 
-                    if (
-                        msg_type == "execution_error"
-                        and data.get("prompt_id") == prompt_id
-                    ):
-                        exc = data.get("exception_message", "Unknown error")
-                        raise Exception(f"ComfyUI job failed: {exc}")
+                last_poll_time = 0
+                poll_interval = 3.0
 
-                    if msg_type == "executed" and data.get("prompt_id") == prompt_id:
-                        async with aiohttp.ClientSession() as http_session:
-                            async with http_session.get(
+                while True:
+                    execute_poll = False
+                    if asyncio.get_event_loop().time() - start_time > max_wait_time:
+                        raise TimeoutError(
+                            f"Generation timed out after {max_wait_time}s"
+                        )
+
+                    if asyncio.get_event_loop().time() - last_poll_time > poll_interval:
+                        execute_poll = True
+                        last_poll_time = asyncio.get_event_loop().time()
+
+                    if execute_poll and prompt_id:
+                        try:
+                            async with session.get(
                                 f"{comfyui_http_url}/history/{prompt_id}"
-                            ) as resp:
-                                resp.raise_for_status()
-                                history = await resp.json()
-                                return history.get(prompt_id, {})
-                except (json.JSONDecodeError, aiohttp.ClientError):
-                    continue
-            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
-                raise ConnectionError(
-                    "WebSocket connection failed or closed unexpectedly."
-                )
-    raise TimeoutError("WebSocket connection closed before job completion.")
+                            ) as history_resp:
+                                if history_resp.status == 200:
+                                    history = await history_resp.json()
+                                    if prompt_id in history:
+                                        return history[prompt_id]
+                        except Exception:
+                            pass
+
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            message = json.loads(msg.data)
+                            msg_type = message.get("type")
+                            data = message.get("data", {})
+
+                            if (
+                                msg_type == "execution_cached" or msg_type == "executed"
+                            ) and data.get("prompt_id") == prompt_id:
+                                async with session.get(
+                                    f"{comfyui_http_url}/history/{prompt_id}"
+                                ) as final_resp:
+                                    if final_resp.status == 200:
+                                        history = await final_resp.json()
+                                        if prompt_id in history:
+                                            return history[prompt_id]
+
+                            elif (
+                                msg_type == "execution_error"
+                                and data.get("prompt_id") == prompt_id
+                            ):
+                                error_details = data.get(
+                                    "exception_message", "Unknown error"
+                                )
+                                node_id = data.get("node_id", "N/A")
+                                raise Exception(
+                                    f"ComfyUI job failed on node {node_id}. Error: {error_details}"
+                                )
+
+                        elif msg.type in (
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.ERROR,
+                        ):
+                            logger.warning(
+                                "WebSocket connection lost. Switching to pure polling."
+                            )
+                            break
+
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception as e:
+                        logger.warning("WS Error: %s", e)
+                        break
+
+        except Exception as e:
+            if not prompt_id:
+                raise e
+            logger.warning("WebSocket failed (%s). Fallback to pure polling.", e)
+
+        if prompt_id:
+            while asyncio.get_event_loop().time() - start_time <= max_wait_time:
+                await asyncio.sleep(2)
+                try:
+                    async with session.get(
+                        f"{comfyui_http_url}/history/{prompt_id}"
+                    ) as h_resp:
+                        if h_resp.status == 200:
+                            history = await h_resp.json()
+                            if prompt_id in history:
+                                return history[prompt_id]
+                except Exception:
+                    pass
+            raise TimeoutError(f"Generation timed out (polling) after {max_wait_time}s")
+
+        raise Exception("Failed to start generation flow.")
 
 
 def extract_video_files(job_data: Dict[str, Any]) -> List[Dict[str, str]]:
     """
-    (Restored from original)
-    Robustly extract video filenames from ComfyUI job outputs by recursively searching the data.
+    Robustly extract video filenames from ComfyUI job outputs
+    by recursively searching the data.
     """
     candidates: List[Tuple[str, str]] = []
 
@@ -332,44 +424,21 @@ async def download_and_upload_to_owui(
 
         if request and user:
             file = UploadFile(file=io.BytesIO(content), filename=filename)
-            file_item  = upload_file_handler(
+            file_item = upload_file_handler(
                 request=request, file=file, metadata={}, process=False, user=user
             )
             file_id = getattr(file_item, "id", None)
 
             if file_id:
-                base_url = str(request.base_url).rstrip("/")
                 relative_path = request.app.url_path_for(
                     "get_file_content_by_id", id=str(file_id)
                 )
-                return f"{base_url}{relative_path}?t={int(time.time())}", True
+                return f"{relative_path}?t={int(time.time())}", True
 
     except Exception as e:
         logger.debug("Failed to download or upload video to OpenWebUI: %s", e)
 
     return comfyui_view_url, False  # Fallback to direct ComfyUI URL
-
-
-def prepare_workflow(
-    base_workflow: Dict[str, Any], prompt: str, prompt_node_id: str
-) -> Dict[str, Any]:
-    """Create a copy of the workflow, inject the prompt, and randomize the seed."""
-    workflow = json.loads(json.dumps(base_workflow))  # Deep copy
-
-    if prompt_node_id not in workflow:
-        raise ValueError(
-            f"Prompt node ID '{prompt_node_id}' not found in the workflow."
-        )
-    workflow[prompt_node_id].setdefault("inputs", {})["text"] = prompt
-
-    for node in workflow.values():
-        if "class_type" in node and "KSampler" in node["class_type"]:
-            inputs = node.setdefault("inputs", {})
-            for seed_key in ("noise_seed", "seed"):
-                if seed_key in inputs and inputs[seed_key] != 0:
-                    inputs[seed_key] = random.randint(1, 2**31 - 1)
-
-    return workflow
 
 
 # --- Main Tool Class ---
@@ -380,12 +449,24 @@ class Tools:
         comfyui_api_url: str = Field(
             default="http://localhost:8188", description="ComfyUI HTTP API endpoint."
         )
-        workflow: Optional[Dict[str, Any]] = Field(
-            default=None,
-            description="ComfyUI workflow JSON. If empty, a default is used.",
+        workflow_json: str = Field(
+            default=json.dumps(DEFAULT_WORKFLOW),
+            description="ComfyUI Workflow JSON string. If empty, a default is used.",
         )
         prompt_node_id: str = Field(
             default="89", description="Node ID for the text prompt input."
+        )
+        prompt_field_name: str = Field(
+            default="text",
+            description="Name of the input field where the prompt text goes.",
+        )
+        seed_node_id: str = Field(
+            default="81",
+            description="Node ID containing the seed parameter to randomize.",
+        )
+        seed_field_name: str = Field(
+            default="noise_seed",
+            description="Name of the seed input field on the seed node.",
         )
         max_wait_time: int = Field(
             default=600, description="Max wait time in seconds for job completion."
@@ -413,18 +494,57 @@ class Tools:
     ) -> str | HTMLResponse:
         """Generate a video from a text prompt using the provided ComfyUI workflow."""
         try:
+            # --- Unload Ollama models if requested ---
             if self.valves.unload_ollama_models:
-                unload_all_models(self.valves.ollama_api_url)
+                if __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": "⏳ Unloading Ollama models...",
+                                "done": False,
+                            },
+                        }
+                    )
+                unloaded = await unload_all_models_async(self.valves.ollama_api_url)
+                await asyncio.sleep(2)
+                if not unloaded:
+                    logger.warning("Ollama models may not have fully unloaded.")
 
-            base_workflow = self.valves.workflow or DEFAULT_WORKFLOW
-            active_workflow = prepare_workflow(
-                base_workflow, prompt, self.valves.prompt_node_id
-            )
+            # --- Parse workflow ---
+            try:
+                workflow = json.loads(self.valves.workflow_json)
+            except json.JSONDecodeError as e:
+                raise Exception(f"Invalid Workflow JSON in valves: {e}")
 
+            # --- Inject prompt ---
+            prompt_node_id = self.valves.prompt_node_id
+            prompt_field = self.valves.prompt_field_name
+            if prompt_node_id not in workflow:
+                raise ValueError(
+                    f"Prompt node ID '{prompt_node_id}' not found in the workflow."
+                )
+            workflow[prompt_node_id].setdefault("inputs", {})[prompt_field] = prompt
+
+            # --- Inject random seed ---
+            seed_node_id = self.valves.seed_node_id
+            seed_field = self.valves.seed_field_name
+            if seed_node_id in workflow:
+                workflow[seed_node_id].setdefault("inputs", {})[seed_field] = (
+                    random.randint(1, 2**31 - 1)
+                )
+
+            # --- Prepare connection ---
             http_api_url = self.valves.comfyui_api_url.rstrip("/")
-            ws_api_url = http_api_url.replace("http", "ws") + "/ws"
+            ws_api_url = (
+                http_api_url.replace("http://", "ws://").replace("https://", "wss://")
+                + "/ws"
+            )
             client_id = str(uuid.uuid4())
-            payload: Dict[str, Any] = {"prompt": active_workflow, "client_id": client_id}
+            payload: Dict[str, Any] = {
+                "prompt": workflow,
+                "client_id": client_id,
+            }
 
             if __event_emitter__:
                 await __event_emitter__(
@@ -437,16 +557,7 @@ class Tools:
                     }
                 )
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{http_api_url}/prompt", json=payload) as resp:
-                    resp.raise_for_status()
-                    result = await resp.json()
-                    prompt_id = result.get("prompt_id")
-                    if not prompt_id:
-                        raise RuntimeError(
-                            f"ComfyUI did not return a prompt_id. Response: {result}"
-                        )
-
+            # --- Submit and wait (robust WS + polling fallback) ---
             if __event_emitter__:
                 await __event_emitter__(
                     {
@@ -458,19 +569,20 @@ class Tools:
                     }
                 )
 
-            job_data = await wait_for_completion_ws(
+            result_data = await connect_submit_and_wait(
                 ws_api_url,
                 http_api_url,
-                prompt_id,
+                payload,
                 client_id,
                 self.valves.max_wait_time,
             )
 
-            video_files = extract_video_files(job_data)
+            # --- Extract video files ---
+            video_files = extract_video_files(result_data)
             if not video_files:
                 logger.warning(
                     "No video files extracted from job data: %s",
-                    json.dumps(job_data, indent=2),
+                    json.dumps(result_data, indent=2),
                 )
                 return "ComfyUI job completed, but no video output was found in the results."
 
@@ -489,7 +601,10 @@ class Tools:
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "✅ Video Generated!", "done": True},
+                        "data": {
+                            "description": "✅ Video Generated!",
+                            "done": True,
+                        },
                     }
                 )
             if self.valves.return_html_embed:
@@ -501,12 +616,15 @@ class Tools:
             return f"🎬 Video generated successfully. Link: {final_url}"
 
         except Exception as e:
-            logger.error(f"Error during video generation: {e}", exc_info=True)
+            logger.error("Error during video generation: %s", e, exc_info=True)
             if __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": f"❌ Error: {e}", "done": True},
+                        "data": {
+                            "description": f"❌ Error: {e}",
+                            "done": True,
+                        },
                     }
                 )
             return f"An error occurred: {e}"

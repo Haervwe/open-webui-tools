@@ -188,13 +188,12 @@ class Pipe:
 
             file_id = str(getattr(file_item, "id", ""))
 
-            base_url = str(request.base_url).rstrip("/")
             relative_path = request.app.url_path_for(
                 "get_file_content_by_id", id=file_id
             )
 
             timestamp = int(time.time() * 1000)
-            url_with_cache_bust = f"{base_url}{relative_path}?t={timestamp}"
+            url_with_cache_bust = f"{relative_path}?t={timestamp}"
 
             return url_with_cache_bust
 

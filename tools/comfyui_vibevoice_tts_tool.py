@@ -15,130 +15,106 @@ import aiohttp
 import requests
 from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union
 from pydantic import BaseModel, Field
-from open_webui.config import CACHE_DIR
 from open_webui.models.users import Users
 from fastapi.responses import HTMLResponse
+from fastapi import Request, UploadFile
+from open_webui.routers.files import upload_file_handler
+import io
+import re
 
 # Default workflow for single speaker TTS
-DEFAULT_SINGLE_SPEAKER_WORKFLOW = json.dumps({
-    "15": {
-        "inputs": {
-            "audio": "Voice.mp3",
-            "audioUI": ""
+DEFAULT_SINGLE_SPEAKER_WORKFLOW = json.dumps(
+    {
+        "15": {
+            "inputs": {"audio": "Voice.mp3", "audioUI": ""},
+            "class_type": "LoadAudio",
+            "_meta": {"title": "CargarAudio"},
         },
-        "class_type": "LoadAudio",
-        "_meta": {
-            "title": "CargarAudio"
-        }
-    },
-    "16": {
-        "inputs": {
-            "filename_prefix": "audio/ComfyUI",
-            "quality": "V0",
-            "audioUI": "",
-            "audio": ["45", 0]
+        "16": {
+            "inputs": {
+                "filename_prefix": "audio/ComfyUI",
+                "quality": "V0",
+                "audioUI": "",
+                "audio": ["45", 0],
+            },
+            "class_type": "SaveAudioMP3",
+            "_meta": {"title": "Save Audio (MP3)"},
         },
-        "class_type": "SaveAudioMP3",
-        "_meta": {
-            "title": "Save Audio (MP3)"
-        }
-    },
-    "44": {
-        "inputs": {
-            "text": "Hello, this is a test of the VibeVoice text-to-speech system.",
-            "model": "VibeVoice-1.5B",
-            "attention_type": "auto",
-            "quantize_llm": "full precision",
-            "free_memory_after_generate": True,
-            "diffusion_steps": 20,
-            "seed": 42,
-            "cfg_scale": 1.3,
-            "use_sampling": False,
-            "temperature": 0.95,
-            "top_p": 0.95,
-            "max_words_per_chunk": 250,
-            "voice_speed_factor": 1
+        "44": {
+            "inputs": {
+                "text": "Hello, this is a test of the VibeVoice text-to-speech system.",
+                "model": "VibeVoice-1.5B",
+                "attention_type": "auto",
+                "quantize_llm": "full precision",
+                "free_memory_after_generate": True,
+                "diffusion_steps": 20,
+                "seed": 42,
+                "cfg_scale": 1.3,
+                "use_sampling": False,
+                "temperature": 0.95,
+                "top_p": 0.95,
+                "max_words_per_chunk": 250,
+                "voice_speed_factor": 1,
+            },
+            "class_type": "VibeVoiceSingleSpeakerNode",
+            "_meta": {"title": "VibeVoice Single Speaker"},
         },
-        "class_type": "VibeVoiceSingleSpeakerNode",
-        "_meta": {
-            "title": "VibeVoice Single Speaker"
-        }
-    },
-    "45": {
-        "inputs": {
-            "anything": ["44", 0]
+        "45": {
+            "inputs": {"anything": ["44", 0]},
+            "class_type": "easy cleanGpuUsed",
+            "_meta": {"title": "Clean VRAM Used"},
         },
-        "class_type": "easy cleanGpuUsed",
-        "_meta": {
-            "title": "Clean VRAM Used"
-        }
     }
-})
+)
 
 # Default workflow for multi-speaker TTS
-DEFAULT_MULTI_SPEAKER_WORKFLOW = json.dumps({
-    "15": {
-        "inputs": {
-            "audio": "Voice1.mp3",
-            "audioUI": ""
+DEFAULT_MULTI_SPEAKER_WORKFLOW = json.dumps(
+    {
+        "15": {
+            "inputs": {"audio": "Voice1.mp3", "audioUI": ""},
+            "class_type": "LoadAudio",
+            "_meta": {"title": "CargarAudio"},
         },
-        "class_type": "LoadAudio",
-        "_meta": {
-            "title": "CargarAudio"
-        }
-    },
-    "16": {
-        "inputs": {
-            "filename_prefix": "audio/ComfyUI",
-            "quality": "V0",
-            "audioUI": "",
-            "audio": ["39", 0]
+        "16": {
+            "inputs": {
+                "filename_prefix": "audio/ComfyUI",
+                "quality": "V0",
+                "audioUI": "",
+                "audio": ["39", 0],
+            },
+            "class_type": "SaveAudioMP3",
+            "_meta": {"title": "Save Audio (MP3)"},
         },
-        "class_type": "SaveAudioMP3",
-        "_meta": {
-            "title": "Save Audio (MP3)"
-        }
-    },
-    "17": {
-        "inputs": {
-            "audio": "Voice2.mp3",
-            "audioUI": ""
+        "17": {
+            "inputs": {"audio": "Voice2.mp3", "audioUI": ""},
+            "class_type": "LoadAudio",
+            "_meta": {"title": "CargarAudio"},
         },
-        "class_type": "LoadAudio",
-        "_meta": {
-            "title": "CargarAudio"
-        }
-    },
-    "36": {
-        "inputs": {
-            "text": "[1]: Hello, this is the first speaker.\n[2]: Hi there, I'm the second speaker.\n[1]: Nice to meet you!\n[2]: Nice to meet you too!",
-            "model": "VibeVoice-1.5B",
-            "attention_type": "auto",
-            "quantize_llm": "full precision",
-            "free_memory_after_generate": True,
-            "diffusion_steps": 20,
-            "seed": 42,
-            "cfg_scale": 1.3,
-            "use_sampling": False,
-            "temperature": 0.95,
-            "top_p": 0.95,
-            "voice_speed_factor": 1
+        "36": {
+            "inputs": {
+                "text": "[1]: Hello, this is the first speaker.\n[2]: Hi there, I'm the second speaker.\n[1]: Nice to meet you!\n[2]: Nice to meet you too!",
+                "model": "VibeVoice-1.5B",
+                "attention_type": "auto",
+                "quantize_llm": "full precision",
+                "free_memory_after_generate": True,
+                "diffusion_steps": 20,
+                "seed": 42,
+                "cfg_scale": 1.3,
+                "use_sampling": False,
+                "temperature": 0.95,
+                "top_p": 0.95,
+                "voice_speed_factor": 1,
+            },
+            "class_type": "VibeVoiceMultipleSpeakersNode",
+            "_meta": {"title": "VibeVoice Multiple Speakers"},
         },
-        "class_type": "VibeVoiceMultipleSpeakersNode",
-        "_meta": {
-            "title": "VibeVoice Multiple Speakers"
-        }
-    },
-    "39": {
-        "inputs": {
-            "anything": ["36", 0]
+        "39": {
+            "inputs": {"anything": ["36", 0]},
+            "class_type": "easy cleanGpuUsed",
+            "_meta": {"title": "Clean VRAM Used"},
         },
-        "class_type": "easy cleanGpuUsed",
-        "_meta": {
-            "title": "Clean VRAM Used"
-        }
     }
-})
+)
 
 
 async def wait_for_completion_ws(
@@ -177,10 +153,12 @@ async def wait_for_completion_ws(
                                 await event_emitter(
                                     {
                                         "type": "status",
-                                        "data": {"description": "Generation completed, retrieving audio..."},
+                                        "data": {
+                                            "description": "Generation completed, retrieving audio..."
+                                        },
                                     }
                                 )
-                            
+
                             # Fetch final job data
                             async with aiohttp.ClientSession() as session:
                                 async with session.get(
@@ -234,16 +212,17 @@ def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
                                 fn_val: Any = file_info_dict.get("filename")
                                 filename = fn_val if isinstance(fn_val, str) else None
                                 subfolder_val: Any = file_info_dict.get("subfolder", "")
-                                subfolder = str(subfolder_val) if subfolder_val is not None else ""
+                                subfolder = (
+                                    str(subfolder_val)
+                                    if subfolder_val is not None
+                                    else ""
+                                )
                             else:
                                 # Treat any non-dict entry as a filename string
                                 filename = str(file_info_item)
 
-                            if (
-                                filename is not None
-                                and filename.lower().endswith(
-                                    (".wav", ".mp3", ".flac", ".ogg")
-                                )
+                            if filename is not None and filename.lower().endswith(
+                                (".wav", ".mp3", ".flac", ".ogg")
                             ):
                                 audio_files.append(
                                     {
@@ -254,44 +233,60 @@ def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
     return audio_files
 
 
-async def download_audio_to_cache(
-    comfyui_http_url: str, filename: str, subfolder: str = ""
+async def download_audio_to_storage(
+    request: Request, user, comfyui_http_url: str, filename: str, subfolder: str = ""
 ) -> Optional[str]:
-    """
-    Download audio file from ComfyUI to OpenWebUI cache directory.
-    Returns the local cache URL path if successful, None otherwise.
-    """
     try:
-        # Create cache directory for audio files
-        cache_audio_dir = os.path.join(CACHE_DIR, "audio", "generations")
-        os.makedirs(cache_audio_dir, exist_ok=True)
-
-        # Generate unique filename to avoid conflicts
         file_extension = os.path.splitext(filename)[1] or ".wav"
-        local_filename = f"{uuid.uuid4()}{file_extension}"
-        local_file_path = os.path.join(cache_audio_dir, local_filename)
+        local_filename = f"vibevoice_{uuid.uuid4().hex[:8]}{file_extension}"
 
-        # Build ComfyUI download URL
+        mime_map = {
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".flac": "audio/flac",
+            ".ogg": "audio/ogg",
+        }
+        content_type = mime_map.get(file_extension.lower(), "audio/wav")
+
         subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
         comfyui_file_url = (
             f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
         )
 
-        # Download file from ComfyUI
         async with aiohttp.ClientSession() as session:
             async with session.get(comfyui_file_url) as resp:
                 if resp.status == 200:
-                    with open(local_file_path, "wb") as f:
-                        f.write(await resp.read())
-                    
-                    # Return the cache URL path
-                    return f"/cache/audio/generations/{local_filename}"
+                    audio_content = await resp.read()
+
+                    upload_file = UploadFile(
+                        file=io.BytesIO(audio_content),
+                        filename=local_filename,
+                        headers={"content-type": content_type},
+                    )
+
+                    file_item = upload_file_handler(
+                        request,
+                        file=upload_file,
+                        metadata={},
+                        process=False,
+                        user=user,
+                    )
+
+                    if file_item and getattr(file_item, "id", None):
+                        file_id = str(getattr(file_item, "id", ""))
+                        relative_path = request.app.url_path_for(
+                            "get_file_content_by_id", id=file_id
+                        )
+                        return relative_path
+
+                    print("[DEBUG] upload_file_handler returned no file item")
+                    return None
                 else:
                     print(f"[DEBUG] Failed to download audio: HTTP {resp.status}")
                     return None
 
     except Exception as e:
-        print(f"[DEBUG] Error downloading audio to cache: {str(e)}")
+        print(f"[DEBUG] Error uploading audio to storage: {str(e)}")
         return None
 
 
@@ -334,14 +329,21 @@ def unload_all_models(api_url: str = "http://localhost:11434") -> dict[str, bool
 
 
 def generate_audio_player_embed(
-    audio_url: str, text: str, speaker_info: str, generation_type: str = "Single Speaker"
+    audio_url: str,
+    text: str,
+    speaker_info: str,
+    generation_type: str = "Single Speaker",
 ) -> str:
     """Generate a sleek custom audio player embed with styled controls."""
     # Escape HTML special characters
-    safe_text = text.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-    safe_speaker = speaker_info.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-    safe_type = generation_type.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-    
+    safe_text = text.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    safe_speaker = (
+        speaker_info.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    safe_type = (
+        generation_type.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -796,24 +798,29 @@ class Tools:
         self,
         text: str,
         __user__: Dict[str, Any] = {},
+        __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> str | HTMLResponse:
         """
         Generate natural, expressive speech from text using voice cloning.
-        
+
         Creates high-quality, conversational audio that maintains the speaker's identity and prosody.
         Perfect for voiceovers, narration, audiobooks, podcasts, and any content requiring natural-sounding speech.
-        
+
         Args:
             text: The complete text to convert to speech. Can be any length.
-            
+
         Example:
             text = "Welcome to today's podcast. We'll be exploring the fascinating world of artificial intelligence and its impact on our daily lives."
         """
         try:
             # Get user valves
             user = Users.get_user_by_id(__user__["id"])
-            user_valves = user.valves if hasattr(user, "valves") and user.valves else self.UserValves()
+            user_valves = (
+                user.valves
+                if hasattr(user, "valves") and user.valves
+                else self.UserValves()
+            )
             if not isinstance(user_valves, self.UserValves):
                 user_valves = self.UserValves(**user_valves)
             # Unload Ollama models if requested
@@ -822,7 +829,10 @@ class Tools:
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": "Unloading Ollama models to free VRAM...", "done": False},
+                            "data": {
+                                "description": "Unloading Ollama models to free VRAM...",
+                                "done": False,
+                            },
                         }
                     )
                 unload_all_models(self.valves.ollama_url)
@@ -830,7 +840,9 @@ class Tools:
             # Load workflow
             workflow_str = self.valves.single_speaker_workflow
             if not workflow_str or workflow_str.strip() == "":
-                raise ValueError("Single speaker workflow JSON is not configured in valves")
+                raise ValueError(
+                    "Single speaker workflow JSON is not configured in valves"
+                )
 
             workflow = json.loads(workflow_str)
 
@@ -838,15 +850,18 @@ class Tools:
             if self.valves.single_text_node in workflow:
                 workflow[self.valves.single_text_node]["inputs"]["text"] = text
             else:
-                raise ValueError(f"Text node {self.valves.single_text_node} not found in workflow")
+                raise ValueError(
+                    f"Text node {self.valves.single_text_node} not found in workflow"
+                )
 
             # Set seed (random if -1, otherwise use user's value)
             if user_valves.seed == -1:
                 import random
+
                 seed = random.randint(0, 2**32 - 1)
             else:
                 seed = user_valves.seed
-                
+
             if self.valves.single_seed_node in workflow:
                 workflow[self.valves.single_seed_node]["inputs"]["seed"] = seed
 
@@ -859,7 +874,7 @@ class Tools:
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "Generating speech...","done": False},
+                        "data": {"description": "Generating speech...", "done": False},
                     }
                 )
 
@@ -870,7 +885,9 @@ class Tools:
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
-                        raise Exception(f"ComfyUI API error: {resp.status} - {error_text}")
+                        raise Exception(
+                            f"ComfyUI API error: {resp.status} - {error_text}"
+                        )
                     result = await resp.json()
                     prompt_id = result.get("prompt_id")
                     if not prompt_id:
@@ -897,12 +914,11 @@ class Tools:
 
             # Download to cache if requested
             if self.valves.save_local:
-
-                cache_url = await download_audio_to_cache(
-                    comfyui_http_url, filename, subfolder
+                cache_url = await download_audio_to_storage(
+                    __request__, user, comfyui_http_url, filename, subfolder
                 )
                 if cache_url:
-                    audio_url = f"{self.valves.owui_base_url.rstrip('/')}{cache_url}"
+                    audio_url = cache_url
                 else:
                     subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
                     audio_url = f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
@@ -924,7 +940,9 @@ class Tools:
                 html_content = generate_audio_player_embed(
                     audio_url, text, speaker_info, "Single Speaker"
                 )
-                return HTMLResponse(content=html_content,headers={"content-disposition": "inline"})
+                return HTMLResponse(
+                    content=html_content, headers={"content-disposition": "inline"}
+                )
             else:
                 return f"Audio generated successfully!\n\nDownload: {audio_url}"
 
@@ -943,33 +961,37 @@ class Tools:
         self,
         text: str,
         __user__: Dict[str, Any] = {},
+        __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> str | HTMLResponse:
         """
-        Generate dynamic multi-speaker conversations with distinct cloned voices.
-        
-        Creates natural dialogue between up to 4 different speakers, each with their own voice characteristics.
-        Perfect for podcasts, interviews, audiobooks with multiple characters, or any conversational content.
-        
-        Args:
-            text: Dialogue script where each line starts with [1], [2], [3], or [4] to indicate the speaker, followed by a colon and their dialogue.
-            
-        Example:
-            text = '''[1]: Welcome to the AI Ethics Roundtable. I'm your host Sarah.
-[2]: Thanks for having me, Sarah. I'm excited to discuss this important topic.
-[1]: Let's start with your recent paper on algorithmic bias. Can you tell us more?
-[2]: Absolutely. We found that bias can emerge in unexpected ways during training.
-[1]: That's fascinating. How do you think we should address this?'''
+                Generate dynamic multi-speaker conversations with distinct cloned voices.
 
-        Note: Each number [1] through [4] represents a different speaker with a unique voice.
+                Creates natural dialogue between up to 4 different speakers, each with their own voice characteristics.
+                Perfect for podcasts, interviews, audiobooks with multiple characters, or any conversational content.
+
+                Args:
+                    text: Dialogue script where each line starts with [1], [2], [3], or [4] to indicate the speaker, followed by a colon and their dialogue.
+
+                Example:
+                    text = '''[1]: Welcome to the AI Ethics Roundtable. I'm your host Sarah.
+        [2]: Thanks for having me, Sarah. I'm excited to discuss this important topic.
+        [1]: Let's start with your recent paper on algorithmic bias. Can you tell us more?
+        [2]: Absolutely. We found that bias can emerge in unexpected ways during training.
+        [1]: That's fascinating. How do you think we should address this?'''
+
+                Note: Each number [1] through [4] represents a different speaker with a unique voice.
         """
         try:
             # Get user valves
             user = Users.get_user_by_id(__user__["id"])
-            user_valves = user.valves if hasattr(user, "valves") and user.valves else self.UserValves()
+            user_valves = (
+                user.valves
+                if hasattr(user, "valves") and user.valves
+                else self.UserValves()
+            )
             if not isinstance(user_valves, self.UserValves):
                 user_valves = self.UserValves(**user_valves)
-
 
             # Unload Ollama models if requested
             if self.valves.unload_ollama_models:
@@ -977,7 +999,10 @@ class Tools:
                     await __event_emitter__(
                         {
                             "type": "status",
-                            "data": {"description": "Unloading Ollama models to free VRAM...","done": False}
+                            "data": {
+                                "description": "Unloading Ollama models to free VRAM...",
+                                "done": False,
+                            },
                         }
                     )
                 unload_all_models(self.valves.ollama_url)
@@ -985,7 +1010,9 @@ class Tools:
             # Load workflow
             workflow_str = self.valves.multi_speaker_workflow
             if not workflow_str or workflow_str.strip() == "":
-                raise ValueError("Multi-speaker workflow JSON is not configured in valves")
+                raise ValueError(
+                    "Multi-speaker workflow JSON is not configured in valves"
+                )
 
             workflow = json.loads(workflow_str)
 
@@ -993,15 +1020,18 @@ class Tools:
             if self.valves.multi_text_node in workflow:
                 workflow[self.valves.multi_text_node]["inputs"]["text"] = text
             else:
-                raise ValueError(f"Text node {self.valves.multi_text_node} not found in workflow")
+                raise ValueError(
+                    f"Text node {self.valves.multi_text_node} not found in workflow"
+                )
 
             # Set seed (random if -1, otherwise use user's value)
             if user_valves.seed == -1:
                 import random
+
                 seed = random.randint(0, 2**32 - 1)
             else:
                 seed = user_valves.seed
-                
+
             if self.valves.multi_seed_node in workflow:
                 workflow[self.valves.multi_seed_node]["inputs"]["seed"] = seed
 
@@ -1014,7 +1044,7 @@ class Tools:
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "Generating speech...","done": False},
+                        "data": {"description": "Generating speech...", "done": False},
                     }
                 )
 
@@ -1025,7 +1055,9 @@ class Tools:
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
-                        raise Exception(f"ComfyUI API error: {resp.status} - {error_text}")
+                        raise Exception(
+                            f"ComfyUI API error: {resp.status} - {error_text}"
+                        )
                     result = await resp.json()
                     prompt_id = result.get("prompt_id")
                     if not prompt_id:
@@ -1052,12 +1084,11 @@ class Tools:
 
             # Download to cache if requested
             if self.valves.save_local:
-                
-                cache_url = await download_audio_to_cache(
-                    comfyui_http_url, filename, subfolder
+                cache_url = await download_audio_to_storage(
+                    __request__, user, comfyui_http_url, filename, subfolder
                 )
                 if cache_url:
-                    audio_url = f"{self.valves.owui_base_url.rstrip('/')}{cache_url}"
+                    audio_url = cache_url
                 else:
                     subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
                     audio_url = f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
@@ -1075,11 +1106,15 @@ class Tools:
 
             # Generate response
             if self.valves.show_player_embed:
-                speaker_info = "Multiple voice clones (pre-loaded in ComfyUI) - [1], [2], [3], [4]"
+                speaker_info = (
+                    "Multiple voice clones (pre-loaded in ComfyUI) - [1], [2], [3], [4]"
+                )
                 html_content = generate_audio_player_embed(
                     audio_url, text, speaker_info, "Multi-Speaker"
                 )
-                return HTMLResponse(content=html_content,headers={"content-disposition": "inline"})
+                return HTMLResponse(
+                    content=html_content, headers={"content-disposition": "inline"}
+                )
             else:
                 return f"Audio generated successfully!\n\nDownload: {audio_url}"
 

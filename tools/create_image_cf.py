@@ -16,8 +16,10 @@ import uuid
 from typing import Dict, Any, Optional, Callable
 from pydantic import BaseModel, Field
 
-# Import CACHE_DIR from OpenWebUI backend configuration
-from open_webui.config import CACHE_DIR
+from fastapi import Request, UploadFile
+from open_webui.models.users import Users
+from open_webui.routers.files import upload_file_handler
+import io
 
 
 def _get_model_config(model_name: str) -> Dict[str, Any]:
@@ -224,6 +226,8 @@ class Tools:
         steps: int = 4,
         guidance: float = 7.5,
         seed: Optional[int] = None,
+        __user__: Dict[str, Any] = {},
+        __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable] = None,
     ) -> str:
         """
@@ -332,12 +336,9 @@ class Tools:
             # Handle different response formats based on actual Cloudflare API behavior
             content_type = response.headers.get("content-type", "").lower()
 
-            # Process response and save image to cache directory
-            directory = os.path.join(CACHE_DIR, "image", "generations")
-            os.makedirs(directory, exist_ok=True)
-
+            # Process response and save image using upload_file_handler
             filename = f"{uuid.uuid4()}.jpg"
-            save_path = os.path.join(directory, filename)
+            image_binary = None
 
             if "application/json" in content_type:
                 # JSON response - FLUX models return base64
@@ -353,10 +354,8 @@ class Tools:
                     if not image_data:
                         return f"Error: No image data found in response. Keys: {list(result.keys())}"
 
-                    # Decode base64 and save as binary
+                    # Decode base64
                     image_binary = base64.b64decode(image_data)
-                    with open(save_path, "wb") as image_file:
-                        image_file.write(image_binary)
 
                 except (json.JSONDecodeError, Exception) as e:
                     return f"Error processing JSON response: {str(e)}"
@@ -367,15 +366,34 @@ class Tools:
                 if len(image_binary) < 100:
                     return f"Error: Invalid binary image data received"
 
-                with open(save_path, "wb") as image_file:
-                    image_file.write(image_binary)
+            if image_binary:
+                upload_file = UploadFile(
+                    file=io.BytesIO(image_binary),
+                    filename=filename,
+                    headers={"content-type": "image/jpeg"},
+                )
+                current_user = (
+                    Users.get_user_by_id(__user__["id"]) if __user__ else None
+                )
 
-            # Generate the image URL (matching HuggingFace pattern exactly)
-            image_url = f"/cache/image/generations/{filename}"
+                file_item = upload_file_handler(
+                    __request__,
+                    file=upload_file,
+                    metadata={},
+                    process=False,
+                    user=current_user,
+                )
+
+                if file_item and getattr(file_item, "id", None):
+                    file_id = str(getattr(file_item, "id", ""))
+                    image_url = __request__.app.url_path_for(
+                        "get_file_content_by_id", id=file_id
+                    )
+                else:
+                    return "Error: Failed to upload image to storage."
 
             # Debug: Log the image URL that was generated
             print(f"[DEBUG] Generated image URL: {image_url}")
-            print(f"[DEBUG] Image saved to {save_path}")
             print(f"[DEBUG] Event emitter available: {__event_emitter__ is not None}")
 
             # Try event emitters with error handling
