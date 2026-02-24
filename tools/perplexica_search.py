@@ -3,7 +3,7 @@ title: Perplexica Search API Tool
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.1
+version: 0.4.2
 license: MIT
 """
 
@@ -157,7 +157,9 @@ class Tools:
             # Set timeout - total timeout for entire operation
             timeout = aiohttp.ClientTimeout(total=self.valves.TIMEOUT_SECONDS)
 
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(
+                timeout=timeout, read_bufsize=2**20
+            ) as session:
                 # Auto-resolve provider IDs from Perplexica
                 await emit_status("Resolving model providers...")
                 resolved = await resolve_provider_ids(

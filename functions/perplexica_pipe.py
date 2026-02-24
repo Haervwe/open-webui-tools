@@ -3,7 +3,7 @@ title: Perplexica Pipe
 author: haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/open-webui
-version: 0.2.1
+version: 0.2.2
 license: MIT
 requirements: aiohttp
 environment_variables: PERPLEXICA_API_URL
@@ -312,7 +312,9 @@ class Pipe:
         )
 
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(
+                timeout=timeout, read_bufsize=2**20
+            ) as session:
                 # Auto-resolve provider IDs
                 resolved = await self._resolve_provider_ids(session)
 
