@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.0
+version: 1.1.0
 """
 
 import json
@@ -15,7 +15,7 @@ import asyncio
 import uuid
 import os
 from pydantic import BaseModel, Field
-import requests
+
 from fastapi import Request, UploadFile
 from fastapi.responses import HTMLResponse
 from open_webui.models.users import Users
@@ -285,37 +285,52 @@ async def download_audio_to_storage(
         return None
 
 
-def get_loaded_models(api_url: str = "http://localhost:11434") -> list[Dict[str, Any]]:
+async def get_loaded_models_async(
+    api_url: str = "http://localhost:11434",
+) -> list[Dict[str, Any]]:
     """Get all currently loaded models in VRAM"""
     try:
-        response = requests.get(f"{api_url.rstrip('/')}/api/ps")
-        response.raise_for_status()
-        models = response.json().get("models", [])
-        return cast(list[Dict[str, Any]], models)
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{api_url.rstrip('/')}/api/ps") as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return cast(list[Dict[str, Any]], data.get("models", []))
+    except Exception as e:
         print(f"Error fetching loaded models: {e}")
-        raise
+        return []
 
 
-def unload_all_models(api_url: str = "http://localhost:11434") -> dict[str, bool]:
+async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bool:
     """Unload all currently loaded models from VRAM"""
     try:
-        loaded_models = get_loaded_models(api_url)
-        results: Dict[str, bool] = {}
+        loaded_models = await get_loaded_models_async(api_url)
+        if not loaded_models:
+            return True
 
-        for model in loaded_models:
-            model_name = model.get("name", model.get("model", ""))
-            if model_name:
-                payload: Dict[str, Any] = {"model": model_name, "keep_alive": 0}
-                response = requests.post(
-                    f"{api_url.rstrip('/')}/api/generate", json=payload
-                )
-                results[model_name] = response.status_code == 200
+        async with aiohttp.ClientSession() as session:
+            for model in loaded_models:
+                model_name = model.get("name", model.get("model", ""))
+                if model_name:
+                    payload = {"model": model_name, "keep_alive": 0}
+                    async with session.post(
+                        f"{api_url.rstrip('/')}/api/generate", json=payload
+                    ) as resp:
+                        pass
 
-        return results
-    except requests.RequestException as e:
+        for _ in range(5):
+            await asyncio.sleep(1)
+            remaining = await get_loaded_models_async(api_url)
+            if not remaining:
+                print("All models successfully unloaded.")
+                return True
+
+        print("Warning: Some models might still be loaded after timeout.")
+        return False
+
+    except Exception as e:
         print(f"Error unloading models: {e}")
-        return {}
+        return False
 
 
 def generate_audio_player_embed(
@@ -847,7 +862,7 @@ class Tools:
 
         if self.valves.unload_ollama_models:
             # Avoid emitting unload progress; silently perform action
-            unload_all_models(api_url=self.valves.ollama_url)
+            await unload_all_models_async(api_url=self.valves.ollama_url)
 
         if not self.valves.workflow_json:
             return "Error: Workflow JSON not provided in tool valves. Please configure."

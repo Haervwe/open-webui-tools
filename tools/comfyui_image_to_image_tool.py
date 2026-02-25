@@ -4,7 +4,7 @@ description: Edit/transform images using ComfyUI workflows (Flux Kontext or Qwen
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.0
+version: 0.2.0
 license: MIT
 """
 
@@ -15,7 +15,7 @@ import uuid
 import logging
 import aiohttp
 import io
-import requests
+
 from typing import Any, Dict, Optional, Callable, Awaitable, List, Literal
 from urllib.parse import quote
 from pydantic import BaseModel, Field
@@ -255,33 +255,47 @@ DEFAULT_QWEN_EDIT_WORKFLOW: Dict[str, Any] = {
 }
 
 
-def get_loaded_models(api_url: str) -> List[Dict[str, Any]]:
+async def get_loaded_models_async(api_url: str) -> List[Dict[str, Any]]:
+    """Get all currently loaded models in VRAM"""
     try:
-        resp = requests.get(f"{api_url.rstrip('/')}/api/ps", timeout=5)
-        resp.raise_for_status()
-        return resp.json().get("models", [])
-    except requests.RequestException:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{api_url.rstrip('/')}/api/ps", timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return data.get("models", [])
+    except Exception:
         logger.debug("Error fetching loaded Ollama models")
         return []
 
 
-def unload_all_models(api_url: str) -> None:
-    models = get_loaded_models(api_url)
-    if not models:
-        return
-    logger.debug("Unloading %d Ollama models...", len(models))
-    for model in models:
-        model_name = model.get("name") or model.get("model")
-        if model_name:
-            try:
-                payload = {"model": model_name, "keep_alive": 0}
-                requests.post(
-                    f"{api_url.rstrip('/')}/api/generate",
-                    json=payload,
-                    timeout=10,
-                )
-            except requests.RequestException:
-                pass
+async def unload_all_models_async(api_url: str) -> bool:
+    """Unload all currently loaded models from VRAM"""
+    try:
+        models = await get_loaded_models_async(api_url)
+        if not models:
+            return True
+        logger.debug("Unloading %d Ollama models...", len(models))
+        async with aiohttp.ClientSession() as session:
+            for model in models:
+                model_name = model.get("name") or model.get("model")
+                if model_name:
+                    payload = {"model": model_name, "keep_alive": 0}
+                    try:
+                        async with session.post(
+                            f"{api_url.rstrip('/')}/api/generate",
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            pass
+                    except Exception:
+                        pass
+        return True
+    except Exception as e:
+        logger.debug(f"Error unloading models: {e}")
+        return False
 
 
 async def wait_for_completion_ws(
@@ -588,7 +602,6 @@ class Tools:
         :param prompt: Detailed, enhanced instruction with specific visual details, style descriptions, and technical specifications for the image transformation
         """
         try:
-            
             if not __messages__:
                 return "Error: No messages provided. Please attach an image to your message."
 
@@ -610,7 +623,7 @@ class Tools:
             base64_images = base64_images[:3]
 
             if self.valves.unload_ollama_models:
-                unload_all_models(self.valves.ollama_api_url)
+                await unload_all_models_async(self.valves.ollama_api_url)
 
             if self.valves.workflow_type == "Flux_Kontext":
                 base_workflow = DEFAULT_FLUX_KONTEXT_WORKFLOW
@@ -717,8 +730,7 @@ class Tools:
                     }
                 )
 
-            if self.valves.return_html_embed:      
-
+            if self.valves.return_html_embed:
                 html_content = f"""<!DOCTYPE html>
 <html style="margin:0; padding:0; overflow:hidden;">
 <head>

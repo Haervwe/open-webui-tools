@@ -2,15 +2,16 @@
 title: Web Image Search using SearXNG
 author: Tan Yong Sheng
 author_url: https://github.com/tan-yong-sheng
-version: 0.1.0
+version: 0.2.0
 license: MIT
 description: Tool to search and retrieve photos from SearXNG image search
 """
 
-import requests
+import aiohttp
 import json
 from pydantic import BaseModel, Field
 from typing import Callable, Any
+
 
 class EventEmitter:
     def __init__(self, event_emitter: Callable[[dict], Any] = None):
@@ -28,6 +29,7 @@ class EventEmitter:
                     },
                 }
             )
+
 
 class Tools:
     class Valves(BaseModel):
@@ -71,18 +73,24 @@ class Tools:
 
         try:
             await emitter.emit("Sending request to SearXNG instance")
-            resp = requests.get(
-                search_engine_url, params=params, headers=self.headers, timeout=120
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    search_engine_url,
+                    params=params,
+                    headers=self.headers,
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
 
             results = data.get("results", [])
             # Manually limit the number of results to handle cases where the API doesn't respect number_of_results
             limited_results = results[: self.valves.RETURNED_IMAGES_NO]
-            await emitter.emit(f"Retrieved {len(results)} image results, processing {len(limited_results)}")
+            await emitter.emit(
+                f"Retrieved {len(results)} image results, processing {len(limited_results)}"
+            )
 
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             error_message = f"Error during image search: {str(e)}"
             await emitter.emit(
                 status="error",
@@ -99,7 +107,7 @@ class Tools:
                 alt_text = result.get("title", "Image")
                 if img_url:
                     markdown_output += f"![{alt_text}]({img_url}) "
-        
+
         if not markdown_output:
             markdown_output = "No images found for the given query."
 

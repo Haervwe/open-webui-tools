@@ -8,7 +8,7 @@ author_url: https://github.com/Haervwe/open-webui-tools
 description: Edit images using the Flux Kontext workflow API in ComfyUI.
 required_open_webui_version: 0.4.0
 requirements:
-version: 6.0
+version: 6.1
 license: MIT
 
 ComfyUI Required Nodes For Default Workflow:
@@ -37,7 +37,7 @@ import time
 import uuid
 
 import aiohttp
-import requests
+
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 from typing import Dict, Callable, Optional, Union, Any, cast, Awaitable
@@ -1129,7 +1129,7 @@ class Pipe:
             return "No vision model set for this task."
 
         if self.valves.UNLOAD_OLLAMA_MODELS:
-            unload_all_models(api_url=self.valves.OLLAMA_URL)
+            await unload_all_models_async(api_url=self.valves.OLLAMA_URL)
 
         try:
             workflow = json.loads(self.valves.COMFYUI_WORKFLOW_JSON)
@@ -1281,33 +1281,47 @@ class Pipe:
         return body
 
 
-def get_loaded_models(api_url: str = "http://localhost:11434") -> list[Dict[str, Any]]:
+async def get_loaded_models_async(
+    api_url: str = "http://localhost:11434",
+) -> list[Dict[str, Any]]:
     try:
-        response = requests.get(f"{api_url.rstrip('/')}/api/ps", timeout=5)
-        response.raise_for_status()
-        return response.json().get("models", [])
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{api_url.rstrip('/')}/api/ps", timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return data.get("models", [])
+    except Exception as e:
         logger.error(f"Error fetching loaded Ollama models: {e}")
         return []
 
 
-def unload_all_models(api_url: str = "http://localhost:11434") -> None:
+async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bool:
     try:
-        models = get_loaded_models(api_url)
+        models = await get_loaded_models_async(api_url)
         if not models:
-            return
+            return True
 
         logger.info(f"Unloading {len(models)} Ollama models...")
-        for model in models:
-            model_name = model.get("name")
-            if model_name:
-                requests.post(
-                    f"{api_url.rstrip('/')}/api/generate",
-                    json={"model": model_name, "keep_alive": 0},
-                    timeout=10,
-                )
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            for model in models:
+                model_name = model.get("name")
+                if model_name:
+                    try:
+                        async with session.post(
+                            f"{api_url.rstrip('/')}/api/generate",
+                            json={"model": model_name, "keep_alive": 0},
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            pass
+                    except Exception:
+                        pass
+        return True
+    except Exception as e:
         logger.error(f"Error unloading Ollama models: {e}")
+        return False
 
 
 def auto_check_model_loader(workflow: Dict[str, Any]) -> Dict[str, Any]:
