@@ -7,7 +7,7 @@ funding_url: https://github.com/Haervwe/open-webui-tools
 description: Generate videos using Google's Veo 3.1 model via Gemini API.
 required_open_webui_version: 0.4.0
 requirements: google-genai
-version: 1.1
+version: 2.0
 license: MIT
 
 This pipe generates videos using Google's Veo 3.1 model through the Gemini API.

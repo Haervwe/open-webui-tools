@@ -4,7 +4,7 @@ description: Tool to generate speech using VibeVoice workflows via ComfyUI API. 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.0
+version: 1.0.0
 """
 
 import os
@@ -775,10 +775,7 @@ class Tools:
             default=True,
             description="Copy the generated audio to the Open WebUI Storage Backend",
         )
-        owui_base_url: str = Field(
-            default="http://localhost:3000",
-            description="Your Open WebUI base URL",
-        )
+
         show_player_embed: bool = Field(
             default=True,
             description="Show the embedded audio player. If false, only returns download link.",

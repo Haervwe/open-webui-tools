@@ -3,7 +3,7 @@ title: Hugging Face API - Flux Pro Image Generator
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
+version: 1.0.0
 license: MIT
 description: HuggingFace API implementation for text to image generation
 """

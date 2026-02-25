@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.0
+version: 1.0.0
 """
 
 import json
@@ -754,10 +754,7 @@ class Tools:
             default=True,
             description="Copy the generated song to the Open Webui Storage Backend",
         )
-        owui_base_url: str = Field(
-            default="http://localhost:3000",
-            description="Your owui base url",
-        )
+
         show_player_embed: bool = Field(
             default=True,
             description="Show the embedded audio player. If false, only returns download link.",
