@@ -6,7 +6,7 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.1
+version: 0.5.2
 """
 
 import json
@@ -602,6 +602,7 @@ def generate_audio_player_embed(
   var curIdx  = 0;
   var c0      = "{c0}";
   var styleOpen = false;
+  var currentBlobUrl = null;
 
   var aud    = document.getElementById('aud_{pid}');
   var pb     = document.getElementById('pb_{pid}');
@@ -617,6 +618,40 @@ def generate_audio_player_embed(
   var vfill  = document.getElementById('vfill_{pid}');
   var ww     = document.getElementById('ww_{pid}');
   var vBtns  = document.querySelectorAll('.vbtn_{pid}');
+
+  // ── Authenticated fetch helper ──
+  // Reads JWT from localStorage at call-time (same as OWUI's own frontend).
+  // Token is only used in the Authorization header — never in URLs, HTML, or logs.
+  // credentials:'include' sends the session cookie as fallback for cookie-auth setups.
+  function authFetch(url) {{
+    var opts = {{ credentials: 'include' }};
+    try {{
+      var token = localStorage.getItem('token');
+      if (token) {{
+        opts.headers = {{ 'Authorization': 'Bearer ' + token }};
+      }}
+    }} catch(e) {{ /* localStorage blocked — cookie fallback only */ }}
+    return fetch(url, opts);
+  }}
+
+  // Fetch audio as a blob URL for playback (bypasses <audio> auth limitation).
+  // Falls back to direct URL on failure (backward compat with older OWUI).
+  function fetchBlobUrl(url, callback) {{
+    // External URLs (e.g. direct ComfyUI links) don't need auth
+    if (url.indexOf('/api/') === -1) {{
+      callback(url);
+      return;
+    }}
+    authFetch(url).then(function(resp) {{
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.blob();
+    }}).then(function(blob) {{
+      callback(URL.createObjectURL(blob));
+    }}).catch(function() {{
+      // Fallback: try direct URL (works on older OWUI without strict auth)
+      callback(url);
+    }});
+  }}
 
   // Style toggle
   var styleHdr  = document.getElementById('styleHdr_{pid}');
@@ -654,9 +689,11 @@ def generate_audio_player_embed(
 
   function loadTrack(idx) {{
     var t = tracks[idx];
-    aud.src = t.url;
-    dl.href = t.url;
-    dl.download = t.title + '.mp3';
+    // Revoke previous blob URL to prevent memory leaks
+    if (currentBlobUrl) {{
+      URL.revokeObjectURL(currentBlobUrl);
+      currentBlobUrl = null;
+    }}
     pi.innerHTML = PLAY;
     pi.style.marginLeft = '3px';
     setProgress(0);
@@ -666,6 +703,11 @@ def generate_audio_player_embed(
       var a = parseInt(b.dataset.idx) === idx;
       b.style.background = a ? 'rgba(255,255,255,0.88)' : 'rgba(255,255,255,0.18)';
       b.style.color      = a ? c0 : '#fff';
+    }});
+    // Fetch audio with auth and set as blob URL
+    fetchBlobUrl(t.url, function(blobUrl) {{
+      currentBlobUrl = blobUrl;
+      aud.src = blobUrl;
     }});
   }}
 
@@ -707,6 +749,35 @@ def generate_audio_player_embed(
   pt.addEventListener('click', function(e) {{
     var r = pt.getBoundingClientRect();
     aud.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * aud.duration;
+  }});
+
+  // ── Authenticated download handler ──
+  // Uses JS fetch+blob instead of <a href> to include auth headers.
+  // The blob URL is revoked immediately after the download to free memory.
+  dl.addEventListener('click', function(e) {{
+    e.preventDefault();
+    var t = tracks[curIdx];
+    if (t.url.indexOf('/api/') === -1) {{
+      // External URL — normal navigation is fine
+      window.open(t.url, '_blank');
+      return;
+    }}
+    authFetch(t.url).then(function(resp) {{
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.blob();
+    }}).then(function(blob) {{
+      var dlUrl = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = dlUrl;
+      a.download = t.title + '.mp3';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(dlUrl);
+    }}).catch(function(err) {{
+      // Fallback: try direct link
+      window.open(t.url, '_blank');
+    }});
   }});
 
   // Volume

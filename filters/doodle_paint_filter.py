@@ -4,11 +4,12 @@ description: Toggleable filter that opens a paint canvas before sending each mes
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.0
+version: 1.2.0
 license: MIT
 required_open_webui_version: 0.6.5
 """
 
+import open_webui.models.messages
 import logging
 import uuid
 import base64
@@ -16,18 +17,11 @@ import io
 from pydantic import BaseModel, Field
 from typing import Callable, Awaitable, Any, Optional
 
-try:
-    from open_webui.constants import TASKS
-except ImportError:
-    TASKS = None
-
-try:
-    from open_webui.models.files import Files, FileForm
-    from open_webui.storage.provider import Storage
-
-    HAS_FILE_API = True
-except ImportError:
-    HAS_FILE_API = False
+from fastapi import UploadFile
+from open_webui.constants import TASKS
+from open_webui.models.users import Users
+from open_webui.routers.files import upload_file_handler
+from open_webui.utils.misc import get_last_user_message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("doodle_paint")
@@ -55,6 +49,7 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
         self.toggle = True
+        self._last_doodle_file = None
         self.icon = """data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGZpbGw9Im5vbmUiIHZpZXdCb3g9IjAgMCAyNCAyNCIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2U9ImN1cnJlbnRDb2xvciI+PHBhdGggc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiBkPSJNOS41MyAxNi4xMjJhMyAzIDAgMCAwLTUuNzggMS4xMjggMi4yNSAyLjI1IDAgMCAxLTIuNCAxLjYxNCAuMTEuMTEgMCAwIDAgLjA1NS4yMUE0Ljk3NCA0Ljk3NCAwIDAgMCA1LjI1IDIwLjVjLjczIDAgMS40My0uMTYgMi4wNi0uNDM4QTE1LjAxIDE1LjAxIDAgMCAwIDkuNTMgMTYuMTIyWk05LjUzIDE2LjEyMmExNS4wNDIgMTUuMDQyIDAgMCAxIDMuMDktNC42MTFBMTUuMDgyIDE1LjA4MiAwIDAgMSAxOS43NTIgNS4yODVhLjExLjExIDAgMCAxIC4xNjUgMCAuMTEuMTEgMCAwIDEgLjAyNC4wM0ExNC41NSAxNC41NSAwIDAgMSAyMS42IDguNmwuMDQ0LjA2NGExNS4wMTYgMTUuMDE2IDAgMCAxLTIuMDg1IDUuMjE0Yy0uMjQuMzY2LS40OTYuNzItLjc2OCAxLjA2Ii8+PC9zdmc+"""
 
     def _build_canvas_js(self) -> str:
@@ -345,9 +340,11 @@ return (function() {{
 }})()
 """
 
-    def _save_doodle_file(self, data_url: str, user_id: str) -> Optional[dict]:
+    def _save_doodle_file(
+        self, data_url: str, user_id: str, request: Any
+    ) -> Optional[dict]:
         """
-        Save a doodle data-URL as a file using OWUI's internal storage.
+        Save a doodle data-URL as a file using OWUI's upload_file_handler.
 
         Returns a file entry dict suitable for message.files[], or None on
         failure.
@@ -367,40 +364,32 @@ return (function() {{
 
         extension = content_type.split("/")[1]  # e.g. "png"
         raw_bytes = base64.b64decode(b64_data)
+        filename = f"doodle_{uuid.uuid4().hex[:8]}.{extension}"
 
-        file_id = str(uuid.uuid4())
-        filename = f"doodle_{file_id[:8]}.{extension}"
-        storage_filename = f"{file_id}_{filename}"
-
-        # Persist binary content via OWUI Storage provider
-        file_obj = io.BytesIO(raw_bytes)
-        file_obj.name = storage_filename
-        _contents, file_path = Storage.upload_file(file_obj, storage_filename)
-
-        # Create a DB record via OWUI Files model
-        file_item = Files.insert_new_file(
-            user_id,
-            FileForm(
-                id=file_id,
-                filename=filename,
-                path=file_path,
-                data={},
-                meta={
-                    "name": filename,
-                    "content_type": content_type,
-                    "size": len(raw_bytes),
-                },
-            ),
-        )
-
-        if not file_item:
-            logger.error("Doodle Paint: Files.insert_new_file returned None")
+        # Upload via OWUI's native handler (same as all other tools)
+        user = Users.get_user_by_id(user_id)
+        if not user:
+            logger.error("Doodle Paint: could not resolve user")
             return None
 
-        # Return a file entry matching the structure UserMessage.svelte expects
+        file = UploadFile(
+            file=io.BytesIO(raw_bytes),
+            filename=filename,
+            headers={"content-type": content_type},
+        )
+        file_item = upload_file_handler(
+            request=request, file=file, metadata={}, process=False, user=user
+        )
+
+        file_id = getattr(file_item, "id", None)
+        if not file_id:
+            logger.error("Doodle Paint: upload_file_handler returned no id")
+            return None
+
+        file_id = str(file_id)
         return {
             "type": "image",
-            "url": f"{file_id}/content",
+            "url": f"/api/v1/files/{file_id}/content",
             "id": file_id,
             "name": filename,
             "content_type": content_type,
@@ -414,13 +403,12 @@ return (function() {{
         __event_call__: Callable[[Any], Awaitable[Any]] = None,
         __user__: Optional[dict] = None,
         __model__: Optional[dict] = None,
+        __request__: Optional[Any] = None,
         __task__=None,
     ) -> dict:
         # Skip non-default tasks (title generation, search queries, etc.)
         if __task__:
-            if TASKS and __task__ != TASKS.DEFAULT:
-                return body
-            elif not TASKS and __task__ not in ("", "default"):
+            if __task__ != TASKS.DEFAULT:
                 return body
 
         if not __event_call__:
@@ -470,19 +458,16 @@ return (function() {{
         user_id = __user__.get("id", "") if __user__ else ""
         file_entry = None
 
-        if HAS_FILE_API and user_id:
+        if user_id and __request__:
             try:
-                file_entry = self._save_doodle_file(data_url, user_id)
+                file_entry = self._save_doodle_file(data_url, user_id, __request__)
                 if file_entry:
                     logger.info(f"Doodle Paint: file saved (id={file_entry['id']})")
             except Exception as e:
                 logger.error(f"Doodle Paint: failed to save file: {e}")
-        else:
-            if not HAS_FILE_API:
-                logger.warning(
-                    "Doodle Paint: OWUI file API not available, "
-                    "image will only be sent to the LLM."
-                )
+
+        # Store file entry so the outlet can attach it to the response
+        self._last_doodle_file = data_url
 
         # Inject the image into the last user message as multimodal content
         # This ensures the LLM sees the image on the current request
@@ -513,9 +498,7 @@ return (function() {{
             messages[-1] = last_msg
             body["messages"] = messages
 
-        # Emit the file to the assistant response message via event emitter.
-        # This attaches the doodle to the chat history so it persists across
-        # messages (visible in the UI and addressable for image edits).
+        # Emit the doodle as an inline image embed so the user can see it
         if file_entry and __event_emitter__:
             try:
                 await __event_emitter__(
@@ -537,9 +520,8 @@ return (function() {{
                         },
                     }
                 )
-                logger.info("Doodle Paint: file emitted to chat history")
             except Exception as e:
-                logger.error(f"Doodle Paint: failed to emit file event: {e}")
+                logger.error(f"Doodle Paint: failed to emit image embed: {e}")
 
         return body
 
@@ -550,4 +532,34 @@ return (function() {{
         __user__: Optional[dict] = None,
         __model__: Optional[dict] = None,
     ) -> dict:
+        # Attach the doodle file to the assistant response so it persists
+        # in the chat and is accessible for future reference / image edits.
+        data_url = self._last_doodle_file
+        messages = body.get("messages", [])
+        message = get_last_user_message(messages)
+        if message:
+            last_msg = messages[-1]
+            current_content = last_msg.get("content", "")
+
+            # Build multimodal content array
+            content_parts = []
+
+            # Preserve existing content (could already be multimodal)
+            if isinstance(current_content, str):
+                if current_content.strip():
+                    content_parts.append({"type": "text", "text": current_content})
+            elif isinstance(current_content, list):
+                content_parts.extend(current_content)
+
+            # Append the doodle image
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": data_url},
+                }
+            )
+
+        last_msg["content"] = content_parts
+        messages[-1] = last_msg
+        body["messages"] = messages
         return body
