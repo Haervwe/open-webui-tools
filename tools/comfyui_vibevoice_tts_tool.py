@@ -124,6 +124,7 @@ async def wait_for_completion_ws(
     client_id: str,
     max_wait_time: int,
     event_emitter: Optional[Callable[[Any], Awaitable[None]]] = None,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Waits for ComfyUI job completion using WebSocket for real-time updates.
@@ -133,7 +134,7 @@ async def wait_for_completion_ws(
     job_data_output = None
 
     try:
-        async with aiohttp.ClientSession().ws_connect(
+        async with aiohttp.ClientSession(headers=headers).ws_connect(
             f"{comfyui_ws_url}?clientId={client_id}"
         ) as ws:
             async for msg in ws:
@@ -160,7 +161,7 @@ async def wait_for_completion_ws(
                                 )
 
                             # Fetch final job data
-                            async with aiohttp.ClientSession() as session:
+                            async with aiohttp.ClientSession(headers=headers) as session:
                                 async with session.get(
                                     f"{comfyui_http_url}/history/{prompt_id}"
                                 ) as resp:
@@ -234,7 +235,8 @@ def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
 
 
 async def download_audio_to_storage(
-    request: Request, user, comfyui_http_url: str, filename: str, subfolder: str = ""
+    request: Request, user, comfyui_http_url: str, filename: str, subfolder: str = "",
+    headers: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     try:
         file_extension = os.path.splitext(filename)[1] or ".wav"
@@ -253,7 +255,7 @@ async def download_audio_to_storage(
             f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
         )
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_file_url) as resp:
                 if resp.status == 200:
                     audio_content = await resp.read()
@@ -745,6 +747,11 @@ class Tools:
             default="http://localhost:8188",
             description="ComfyUI HTTP API endpoint.",
         )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         single_speaker_workflow: str = Field(
             default=DEFAULT_SINGLE_SPEAKER_WORKFLOW,
             description="Full VibeVoice Single Speaker workflow JSON (string).",
@@ -877,6 +884,10 @@ class Tools:
             comfyui_http_url = self.valves.comfyui_api_url.rstrip("/")
             comfyui_ws_url = comfyui_http_url.replace("http", "ws", 1) + "/ws"
 
+            comfyui_headers = {}
+            if self.valves.comfyui_api_key:
+                comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
             if __event_emitter__:
                 await __event_emitter__(
                     {
@@ -885,7 +896,7 @@ class Tools:
                     }
                 )
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 async with session.post(
                     f"{comfyui_http_url}/prompt",
                     json={"prompt": workflow, "client_id": client_id},
@@ -908,6 +919,7 @@ class Tools:
                 client_id,
                 self.valves.max_wait_time,
                 __event_emitter__,
+                headers=comfyui_headers,
             )
 
             # Extract audio files
@@ -922,7 +934,8 @@ class Tools:
             # Download to cache if requested
             if self.valves.save_local:
                 cache_url = await download_audio_to_storage(
-                    __request__, user, comfyui_http_url, filename, subfolder
+                    __request__, user, comfyui_http_url, filename, subfolder,
+                    headers=comfyui_headers,
                 )
                 if cache_url:
                     audio_url = cache_url
@@ -1047,6 +1060,10 @@ class Tools:
             comfyui_http_url = self.valves.comfyui_api_url.rstrip("/")
             comfyui_ws_url = comfyui_http_url.replace("http", "ws", 1) + "/ws"
 
+            comfyui_headers = {}
+            if self.valves.comfyui_api_key:
+                comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
             if __event_emitter__:
                 await __event_emitter__(
                     {
@@ -1055,7 +1072,7 @@ class Tools:
                     }
                 )
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 async with session.post(
                     f"{comfyui_http_url}/prompt",
                     json={"prompt": workflow, "client_id": client_id},
@@ -1078,6 +1095,7 @@ class Tools:
                 client_id,
                 self.valves.max_wait_time,
                 __event_emitter__,
+                headers=comfyui_headers,
             )
 
             # Extract audio files
@@ -1092,7 +1110,8 @@ class Tools:
             # Download to cache if requested
             if self.valves.save_local:
                 cache_url = await download_audio_to_storage(
-                    __request__, user, comfyui_http_url, filename, subfolder
+                    __request__, user, comfyui_http_url, filename, subfolder,
+                    headers=comfyui_headers,
                 )
                 if cache_url:
                     audio_url = cache_url
