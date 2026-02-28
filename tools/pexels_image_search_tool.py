@@ -4,7 +4,7 @@ description: Tool to search and retrieve high-quality photos and videos from Pex
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.1
+version: 1.1.2
 license: MIT
 """
 

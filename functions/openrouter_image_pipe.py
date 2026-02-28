@@ -3,7 +3,7 @@ title: OpenRouter Image Adapter Pipe
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.0
+version: 1.0.1
 description: OpenRouter Adapter Pipe for Open WebUI Tools.
 Features: Settings/valves: API key, allowed models, use websearch. Async streaming inference.
 Built-in websearch and image generation support.

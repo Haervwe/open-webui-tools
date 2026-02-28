@@ -4,7 +4,7 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.0
+version: 1.1.1
 """
 
 import json

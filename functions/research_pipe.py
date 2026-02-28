@@ -6,7 +6,7 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools
-version: 0.4.8
+version: 0.4.9
 """
 
 from datetime import datetime 

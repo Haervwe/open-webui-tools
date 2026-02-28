@@ -4,7 +4,7 @@ description: Search YouTube videos and display them in an embedded player
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.0
+version: 1.1.1
 license: MIT
 """
 

@@ -4,7 +4,7 @@ description: Edit/transform images using ComfyUI workflows (Flux Kontext or Qwen
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
+version: 0.2.1
 license: MIT
 """
 

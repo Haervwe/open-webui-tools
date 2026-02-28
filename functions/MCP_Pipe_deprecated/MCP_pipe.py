@@ -5,7 +5,7 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.1.0
+version: 0.1.1
 requirements: mcp, mcp-tavily, mcp_server_time
 """
 import logging
