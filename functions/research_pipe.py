@@ -246,7 +246,8 @@ class Pipe:
             default=None, description="Model to use (model id from ollama)"
         )
         TAVILY_API_KEY: str = Field(
-            default="", description="API key for Tavily search service"
+            default="", description="API key for Tavily search service",
+            json_schema_extra={"input": {"type": "password"}},
         )
         MAX_SEARCH_RESULTS: int = Field(
             default=3, description="Maximum number of search results to fetch per query"

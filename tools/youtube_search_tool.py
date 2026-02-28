@@ -55,6 +55,7 @@ class Tools:
         YOUTUBE_API_KEY: str = Field(
             default="",
             description="YouTube Data API v3 key from https://console.cloud.google.com/apis/credentials",
+            json_schema_extra={"input": {"type": "password"}},
         )
         MAX_RESULTS: int = Field(
             default=5, description="Maximum number of search results to return (1-10)"

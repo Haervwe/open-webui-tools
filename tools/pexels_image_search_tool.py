@@ -204,6 +204,7 @@ class Tools:
         PEXELS_API_KEY: str = Field(
             default="",
             description="Pexels API key for accessing photos and videos. Get yours free at https://www.pexels.com/api/",
+            json_schema_extra={"input": {"type": "password"}},
         )
         DEFAULT_PER_PAGE: int = Field(
             default=5,

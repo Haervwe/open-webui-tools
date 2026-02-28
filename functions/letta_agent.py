@@ -53,7 +53,8 @@ class Pipe:
             description="Base URL for the Letta agent API",
         )
         API_Token: str = Field(
-            default="", description="Bearer token for API authentication"
+            default="", description="Bearer token for API authentication",
+            json_schema_extra={"input": {"type": "password"}},
         )
         Task_Model: str = Field(
             default="",

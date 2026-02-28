@@ -36,6 +36,7 @@ class Tools:
         HF_API_KEY: str = Field(
             default=None,
             description="HuggingFace API key for accessing the serverless endpoints",
+            json_schema_extra={"input": {"type": "password"}},
         )
         HF_API_URL: str = Field(
             default="https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-3.5-large-turbo",

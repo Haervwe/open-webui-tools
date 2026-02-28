@@ -68,7 +68,8 @@ class Pipe:
             description="URL for the Mopidy JSON-RPC API endpoint (requires Iris UI installed)",
         )
         YouTube_API_Key: str = Field(
-            default="", description="YouTube Data API key for search"
+            default="", description="YouTube Data API key for search",
+            json_schema_extra={"input": {"type": "password"}},
         )
         Temperature: float = Field(default=0.7, description="Model temperature")
         Max_Search_Results: int = Field(

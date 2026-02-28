@@ -40,6 +40,7 @@ class Pipe:
             title="Google API Key",
             default="",
             description="Google API key for Gemini API access.",
+            json_schema_extra={"input": {"type": "password"}},
         )
         MODEL: str = Field(
             title="Veo Model",

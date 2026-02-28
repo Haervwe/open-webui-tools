@@ -65,7 +65,10 @@ class Pipe:
             default="https://raw.githubusercontent.com/Haervwe/open-webui-tools/main/Extras/UpdatedResumeDataSet.csv",
             description="""URL for the Resumes DB""",
         )
-        RapidAPI_key: str = Field(default="", description="Your  jobs RapidAPI Key")
+        RapidAPI_key: str = Field(
+            default="", description="Your  jobs RapidAPI Key",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         web_search: bool = Field(
             default=False, desciption="Activates web search for relevant job postings."
         )

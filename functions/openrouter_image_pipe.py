@@ -29,7 +29,10 @@ import uuid
 
 class Pipe:
     class Valves(BaseModel):
-        API_KEY: str = Field(default="", description="OpenRouter API key")
+        API_KEY: str = Field(
+            default="", description="OpenRouter API key",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         ALLOWED_MODELS: List[str] = Field(
             default_factory=list, description="Allowed model slugs"
         )
