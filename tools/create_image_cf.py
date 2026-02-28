@@ -213,7 +213,7 @@ class Tools:
 
     class Valves(BaseModel):
         cloudflare_api_token: str = Field(
-            "", description="Your Cloudflare API Token",
+            default="", description="Your Cloudflare API Token",
             json_schema_extra={"input": {"type": "password"}},
         )
         cloudflare_account_id: str = Field("", description="Your Cloudflare Account ID")
