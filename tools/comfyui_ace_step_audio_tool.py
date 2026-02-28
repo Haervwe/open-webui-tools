@@ -31,6 +31,7 @@ async def wait_for_completion_ws(
     client_id: str,
     max_wait_time: int,
     event_emitter: Optional[Callable[[Any], Awaitable[None]]] = None,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Waits for ComfyUI job completion using WebSocket for real-time updates.
@@ -40,7 +41,7 @@ async def wait_for_completion_ws(
     job_data_output = None
 
     try:
-        async with aiohttp.ClientSession().ws_connect(
+        async with aiohttp.ClientSession(headers=headers).ws_connect(
             f"{comfyui_ws_url}?clientId={client_id}"
         ) as ws:
             # Suppress noisy status emissions: UI now logs each message; keep silent during progress
@@ -91,7 +92,7 @@ async def wait_for_completion_ws(
                             # Suppress cached notice
                             pass
 
-                            async with aiohttp.ClientSession() as http_session:
+                            async with aiohttp.ClientSession(headers=headers) as http_session:
                                 async with http_session.get(
                                     f"{comfyui_http_url}/history/{prompt_id}"
                                 ) as resp:
@@ -109,7 +110,7 @@ async def wait_for_completion_ws(
                         ):
                             # Defer success messaging to caller
                             job_data_output = data.get("output", {})
-                            async with aiohttp.ClientSession() as http_session:
+                            async with aiohttp.ClientSession(headers=headers) as http_session:
                                 async with http_session.get(
                                     f"{comfyui_http_url}/history/{prompt_id}"
                                 ) as resp:
@@ -224,6 +225,7 @@ async def download_audio_to_storage(
     filename: str,
     subfolder: str = "",
     song_name: str = "",
+    headers: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     try:
         file_extension = os.path.splitext(filename)[1] or ".mp3"
@@ -246,7 +248,7 @@ async def download_audio_to_storage(
             f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
         )
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_file_url) as response:
                 if response.status == 200:
                     audio_content = await response.read()
@@ -740,6 +742,11 @@ class Tools:
             default="http://localhost:8188",
             description="ComfyUI HTTP API endpoint.",
         )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         model_name: str = Field(
             default="ACE_STEP/ace_step_v1_3.5b.safetensors",
             description="Model name for ACE Step audio generation.",
@@ -873,6 +880,10 @@ class Tools:
         ws_scheme = "wss" if http_api_url.startswith("https") else "ws"
         ws_api_url = f"{ws_scheme}://{http_api_url.split('://', 1)[-1]}/ws"
 
+        comfyui_headers = {}
+        if self.valves.comfyui_api_key:
+            comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
         try:
             workflow_template = json.loads(self.valves.workflow_json)
             active_workflow = json.loads(json.dumps(workflow_template))
@@ -924,7 +935,7 @@ class Tools:
                     }
                 )
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 async with session.post(
                     f"{http_api_url}/prompt",
                     json=payload,
@@ -945,6 +956,7 @@ class Tools:
                 client_id,
                 self.valves.max_wait_time,
                 None,
+                headers=comfyui_headers,
             )
 
             current_user = Users.get_user_by_id(__user__["id"]) if __user__ else None
@@ -964,6 +976,7 @@ class Tools:
                         filename,
                         subfolder,
                         song_title or "",
+                        headers=comfyui_headers,
                     )
                     if not local_audio_url:
                         return "❌ Failed to download generated audio to local cache."
