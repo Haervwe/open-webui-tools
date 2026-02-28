@@ -6,7 +6,7 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools
-version: 0.4.8
+version: 0.4.9
 """
 
 from datetime import datetime 
@@ -246,7 +246,8 @@ class Pipe:
             default=None, description="Model to use (model id from ollama)"
         )
         TAVILY_API_KEY: str = Field(
-            default="", description="API key for Tavily search service"
+            default="", description="API key for Tavily search service",
+            json_schema_extra={"input": {"type": "password"}},
         )
         MAX_SEARCH_RESULTS: int = Field(
             default=3, description="Maximum number of search results to fetch per query"

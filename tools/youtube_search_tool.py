@@ -4,7 +4,7 @@ description: Search YouTube videos and display them in an embedded player
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.0
+version: 1.1.1
 license: MIT
 """
 
@@ -55,6 +55,7 @@ class Tools:
         YOUTUBE_API_KEY: str = Field(
             default="",
             description="YouTube Data API v3 key from https://console.cloud.google.com/apis/credentials",
+            json_schema_extra={"input": {"type": "password"}},
         )
         MAX_RESULTS: int = Field(
             default=5, description="Maximum number of search results to return (1-10)"

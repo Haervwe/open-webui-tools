@@ -3,7 +3,7 @@ title: OpenRouter Image Adapter Pipe
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.0
+version: 1.0.1
 description: OpenRouter Adapter Pipe for Open WebUI Tools.
 Features: Settings/valves: API key, allowed models, use websearch. Async streaming inference.
 Built-in websearch and image generation support.
@@ -29,7 +29,10 @@ import uuid
 
 class Pipe:
     class Valves(BaseModel):
-        API_KEY: str = Field(default="", description="OpenRouter API key")
+        API_KEY: str = Field(
+            default="", description="OpenRouter API key",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         ALLOWED_MODELS: List[str] = Field(
             default_factory=list, description="Allowed model slugs"
         )

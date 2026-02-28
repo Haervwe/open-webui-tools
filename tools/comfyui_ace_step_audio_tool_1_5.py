@@ -6,7 +6,7 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.2
+version: 0.5.3
 """
 
 import json
@@ -31,11 +31,12 @@ async def connect_submit_and_wait(
     prompt_payload: Dict[str, Any],
     client_id: str,
     max_wait_time: int,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     start_time = asyncio.get_event_loop().time()
     prompt_id = None
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=headers) as session:
         ws_url = f"{comfyui_ws_url}?clientId={client_id}"
         try:
             async with session.ws_connect(ws_url) as ws:
@@ -201,6 +202,7 @@ async def download_audio_to_storage(
     filename: str,
     subfolder: str = "",
     song_name: str = "",
+    headers: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     try:
         file_extension = os.path.splitext(filename)[1] or ".mp3"
@@ -223,7 +225,7 @@ async def download_audio_to_storage(
             f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
         )
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_file_url) as response:
                 if response.status == 200:
                     audio_content = await response.read()
@@ -895,6 +897,11 @@ class Tools:
             default="http://localhost:8188",
             description="ComfyUI HTTP API endpoint.",
         )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         unload_ollama_models: bool = Field(
             default=False,
             description="Unload all Ollama models before calling ComfyUI.",
@@ -1160,6 +1167,10 @@ class Tools:
         )
         http_url = self.valves.comfyui_api_url
 
+        comfyui_headers = {}
+        if self.valves.comfyui_api_key:
+            comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
         # Use the gen_seed to deterministically pick a palette colour
         palette_seed = gen_seed % 1000000
 
@@ -1178,7 +1189,8 @@ class Tools:
                 )
 
             result_data = await connect_submit_and_wait(
-                ws_url, http_url, prompt_payload, client_id, self.valves.max_wait_time
+                ws_url, http_url, prompt_payload, client_id, self.valves.max_wait_time,
+                headers=comfyui_headers,
             )
 
             audio_files = extract_audio_files(result_data)
@@ -1200,7 +1212,8 @@ class Tools:
 
                 if user_obj and __request__:
                     storage_url = await download_audio_to_storage(
-                        __request__, user_obj, http_url, fname, subfolder, track_title
+                        __request__, user_obj, http_url, fname, subfolder, track_title,
+                        headers=comfyui_headers,
                     )
                     if storage_url:
                         track_list.append({"title": track_title, "url": storage_url})

@@ -4,7 +4,7 @@ description: Edit/transform images using ComfyUI workflows (Flux Kontext or Qwen
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
+version: 0.2.1
 license: MIT
 """
 
@@ -304,9 +304,10 @@ async def wait_for_completion_ws(
     prompt_id: str,
     client_id: str,
     max_wait_time: int,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     start_time = time.monotonic()
-    async with aiohttp.ClientSession().ws_connect(
+    async with aiohttp.ClientSession(headers=headers).ws_connect(
         f"{comfyui_ws_url}?clientId={client_id}"
     ) as ws:
         async for msg in ws:
@@ -320,7 +321,7 @@ async def wait_for_completion_ws(
                     data = message.get("data", {})
 
                     if msg_type == "executed" and data.get("prompt_id") == prompt_id:
-                        async with aiohttp.ClientSession() as http_session:
+                        async with aiohttp.ClientSession(headers=headers) as http_session:
                             async with http_session.get(
                                 f"{comfyui_http_url}/history/{prompt_id}"
                             ) as resp:
@@ -383,12 +384,13 @@ async def download_and_upload_to_owui(
     subfolder: str,
     request: Any,
     user: Any,
+    headers: Optional[Dict[str, str]] = None,
 ) -> tuple[str, bool]:
     subfolder_param = f"&subfolder={quote(subfolder)}" if subfolder else ""
     comfyui_view_url = f"{comfyui_http_url}/view?filename={quote(filename)}&type=output{subfolder_param}"
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_view_url) as response:
                 if response.status != 200:
                     return comfyui_view_url, False
@@ -526,6 +528,11 @@ class Tools:
         comfyui_api_url: str = Field(
             default="http://localhost:8188", description="ComfyUI HTTP API endpoint."
         )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         workflow_type: Literal["Flux_Kontext", "Qwen_Image_Edit", "Custom"] = Field(
             default="Qwen_Image_Edit", description="Workflow to use for image editing."
         )
@@ -648,6 +655,10 @@ class Tools:
                 "client_id": client_id,
             }
 
+            comfyui_headers = {}
+            if self.valves.comfyui_api_key:
+                comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
             if __event_emitter__:
                 if self.valves.workflow_type == "Custom":
                     status_message = "🎨 Editing image..."
@@ -665,7 +676,7 @@ class Tools:
                     }
                 )
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 async with session.post(
                     f"{http_api_url}/prompt",
                     json=payload,
@@ -684,6 +695,7 @@ class Tools:
                 prompt_id,
                 client_id,
                 self.valves.max_wait_time,
+                headers=comfyui_headers,
             )
 
             image_files = extract_image_files(job_data)
@@ -716,7 +728,8 @@ class Tools:
                     user = Users.get_user_by_id(user_id)
 
             image_url, uploaded = await download_and_upload_to_owui(
-                http_api_url, filename, subfolder, __request__, user
+                http_api_url, filename, subfolder, __request__, user,
+                headers=comfyui_headers,
             )
 
             if __event_emitter__:

@@ -4,7 +4,7 @@ description: Tool to search and retrieve high-quality photos and videos from Pex
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.1
+version: 1.1.2
 license: MIT
 """
 
@@ -204,6 +204,7 @@ class Tools:
         PEXELS_API_KEY: str = Field(
             default="",
             description="Pexels API key for accessing photos and videos. Get yours free at https://www.pexels.com/api/",
+            json_schema_extra={"input": {"type": "password"}},
         )
         DEFAULT_PER_PAGE: int = Field(
             default=5,

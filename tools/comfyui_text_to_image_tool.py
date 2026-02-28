@@ -4,7 +4,7 @@ description: Generate images using ComfyUI Qwen Image workflow. Uses ComfyUI HTT
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
+version: 0.2.1
 license: MIT
 """
 
@@ -171,10 +171,11 @@ async def wait_for_completion_ws(
     prompt_id: str,
     client_id: str,
     max_wait_time: int,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Wait for ComfyUI job completion via WebSocket"""
     start_time = time.monotonic()
-    async with aiohttp.ClientSession().ws_connect(
+    async with aiohttp.ClientSession(headers=headers).ws_connect(
         f"{comfyui_ws_url}?clientId={client_id}"
     ) as ws:
         async for msg in ws:
@@ -188,7 +189,7 @@ async def wait_for_completion_ws(
                     data = message.get("data", {})
 
                     if msg_type == "executed" and data.get("prompt_id") == prompt_id:
-                        async with aiohttp.ClientSession() as http_session:
+                        async with aiohttp.ClientSession(headers=headers) as http_session:
                             async with http_session.get(
                                 f"{comfyui_http_url}/history/{prompt_id}"
                             ) as resp:
@@ -249,13 +250,14 @@ async def download_and_upload_to_owui(
     subfolder: str,
     request: Any,
     user: Any,
+    headers: Optional[Dict[str, str]] = None,
 ) -> tuple[str, bool]:
     """Download image from ComfyUI and upload to OpenWebUI"""
     subfolder_param = f"&subfolder={quote(subfolder)}" if subfolder else ""
     comfyui_view_url = f"{comfyui_http_url}/view?filename={quote(filename)}&type=output{subfolder_param}"
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_view_url) as response:
                 if response.status != 200:
                     return comfyui_view_url, False
@@ -302,6 +304,11 @@ class Tools:
     class Valves(BaseModel):
         comfyui_api_url: str = Field(
             default="http://localhost:8188", description="ComfyUI HTTP API endpoint."
+        )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
         )
         custom_workflow: Optional[Dict[str, Any]] = Field(
             default=None,
@@ -408,8 +415,13 @@ class Tools:
             )
             comfyui_ws_url = f"{comfyui_ws_url}/ws"
 
+            # Build auth headers for ComfyUI
+            comfyui_headers = {}
+            if self.valves.comfyui_api_key:
+                comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
             payload = {"prompt": workflow, "client_id": client_id}
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 async with session.post(
                     f"{comfyui_http_url}/prompt", json=payload
                 ) as resp:
@@ -440,6 +452,7 @@ class Tools:
                 prompt_id,
                 client_id,
                 self.valves.max_wait_time,
+                comfyui_headers,
             )
 
             # Extract image files
@@ -455,6 +468,7 @@ class Tools:
                     img_info["subfolder"],
                     __request__,
                     Users.get_user_by_id(__user__["id"]) if __user__ else None,
+                    comfyui_headers,
                 )
                 image_urls.append(url)
 

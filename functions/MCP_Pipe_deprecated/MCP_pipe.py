@@ -5,7 +5,7 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 git: https://github.com/Haervwe/open-webui-tools  
-version: 0.1.0
+version: 0.1.1
 requirements: mcp, mcp-tavily, mcp_server_time
 """
 import logging
@@ -438,7 +438,10 @@ When a user asks a question:
 Do not fabricate tool names or parameters. Only use the exact tools and parameters listed above.""",
             description="MCP client system prompt",
         )
-        OPENAI_API_KEY: str = Field(default="1111", description="OpenAI API key")
+        OPENAI_API_KEY: str = Field(
+            default="1111", description="OpenAI API key",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         OPENAI_API_BASE: str = Field(
             default="http://host.docker.internal:11434/v1",
             description="OpenAI API base URL",

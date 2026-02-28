@@ -3,7 +3,7 @@ title: Cloudflare Workers AI Image Generator
 author: tan-yong-sheng
 author_url: https://github.com/tan-yong-sheng
 description: Generate images using Cloudflare Workers AI text-to-image models with preprocessing for different model types
-version: 1.1.0
+version: 1.1.1
 license: MIT
 requirements: aiohttp
 """
@@ -212,7 +212,10 @@ class Tools:
         self.citation = False
 
     class Valves(BaseModel):
-        cloudflare_api_token: str = Field("", description="Your Cloudflare API Token")
+        cloudflare_api_token: str = Field(
+            default="", description="Your Cloudflare API Token",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         cloudflare_account_id: str = Field("", description="Your Cloudflare Account ID")
         default_model: str = Field(
             "@cf/black-forest-labs/flux-1-schnell",

@@ -4,7 +4,7 @@ description: Generate video from text prompt via ComfyUI workflow JSON. Uses Com
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.0
+version: 0.3.1
 license: MIT
 """
 
@@ -237,11 +237,12 @@ async def connect_submit_and_wait(
     prompt_payload: Dict[str, Any],
     client_id: str,
     max_wait_time: int,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     start_time = asyncio.get_event_loop().time()
     prompt_id = None
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=headers) as session:
         ws_url = f"{comfyui_ws_url}?clientId={client_id}"
         try:
             async with session.ws_connect(ws_url) as ws:
@@ -411,13 +412,14 @@ async def download_and_upload_to_owui(
     subfolder: str,
     request: Any,
     user: Any,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, bool]:
     """Download video from ComfyUI and upload to OpenWebUI."""
     subfolder_param = f"&subfolder={quote(subfolder)}" if subfolder else ""
     comfyui_view_url = f"{comfyui_http_url}/api/viewvideo?filename={quote(filename)}&type=output{subfolder_param}"
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_view_url) as response:
                 response.raise_for_status()
                 content = await response.read()
@@ -448,6 +450,11 @@ class Tools:
     class Valves(BaseModel):
         comfyui_api_url: str = Field(
             default="http://localhost:8188", description="ComfyUI HTTP API endpoint."
+        )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
         )
         workflow_json: str = Field(
             default=json.dumps(DEFAULT_WORKFLOW),
@@ -546,6 +553,10 @@ class Tools:
                 "client_id": client_id,
             }
 
+            comfyui_headers = {}
+            if self.valves.comfyui_api_key:
+                comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
             if __event_emitter__:
                 await __event_emitter__(
                     {
@@ -575,6 +586,7 @@ class Tools:
                 payload,
                 client_id,
                 self.valves.max_wait_time,
+                headers=comfyui_headers,
             )
 
             # --- Extract video files ---
@@ -595,6 +607,7 @@ class Tools:
                 video_info["subfolder"],
                 __request__,
                 current_user,
+                headers=comfyui_headers,
             )
 
             if __event_emitter__:

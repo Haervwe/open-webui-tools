@@ -8,7 +8,7 @@ author_url: https://github.com/Haervwe/open-webui-tools
 description: Edit images using the Flux Kontext workflow API in ComfyUI.
 required_open_webui_version: 0.4.0
 requirements:
-version: 6.1
+version: 6.1.1
 license: MIT
 
 ComfyUI Required Nodes For Default Workflow:
@@ -170,6 +170,12 @@ class Pipe:
             title="ComfyUI Address",
             default="http://127.0.0.1:8188",
             description="Address of the running ComfyUI server.",
+        )
+        COMFYUI_API_KEY: str = Field(
+            title="ComfyUI API Key",
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
         )
         COMFYUI_WORKFLOW_JSON: str = Field(
             title="ComfyUI Workflow JSON",
@@ -567,9 +573,12 @@ class Pipe:
     async def wait_for_job_signal(
         self, ws_api_url: str, prompt_id: str, event_emitter: Callable[..., Any]
     ) -> bool:
+        comfyui_headers = {}
+        if self.valves.COMFYUI_API_KEY:
+            comfyui_headers["Authorization"] = f"Bearer {self.valves.COMFYUI_API_KEY}"
         start_time = asyncio.get_event_loop().time()
         try:
-            async with aiohttp.ClientSession().ws_connect(
+            async with aiohttp.ClientSession(headers=comfyui_headers).ws_connect(
                 f"{ws_api_url}?clientId={self.client_id}"
             ) as ws:
                 async for msg in ws:
@@ -1150,8 +1159,12 @@ class Pipe:
         )
         logger.info(f"Generated workflow: {workflow}")
 
+        comfyui_headers = {}
+        if self.valves.COMFYUI_API_KEY:
+            comfyui_headers["Authorization"] = f"Bearer {self.valves.COMFYUI_API_KEY}"
+
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 prompt_id = await self.queue_prompt(session, workflow)
                 if not prompt_id:
                     await self.emit_status(
