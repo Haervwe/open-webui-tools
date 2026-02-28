@@ -26,6 +26,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **ComfyUI ACE Step Audio (Legacy)** - Advanced music generation
 - **ComfyUI Text-to-Video** - Generate short videos from text using ComfyUI (default WAN 2.2 workflow)
 - **Flux Kontext ComfyUI** - Professional image editing
+- **OpenWeatherMap Forecast Tool** - Interactive weather widget with current conditions and forecasts
 
 ### 🔄 **Function Pipes**
 
@@ -107,27 +108,28 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 10. [ComfyUI ACE Step 1.5 Audio Tool](#comfyui-ace-step-1-5-audio-tool)
 11. [ComfyUI ACE Step Audio Tool (Legacy)](#comfyui-ace-step-audio-tool-legacy)
 12. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
-13. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-14. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-15. [Planner Agent v2](#planner-agent-v2)
-16. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-17. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-18. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-19. [Mopidy Music Controller](#mopidy-music-controller)
-20. [Letta Agent Pipe](#letta-agent-pipe)
-21. [Perplexica Pipe](#perplexica-pipe)
-22. [OpenRouter Image Pipe](#openrouter-image-pipe)
-23. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-24. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-25. [Semantic Router Filter](#semantic-router-filter)
-26. [Full Document Filter](#full-document-filter)
-27. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-28. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-29. [Installation](#installation)
-30. [Contributing](#contributing)
-31. [License](#license)
-32. [Credits](#credits)
-33. [Support](#support)
+13. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
+14. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+15. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+16. [Planner Agent v2](#planner-agent-v2)
+17. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+18. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+19. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+20. [Mopidy Music Controller](#mopidy-music-controller)
+21. [Letta Agent Pipe](#letta-agent-pipe)
+22. [Perplexica Pipe](#perplexica-pipe)
+23. [OpenRouter Image Pipe](#openrouter-image-pipe)
+24. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+25. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+26. [Semantic Router Filter](#semantic-router-filter)
+27. [Full Document Filter](#full-document-filter)
+28. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+29. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+30. [Installation](#installation)
+31. [Contributing](#contributing)
+32. [License](#license)
+33. [Credits](#credits)
+34. [Support](#support)
 ---
 
 ## 🧪 Tools
@@ -775,6 +777,36 @@ Generate a 3 second shot of "a cyberpunk panda skating through neon city streets
 - Extracts produced video files and optionally uploads them to Open WebUI storage for inline embedding
 - Optional Ollama VRAM unloading to free memory before runs
 - Configurable prompt node and wait timeout
+
+---
+
+### OpenWeatherMap Forecast Tool
+
+### Description
+
+Tool that fetches weather forecasts using the OpenWeatherMap API and displays an interactive HTML weather widget with current conditions, hourly, and daily forecasts. Supports both the free 2.5 API and the premium One Call 3.0 API.
+
+### Configuration
+
+- `openweathermap_api_key` (str): Your OpenWeatherMap API key (required)
+- `api_version` (str): API version: '2.5' (free, includes current + 5-day/3h forecast) or '3.0' (One Call API, requires separate subscription) (default: `2.5`)
+- `units` (str): Units of measurement: 'metric', 'imperial', or 'standard' (default: `metric`)
+- `language` (str): Language code for weather descriptions (default: `en`)
+- `show_weather_embed` (bool): Show the embedded weather widget (default: `True`)
+
+### Usage
+
+- **Example:**
+
+  ```python
+  What is the weather like in Tokyo, JP?
+  ```
+
+- Fetches current conditions, hourly forecast, and multi-day daily forecast
+- Displays an interactive weather widget and returns a text summary for the LLM
+
+![OpenWeatherMap Forecast Tool](img/openweathermap_tool.png)
+*Example OpenWeatherMap Forecast Tool widget*
 
 ---
 
