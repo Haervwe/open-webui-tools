@@ -3,7 +3,7 @@ title: Perplexica Pipe
 author: haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/open-webui
-version: 0.2.2
+version: 0.3.1
 license: MIT
 requirements: aiohttp
 environment_variables: PERPLEXICA_API_URL
@@ -12,7 +12,6 @@ environment_variables: PERPLEXICA_API_URL
 import json
 from typing import List, Union, Dict, Any, Literal
 from pydantic import BaseModel, Field
-from dataclasses import dataclass
 from datetime import datetime
 from open_webui.constants import TASKS
 from open_webui.utils.chat import generate_chat_completion
@@ -37,8 +36,9 @@ class Pipe:
         )
         task_model: str = Field(default="gpt-4o-mini")
         max_history_pairs: int = Field(default=12)
-        perplexica_timeout_ms: int = Field(
-            default=1500, description="Perplexica HTTP socket read timeout (ms)"
+        perplexica_timeout_s: int = Field(
+            default=120,
+            description="Total request timeout in seconds (research can be slow)",
         )
 
     class UserValves(BaseModel):
@@ -65,63 +65,56 @@ class Pipe:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
 
     # ---------- Emit helpers ----------
-    async def emit_status_basic(
+    async def _emit(self, payload: dict):
+        if self.__current_event_emitter__:
+            await self.__current_event_emitter__(payload)
+
+    async def emit_status(
         self,
         description: str,
         done: bool,
         error: bool = False,
-        action: str = "web_search",
     ):
-        data = {"action": action, "description": description, "done": done}
+        data = {"action": "web_search", "description": description, "done": done}
         if error:
             data["error"] = True
-        payload = {"type": "status", "data": data}
-        if not self.__current_event_emitter__:
-            return
-        await self.__current_event_emitter__(payload)
+        await self._emit({"type": "status", "data": data})
 
-    async def emit_web_results(
-        self, urls: List[str], items: List[dict], action: str = "web_search"
-    ):
-        data = {
-            "action": action,
-            "description": "Searched {{count}} sites",
-            "done": True,
-            "urls": urls,
-            "items": items,
-        }
-        payload = {"type": "status", "data": data}
-        if not self.__current_event_emitter__:
-            return
-        await self.__current_event_emitter__(payload)
+    async def emit_web_results(self, urls: List[str], items: List[dict]):
+        """Emit the 'searched N sites' status bubble with clickable source links."""
+        await self._emit(
+            {
+                "type": "status",
+                "data": {
+                    "action": "web_search",
+                    "description": "Searched {{count}} sites",
+                    "done": True,
+                    "urls": urls,
+                    "items": items,
+                },
+            }
+        )
 
-    async def emit_message(self, message: str, is_stream: bool = False):
-        payload = {
-            "type": "message",
-            "data": {"content": message, "is_stream": is_stream},
-        }
-        if not self.__current_event_emitter__:
-            return
-        await self.__current_event_emitter__(payload)
+    async def emit_message(self, content: str):
+        await self._emit({"type": "message", "data": {"content": content}})
 
     async def emit_citation(self, title: str, url: str, content: str = ""):
-        payload = {
-            "type": "citation",
-            "data": {
-                "document": [content or title or url],
-                "metadata": [
-                    {
-                        "date_accessed": datetime.utcnow().isoformat() + "Z",
-                        "source": title or url,
-                        "url": url,
-                    }
-                ],
-                "source": {"name": title or url, "url": url},
-            },
-        }
-        if not self.__current_event_emitter__:
-            return
-        await self.__current_event_emitter__(payload)
+        await self._emit(
+            {
+                "type": "citation",
+                "data": {
+                    "document": [content or title or url],
+                    "metadata": [
+                        {
+                            "date_accessed": datetime.utcnow().isoformat() + "Z",
+                            "source": title or url,
+                            "url": url,
+                        }
+                    ],
+                    "source": {"name": title or url, "url": url},
+                },
+            }
+        )
 
     # ---------- Main entry ----------
     async def pipe(
@@ -163,10 +156,8 @@ class Pipe:
         system_instructions = self._extract_system_instructions(body)
         history_pairs = self._build_history_pairs(body.get("messages", []))
 
-        # Start status
-        await self.emit_status_basic(
-            "Searching the web", done=False, action="web_search"
-        )
+        # Signal search start
+        await self.emit_status("Searching the web…", done=False)
 
         response = await self._search_perplexica(
             query=user_input,
@@ -176,27 +167,35 @@ class Pipe:
         )
 
         if not stream:
+            # Non-stream: sources → citations → web_results → message
             urls: List[str] = []
             items: List[dict] = []
             if isinstance(response, dict) and response.get("sources"):
                 for src in response["sources"]:
-                    await self.emit_citation(
-                        src.get("title", ""), src.get("url", ""), src.get("content", "")
-                    )
-                    if src.get("url"):
-                        urls.append(src["url"])
-                    items.append(
-                        {"title": src.get("title", ""), "url": src.get("url", "")}
-                    )
+                    title, link, content, snippet = self._parse_source(src)
+                    await self.emit_citation(title, link, content)
+                    if link:
+                        urls.append(link)
+                        items.append(
+                            {
+                                "title": title,
+                                "url": link,
+                                "link": link,
+                                "source": link,
+                                "snippet": snippet,
+                                "favicon": None,
+                            }
+                        )
+
+            await self.emit_web_results(urls, items)
+
+            msg = ""
             if isinstance(response, dict):
-                if response.get("message"):
-                    await self.emit_message(response["message"], is_stream=False)
-                await self.emit_web_results(urls, items, action="web_search")
-                return response.get("message", "")
+                msg = response.get("message", "")
             else:
-                await self.emit_message(str(response), is_stream=False)
-                await self.emit_web_results(urls, items, action="web_search")
-                return str(response)
+                msg = str(response)
+
+            return msg
 
         # Streaming: handled in handler; bare return
         return
@@ -254,7 +253,6 @@ class Pipe:
     async def _resolve_provider_ids(self, session: aiohttp.ClientSession) -> dict:
         """Fetch /api/providers from Perplexica and resolve provider IDs for the configured models."""
         base = self.valves.perplexica_api_url.rstrip("/")
-        # Derive base URL: strip /api/search if present to get the root
         if base.endswith("/api/search"):
             base = base[: -len("/api/search")]
         providers_url = f"{base}/api/providers"
@@ -306,16 +304,13 @@ class Pipe:
             return "Perplexica search is disabled"
 
         headers = {"Content-Type": "application/json"}
-
-        timeout = aiohttp.ClientTimeout(
-            total=None, sock_read=self.valves.perplexica_timeout_ms / 1000
-        )
+        timeout = aiohttp.ClientTimeout(total=self.valves.perplexica_timeout_s)
 
         try:
             async with aiohttp.ClientSession(
                 timeout=timeout, read_bufsize=2**20
             ) as session:
-                # Auto-resolve provider IDs
+                # Auto-resolve provider IDs via /api/providers
                 resolved = await self._resolve_provider_ids(session)
 
                 request_body: Dict[str, Any] = {
@@ -331,15 +326,11 @@ class Pipe:
                     "sources": [self.__user_valves__.perplexica_sources],
                     "query": query,
                     "history": history_pairs,
-                    "systemInstructions": system_instructions or None,
                     "stream": stream,
                 }
 
-                request_body = {
-                    k: v
-                    for k, v in request_body.items()
-                    if v not in (None, "", "default")
-                }
+                if system_instructions:
+                    request_body["systemInstructions"] = system_instructions
 
                 async with session.post(
                     self.valves.perplexica_api_url, json=request_body, headers=headers
@@ -354,110 +345,132 @@ class Pipe:
                         return self._render_non_stream_response(data)
 
         except aiohttp.ClientResponseError as e:
-            await self.emit_status_basic(
-                f"Error: {e.status} {e.message}",
-                done=True,
-                error=True,
-                action="web_search",
+            await self.emit_status(
+                f"Search error: {e.status} {e.message}", done=True, error=True
             )
             return f"HTTP error: {e.status} {e.message}"
         except Exception as e:
-            await self.emit_status_basic(
-                f"Error: {str(e)}", done=True, error=True, action="web_search"
-            )
+            await self.emit_status(f"Search error: {str(e)}", done=True, error=True)
             return f"Error: {str(e)}"
 
     async def _handle_streaming_response(self, resp: aiohttp.ClientResponse) -> None:
-        buffer: List[str] = []
-        web_results_emitted = False
+        """
+        Perplexica stream event types (newline-delimited JSON):
+          {"type": "init",     "data": "Stream connected"}
+          {"type": "sources",  "data": [...]}   -- search result documents
+          {"type": "response", "data": "chunk"} -- answer text token
+          {"type": "done"}                       -- end of stream
+
+        Correct Open WebUI event order:
+          1. status(searching, done=False)           ← already emitted before calling this
+          2. status(done=True, urls/items)           ← web_results bubble w/ source links
+          3. citation × N                            ← individual citation cards
+          4. message chunks                          ← streamed answer tokens
+        """
         urls: List[str] = []
         items: List[dict] = []
-
-        def add_source(src: dict):
-            meta = src.get("metadata", {}) or {}
-            title = meta.get("title") or src.get("title") or "Untitled source"
-            link = (
-                meta.get("url")
-                or meta.get("link")
-                or meta.get("source")
-                or src.get("url")
-                or src.get("link")
-                or ""
-            )
-            link = str(link).strip()
-            if not (link.startswith("http://") or link.startswith("https://")):
-                link = ""  # invalidate non-http(s)
-            content = src.get("pageContent", "") or meta.get("content", "")
-            snippet = meta.get("snippet", "") or content[:200]
-
-            if link:
-                if link not in urls:
-                    urls.append(link)
-                items.append(
-                    {
-                        "title": title,
-                        "url": link,
-                        "link": link,
-                        "source": link,
-                        "snippet": snippet,
-                        "favicon": None,
-                    }
-                )
-            # items without a link are ignored for web_results; still return for citations
-            return title, link, content
+        sources_emitted = False
+        got_any_event = False
 
         async for raw_line in resp.content:
-            line = raw_line.decode().strip()
+            line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
+
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
 
             etype = event.get("type")
+            got_any_event = True
+
             if etype == "init":
+                # Connection confirmed — nothing to show, status already emitted
                 continue
-            if etype == "sources":
-                sources = event.get("data", []) or []
-                for src in sources:
-                    title, link, content = add_source(src)
+
+            elif etype == "sources":
+                # Collect all sources first
+                raw_sources = event.get("data") or []
+                for src in raw_sources:
+                    title, link, content, snippet = self._parse_source(src)
+                    if link:
+                        if link not in urls:
+                            urls.append(link)
+                        items.append(
+                            {
+                                "title": title,
+                                "url": link,
+                                "link": link,
+                                "source": link,
+                                "snippet": snippet,
+                                "favicon": None,
+                            }
+                        )
+
+                # 1) emit individual citation cards first (so they exist before the bubble)
+                for src in raw_sources:
+                    title, link, content, snippet = self._parse_source(src)
                     await self.emit_citation(title, link, content)
-                if not web_results_emitted and urls:
-                    await self.emit_web_results(urls, items, action="web_search")
-                    web_results_emitted = True
+
+                # 2) update the status bubble to "done" with source links
+                await self.emit_web_results(urls, items)
+                sources_emitted = True
+
             elif etype == "response":
+                # If we somehow got a response before sources, close the status first
+                if not sources_emitted:
+                    await self.emit_web_results(urls, items)
+                    sources_emitted = True
+
                 chunk = event.get("data", "")
                 if chunk:
-                    buffer.append(chunk)
-                    await self.emit_message(chunk, is_stream=True)
+                    await self.emit_message(chunk)
+
             elif etype == "done":
-                if not web_results_emitted and urls:
-                    await self.emit_web_results(urls, items, action="web_search")
-                    web_results_emitted = True
+                # Ensure status is always closed
+                if not sources_emitted:
+                    await self.emit_web_results(urls, items)
+                    sources_emitted = True
                 return
 
-        if not web_results_emitted and urls:
-            await self.emit_web_results(urls, items, action="web_search")
-        return
+        # Stream ended without a "done" event (e.g. SearXNG error killed connection)
+        if not sources_emitted:
+            if got_any_event:
+                # We got init but then a hard error — show error status
+                await self.emit_status(
+                    "Search failed — SearXNG or upstream error", done=True, error=True
+                )
+            else:
+                await self.emit_web_results([], [])
+
+    def _parse_source(self, src: dict):
+        """Extract (title, url, content, snippet) from a Perplexica source document."""
+        meta = src.get("metadata", {}) or {}
+        title = meta.get("title") or src.get("title") or "Untitled source"
+        link = (
+            meta.get("url")
+            or meta.get("link")
+            or meta.get("source")
+            or src.get("url")
+            or src.get("link")
+            or ""
+        )
+        link = str(link).strip()
+        if not (link.startswith("http://") or link.startswith("https://")):
+            link = ""
+        content = (
+            src.get("content", "")
+            or src.get("pageContent", "")
+            or meta.get("content", "")
+        )
+        snippet = meta.get("snippet", "") or content[:200]
+        return title, link, content, snippet
 
     def _normalize_sources(self, sources: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         normalized = []
         for src in sources or []:
-            meta = src.get("metadata", {}) or {}
-            title = meta.get("title") or src.get("title") or "Untitled source"
-            link = (
-                meta.get("url")
-                or meta.get("link")
-                or meta.get("source")
-                or src.get("url")
-                or src.get("link")
-                or ""
-            )
-            link = str(link).strip()
-            if not (link.startswith("http://") or link.startswith("https://")):
-                link = ""
-            content = src.get("pageContent", "") or meta.get("content", "")
+            title, link, content, snippet = self._parse_source(src)
             normalized.append(
                 {
                     "title": title,

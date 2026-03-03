@@ -3,7 +3,7 @@ title: Perplexica Search API Tool
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.2
+version: 0.4.3
 license: MIT
 """
 
@@ -274,8 +274,10 @@ class Tools:
                                                 f"Invalid link format, skipping: {link[:100] if link else 'empty'}"
                                             )
                                         link = ""
-                                    content = src.get("pageContent", "") or meta.get(
-                                        "content", ""
+                                    content = (
+                                        src.get("content", "")
+                                        or src.get("pageContent", "")
+                                        or meta.get("content", "")
                                     )
 
                                     if self.valves.DEBUG:
