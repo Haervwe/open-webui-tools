@@ -10,6 +10,7 @@ import logging
 import json
 import re
 from typing import Callable, Awaitable, Any, Optional
+import time
 from pydantic import BaseModel, Field
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
@@ -44,12 +45,16 @@ THINK_CLOSE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+SPEAKER_COLORS = ["🔴", "🔵", "🟢", "🟡", "🟣", "🟠", "🟤", "⚫", "⚪"]
+
 
 def clean_thinking_tags(message: str) -> str:
     complete_pattern = re.compile(
         r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>"
         r"|"
-        r"\|begin_of_thought\|.*?\|end_of_thought\|",
+        r"\|begin_of_thought\|.*?\|end_of_thought\|"
+        r"|"
+        r"<details\s+type=[\"']reasoning[\"'][^>]*>.*?</details>",
         re.DOTALL | re.IGNORECASE,
     )
     cleaned = re.sub(complete_pattern, "", message)
@@ -71,7 +76,9 @@ def clean_thinking_tags(message: str) -> str:
     orphan_open_pattern = re.compile(
         r"<(?:think|thinking|reason|reasoning|thought|Thought)>"
         r"|"
-        r"\|begin_of_thought\|",
+        r"\|begin_of_thought\|"
+        r"|"
+        r"<details[^>]*>",
         re.IGNORECASE,
     )
     cleaned = re.sub(orphan_open_pattern, "", cleaned)
@@ -600,6 +607,13 @@ return (function() {
                 {"type": "message", "data": {"content": message}}
             )
 
+    async def emit_replace(self, content: str):
+        """Replace the entire message content (used for live-updating thinking blocks)."""
+        if self.__current_event_emitter__:
+            await self.__current_event_emitter__(
+                {"type": "replace", "data": {"content": content}}
+            )
+
     async def emit_status(self, level: str, message: str, done: bool):
         if self.__current_event_emitter__:
             await self.__current_event_emitter__(
@@ -615,7 +629,7 @@ return (function() {
             )
 
     async def emit_model_title(self, model_name: str):
-        await self.emit_message(f"\n\n### 🗣️ {model_name}\n\n")
+        await self.emit_message(f"\n\n### {model_name}\n\n")
 
     async def pipe(
         self,
@@ -638,9 +652,43 @@ return (function() {
         conversation_history = []
         for msg in raw_history:
             cleaned_msg = msg.copy()
-            if "content" in cleaned_msg:
-                if isinstance(cleaned_msg["content"], str):
-                    cleaned_msg["content"] = clean_thinking_tags(cleaned_msg["content"])
+            if "content" in cleaned_msg and isinstance(cleaned_msg["content"], str):
+                cleaned_content = clean_thinking_tags(cleaned_msg["content"])
+
+                if cleaned_msg.get("role") == "assistant" and not cleaned_msg.get(
+                    "_speaker"
+                ):
+                    # Split concatenated multi-model messages back into individual speaker turns
+                    # Optionally match the color circle emoji if present
+                    parts = re.split(
+                        r"(?:\n\n|^)### (?:(?:🔴|🔵|🟢|🟡|🟣|🟠|🟤|⚫|⚪)\s+)?(.+?)\n\n",
+                        cleaned_content,
+                    )
+
+                    if len(parts) > 1:
+                        if parts[0].strip():
+                            conversation_history.append(
+                                {"role": "assistant", "content": parts[0].strip()}
+                            )
+
+                        for i in range(1, len(parts), 2):
+                            speaker_alias = parts[i].strip()
+                            speaker_content = (
+                                parts[i + 1].strip() if i + 1 < len(parts) else ""
+                            )
+
+                            if speaker_content:
+                                conversation_history.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": speaker_content,
+                                        "_speaker": speaker_alias,
+                                    }
+                                )
+                        continue
+
+                cleaned_msg["content"] = cleaned_content
+
             conversation_history.append(cleaned_msg)
 
         if not conversation_history:
@@ -698,6 +746,9 @@ return (function() {
         last_speaker = None
 
         # 2. Run Conversation Rounds
+        # total_emitted tracks ALL content sent to the frontend across
+        # all participants so that replace events preserve prior output
+        total_emitted = ""
         for round_num in range(rounds):
             if use_manager:
                 participant_aliases = [p["alias"] for p in participants]
@@ -815,36 +866,53 @@ return (function() {
                 )
 
                 try:
-                    await self.emit_model_title(alias)
+                    p_idx = participants.index(participant) % len(SPEAKER_COLORS)
+                    color = SPEAKER_COLORS[p_idx]
+                    title_text = f"\n\n### {color} {alias}\n\n"
+                    total_emitted += title_text
+                    await self.emit_replace(total_emitted)
 
                     full_response = ""
                     reasoning_buffer = ""
+                    reasoning_start_time = None
 
                     async for event in self.get_streaming_completion(
                         messages, model=model, valves=valves
                     ):
                         event_type = event.get("type")
                         if event_type == "error":
-                            await self.emit_message(event.get("text", ""))
+                            total_emitted += event.get("text", "")
+                            await self.emit_replace(total_emitted)
                             continue
 
                         if event_type == "reasoning":
                             reasoning_piece = event.get("text", "")
                             if reasoning_piece:
-                                if not reasoning_buffer:
-                                    await self.emit_status(
-                                        "info",
-                                        f"{alias} is thinking...",
-                                        False,
-                                    )
+                                if reasoning_start_time is None:
+                                    reasoning_start_time = time.time()
                                 reasoning_buffer += reasoning_piece
+                                # Stream thinking live — the full message
+                                # is replaced each time so the <details>
+                                # block is always complete HTML
+                                await self.emit_replace(
+                                    total_emitted
+                                    + '<details type="reasoning" done="false">\n'
+                                    + "<summary>Thinking...</summary>\n"
+                                    + reasoning_buffer
+                                    + "\n</details>\n\n"
+                                )
                             continue
 
-                        # Flush accumulated reasoning as a complete block
+                        # Finalize thinking block when transitioning
                         if reasoning_buffer:
-                            await self.emit_message(
-                                '<details type="reasoning" done="true">\n'
-                                "<summary>Thought</summary>\n"
+                            reasoning_duration = (
+                                round(time.time() - reasoning_start_time)
+                                if reasoning_start_time
+                                else 1
+                            )
+                            total_emitted += (
+                                f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
+                                f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
                                 + reasoning_buffer
                                 + "\n</details>\n\n"
                             )
@@ -856,19 +924,24 @@ return (function() {
                                 continue
 
                             full_response += chunk_text
-                            await self.emit_message(
-                                self._replace_thinking_tags(chunk_text)
-                            )
+                            total_emitted += self._replace_thinking_tags(chunk_text)
+                            await self.emit_replace(total_emitted)
                             continue
 
                     # Flush reasoning if stream ended during thinking
                     if reasoning_buffer:
-                        await self.emit_message(
-                            '<details type="reasoning" done="true">\n'
-                            "<summary>Thought</summary>\n"
+                        reasoning_duration = (
+                            round(time.time() - reasoning_start_time)
+                            if reasoning_start_time
+                            else 1
+                        )
+                        total_emitted += (
+                            f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
+                            f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
                             + reasoning_buffer
                             + "\n</details>\n\n"
                         )
+                        await self.emit_replace(total_emitted)
                         reasoning_buffer = ""
 
                     if not full_response.strip():
@@ -882,7 +955,8 @@ return (function() {
                         )
                         if fallback_response.strip():
                             full_response = fallback_response
-                            await self.emit_message(fallback_response)
+                            total_emitted += fallback_response
+                            await self.emit_replace(total_emitted)
                         else:
                             await self.emit_status(
                                 "warning",
