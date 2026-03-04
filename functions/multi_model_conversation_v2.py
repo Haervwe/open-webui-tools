@@ -945,25 +945,18 @@ return (function() {
         use_manager = config.get("use_manager", False)
         last_speaker = None
 
-        # 2. Load tools (once, shared across all rounds/participants)
+        # 2. Load tools (per-participant instead of global-only)
         # tool_ids come from the request body (UI tool picker) or metadata
-        tool_ids = body.get("tool_ids") or []
-        if not tool_ids:
-            meta = body.get("metadata", {})
-            tool_ids = meta.get("tool_ids") or []
-        tools_dict = {}
-        tools_specs = None
+        global_tool_ids = body.get("tool_ids") or []
+        if not global_tool_ids:
+            global_tool_ids = body.get("metadata", {}).get("tool_ids") or []
 
         # Proxy event emitter for tools: intercepts 'chat:message:files' events
-        # and accumulates them, because each tool call replaces rather than
-        # appends files on the message. After all tools execute, the pipe
-        # emits a single combined event with all files.
         self._accumulated_tool_files = []
 
         async def _tool_event_proxy(event):
             event_type = event.get("type", "")
             if event_type == "chat:message:files":
-                # Capture files instead of emitting immediately
                 files = event.get("data", {}).get("files", [])
                 self._accumulated_tool_files.extend(files)
                 logger.debug(
@@ -971,7 +964,6 @@ return (function() {
                     f"total accumulated: {len(self._accumulated_tool_files)}"
                 )
             else:
-                # Forward all other events (status, embeds, etc.) directly
                 if __event_emitter__:
                     await __event_emitter__(event)
 
@@ -983,47 +975,130 @@ return (function() {
             "__metadata__": body.get("metadata", {}),
         }
 
-        # Load user-imported tools
-        if tool_ids:
-            try:
-                tools_dict = await self._load_tools(tool_ids, extra_params)
-            except Exception as e:
-                logger.error(f"Failed to load imported tools: {e}")
-                await self.emit_status(
-                    "warning", f"Failed to load imported tools: {e}", False
-                )
+        # Pre-load tools for each participant model
+        participant_tools_map = {}
+        models_state = getattr(self.__request__.app.state, "MODELS", {})
 
-        # Load built-in tools (web search, knowledge, etc.)
-        try:
-            features = self.__metadata__.get("features", {})
-            if not features:
-                features = body.get("features", {})
-            # Get model info for capability checking
-            models_state = getattr(self.__request__.app.state, "MODELS", {})
-            # Use first participant's model for capability checking
-            first_model_id = participants[0]["model"] if participants else ""
-            model_info = models_state.get(first_model_id, {})
+        for p in participants:
+            p_model_id = p["model"]
+            if p_model_id in participant_tools_map:
+                continue  # already loaded for this model
 
-            builtin_tools = get_builtin_tools(
-                self.__request__, extra_params, features=features, model=model_info
-            )
-            if builtin_tools:
-                tools_dict.update(builtin_tools)
-                logger.info(
-                    f"Loaded {len(builtin_tools)} built-in tools: {list(builtin_tools.keys())}"
-                )
-        except Exception as e:
-            logger.error(f"Failed to load built-in tools: {e}")
+            p_tools_dict = {}
+            p_tools_specs = None
 
-        # Build OpenAI-format tool specs
-        if tools_dict:
-            tools_specs = [
-                {"type": "function", "function": t.get("spec", {})}
-                for t in tools_dict.values()
-            ]
+            # Fetch model info to get default tools (toolIds) and features
+            model_info = models_state.get(p_model_id, {})
+            model_db_info = Models.get_model_by_id(p_model_id)
+
             logger.info(
-                f"Total tools available: {len(tools_dict)} — {list(tools_dict.keys())}"
+                f"[MultiModelTools] Loading tools for participant model: {p_model_id}"
             )
+
+            default_tool_ids = []
+            p_features = {}
+
+            # 1. Start with global features from request body
+            global_features = (
+                self.__metadata__.get("features") or body.get("features") or {}
+            )
+            p_features.update(global_features)
+
+            if model_db_info:
+                meta = (
+                    model_db_info.meta.model_dump()
+                    if hasattr(model_db_info.meta, "model_dump")
+                    else model_db_info.meta
+                )
+                params = (
+                    model_db_info.params.model_dump()
+                    if hasattr(model_db_info.params, "model_dump")
+                    else model_db_info.params
+                )
+
+                if isinstance(meta, dict):
+                    default_tool_ids.extend(meta.get("toolIds", []))
+                    if "features" in meta and isinstance(meta["features"], dict):
+                        p_features.update(meta["features"])
+                    for f_id in meta.get("defaultFeatureIds", []):
+                        p_features[f_id] = True
+
+                if isinstance(params, dict):
+                    default_tool_ids.extend(
+                        params.get("toolIds", []) or params.get("tools", [])
+                    )
+                    if "features" in params and isinstance(params["features"], dict):
+                        p_features.update(params["features"])
+                    for f_id in params.get("defaultFeatureIds", []):
+                        p_features[f_id] = True
+
+            if model_info:
+                info_meta = model_info.get("info", {}).get("meta", {})
+                info_params = model_info.get("info", {}).get("params", {})
+
+                default_tool_ids.extend(info_meta.get("toolIds", []))
+                default_tool_ids.extend(
+                    info_params.get("toolIds", []) or info_params.get("tools", [])
+                )
+
+                if isinstance(info_meta.get("features"), dict):
+                    p_features.update(info_meta["features"])
+                for f_id in info_meta.get("defaultFeatureIds", []):
+                    p_features[f_id] = True
+
+                if isinstance(info_params.get("features"), dict):
+                    p_features.update(info_params["features"])
+                for f_id in info_params.get("defaultFeatureIds", []):
+                    p_features[f_id] = True
+
+            # Clean and deduplicate tool IDs (handling cases where UI might inadvertently store dicts)
+            clean_default_ids = []
+            for t in default_tool_ids:
+                if isinstance(t, str) and t.strip():
+                    clean_default_ids.append(t.strip())
+                elif isinstance(t, dict) and "id" in t:
+                    clean_default_ids.append(str(t["id"]))
+
+            # Combine global tools and model's default tools uniquely
+            combined_tool_ids = list(set(global_tool_ids + clean_default_ids))
+
+            # Load user-imported tools
+            if combined_tool_ids:
+                try:
+                    p_tools_dict = await self._load_tools(
+                        combined_tool_ids, extra_params
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"[MultiModelTools] Failed to load imported tools for {p_model_id}: {e}"
+                    )
+
+            # Load built-in tools (web search, knowledge, etc.) based on the specific model
+            try:
+                builtin_tools = get_builtin_tools(
+                    self.__request__,
+                    extra_params,
+                    features=p_features,
+                    model=model_info,
+                )
+                if builtin_tools:
+                    p_tools_dict.update(builtin_tools)
+            except Exception as e:
+                logger.error(
+                    f"[MultiModelTools] Failed to load built-in tools for {p_model_id}: {e}"
+                )
+
+            # Build OpenAI-format tool specs
+            if p_tools_dict:
+                p_tools_specs = [
+                    {"type": "function", "function": t.get("spec", {})}
+                    for t in p_tools_dict.values()
+                ]
+
+            participant_tools_map[p_model_id] = {
+                "dict": p_tools_dict,
+                "specs": p_tools_specs,
+            }
 
         MAX_TOOL_CALL_RETRIES = 5
 
@@ -1110,6 +1185,10 @@ return (function() {
 
                 # Determine if this model can use tools
                 participant_tools_specs = None
+                p_tools = participant_tools_map.get(model, {})
+                tools_dict = p_tools.get("dict", {})
+                tools_specs = p_tools.get("specs", None)
+
                 if tools_dict and tools_specs:
                     if self._check_model_native_fc(model):
                         participant_tools_specs = tools_specs
