@@ -799,6 +799,8 @@ return (function() {
             logger.debug(
                 f"Emitted combined chat:message:files with {len(self._accumulated_tool_files)} file(s)"
             )
+            # Clear after emitting so the next participant doesn't re-emit previous files
+            self._accumulated_tool_files = []
 
     async def emit_message(self, message: str):
         if self.__current_event_emitter__:
@@ -972,7 +974,9 @@ return (function() {
             "__event_call__": __event_call__,
             "__user__": __user__,
             "__request__": __request__,
-            "__metadata__": body.get("metadata", {}),
+            "__metadata__": self.__metadata__,
+            "__chat_id__": self.__metadata__.get("chat_id"),
+            "__message_id__": self.__metadata__.get("message_id"),
         }
 
         # Pre-load tools for each participant model
@@ -1073,16 +1077,86 @@ return (function() {
                         f"[MultiModelTools] Failed to load imported tools for {p_model_id}: {e}"
                     )
 
-            # Load built-in tools (web search, knowledge, etc.) based on the specific model
+            # Load built-in tools (web search, knowledge, etc.) based on the specific model.
+            # Normalize legacy knowledge items so query_knowledge_files recognizes them
+            # (it expects {"type": ..., "id": ...} but DB may have {"collection_name": ...}).
+            p_model_info = model_info
+            try:
+                raw_knowledge = (
+                    model_info.get("info", {}).get("meta", {}).get("knowledge", [])
+                    or []
+                )
+
+                # Fallback: if MODELS state has no knowledge, try reading from DB directly
+                if not raw_knowledge and model_db_info and model_db_info.meta:
+                    m = (
+                        model_db_info.meta.model_dump()
+                        if hasattr(model_db_info.meta, "model_dump")
+                        else model_db_info.meta
+                    )
+                    if isinstance(m, dict):
+                        raw_knowledge = m.get("knowledge", []) or []
+
+                if raw_knowledge:
+                    normalized = []
+                    needs_normalization = False
+                    for item in raw_knowledge:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("type") and item.get("id"):
+                            normalized.append(item)
+                        elif item.get("collection_name"):
+                            normalized.append(
+                                {
+                                    "type": "collection",
+                                    "id": item["collection_name"],
+                                    "name": item.get("name", ""),
+                                }
+                            )
+                            needs_normalization = True
+                        else:
+                            normalized.append(item)
+
+                    # Create a shallow copy to avoid mutating shared MODELS state
+                    p_model_info = {**model_info}
+                    p_model_info["info"] = {**p_model_info.get("info", {})}
+                    p_model_info["info"]["meta"] = {
+                        **p_model_info["info"].get("meta", {})
+                    }
+                    p_model_info["info"]["meta"]["knowledge"] = normalized
+                    if needs_normalization:
+                        logger.info(
+                            f"[MultiModelTools] Normalized legacy knowledge items for {p_model_id}"
+                        )
+            except Exception as e:
+                logger.error(
+                    f"[MultiModelTools] Knowledge normalization failed for {p_model_id}: {e}"
+                )
+                p_model_info = model_info  # fall back to original
+
+            logger.info(
+                f"[MultiModelTools] Features for {p_model_id}: {p_features}"
+            )
+            logger.info(
+                f"[MultiModelTools] ENABLE_IMAGE_GENERATION={getattr(self.__request__.app.state.config, 'ENABLE_IMAGE_GENERATION', 'NOT_SET')}"
+            )
+
             try:
                 builtin_tools = get_builtin_tools(
                     self.__request__,
                     extra_params,
                     features=p_features,
-                    model=model_info,
+                    model=p_model_info,
                 )
                 if builtin_tools:
                     p_tools_dict.update(builtin_tools)
+                    logger.info(
+                        f"[MultiModelTools] Builtin tools loaded for {p_model_id}: {list(builtin_tools.keys())}"
+                    )
+                else:
+                    logger.info(
+                        f"[MultiModelTools] No builtin tools returned for {p_model_id}"
+                    )
             except Exception as e:
                 logger.error(
                     f"[MultiModelTools] Failed to load built-in tools for {p_model_id}: {e}"
@@ -1192,6 +1266,9 @@ return (function() {
                 if tools_dict and tools_specs:
                     if self._check_model_native_fc(model):
                         participant_tools_specs = tools_specs
+                        logger.info(
+                            f"[MultiModelTools] Sending {len(tools_specs)} tool specs to {alias} ({model})"
+                        )
                     else:
                         logger.warning(
                             f"Model {model} does not have native function calling enabled. "
@@ -1221,6 +1298,19 @@ return (function() {
                     "participants appear as user messages labeled with their name. "
                     "Respond naturally in character without prefixing your name."
                 )
+
+                # If this participant has tools, add explicit tool-use guidance
+                if participant_tools_specs:
+                    tool_names = [t["function"]["name"] for t in participant_tools_specs if "function" in t]
+                    system_parts.append(
+                        "TOOL USE INSTRUCTIONS:\n"
+                        f"You have access to the following tools: {', '.join(tool_names)}.\n"
+                        "When the user's request can be fulfilled by a tool, call the appropriate tool.\n"
+                        "CRITICAL: After every tool call, once you receive the tool results, "
+                        "you MUST produce a visible text response summarizing or presenting the result to the user. "
+                        "Never stop at just the tool call — always follow up with a written reply."
+                    )
+
                 system_prompt = "\n\n".join(system_parts)
 
                 # Build messages with role-based separation:
@@ -1464,9 +1554,16 @@ return (function() {
                             # Reset for next streaming round
                             full_response = ""
 
+                            # On last retry, don't pass tools so model is forced to produce text
+                            reprompt_tools = (
+                                participant_tools_specs
+                                if tool_call_retries < MAX_TOOL_CALL_RETRIES
+                                else None
+                            )
+
                             # Re-call model with tool results
                             await _stream_and_accumulate(
-                                current_messages, participant_tools_specs
+                                current_messages, reprompt_tools
                             )
 
                     # ── Fallback for empty response ─────────────────
@@ -1476,8 +1573,15 @@ return (function() {
                             f"Empty stream from {alias} ({model}). Retrying once (non-stream).",
                             False,
                         )
+                        # Use current_messages (includes tool results) if available,
+                        # otherwise fall back to original messages
+                        fallback_msgs = (
+                            current_messages
+                            if tool_interaction_messages
+                            else messages
+                        )
                         fallback_response = await self.get_completion(
-                            messages, model=model, valves=valves
+                            fallback_msgs, model=model, valves=valves
                         )
                         if fallback_response.strip():
                             full_response = fallback_response
