@@ -3,18 +3,27 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.1.0
+version: 2.3.0
 """
 
 import logging
 import json
 import re
+import html as html_module
+import ast
+from uuid import uuid4
 from typing import Callable, Awaitable, Any, Optional
 import time
 from pydantic import BaseModel, Field
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
 from open_webui.models.users import User, Users
+from open_webui.models.models import Models
+from open_webui.utils.tools import get_tools, get_builtin_tools
+from open_webui.utils.middleware import process_tool_result
+from open_webui.utils.chat import (
+    generate_chat_completion as generate_raw_chat_completion,
+)
 
 name = "Conversation"
 
@@ -539,6 +548,10 @@ return (function() {
         if isinstance(content, str) and content:
             yield {"type": "content", "text": content}
 
+        tool_calls = delta.get("tool_calls")
+        if tool_calls:
+            yield {"type": "tool_calls", "data": tool_calls}
+
     def _replace_thinking_tags(self, text: str) -> str:
         """Replace raw thinking tags with <details> HTML the frontend understands."""
         text = THINK_OPEN_PATTERN.sub(
@@ -548,7 +561,9 @@ return (function() {
         text = THINK_CLOSE_PATTERN.sub("\n</details>\n\n", text)
         return text
 
-    async def get_streaming_completion(self, messages, model: str, valves):
+    async def get_streaming_completion(
+        self, messages, model: str, valves, tools_specs=None
+    ):
         try:
             form_data = {
                 "model": model,
@@ -558,10 +573,14 @@ return (function() {
                 "top_k": valves.Top_k,
                 "top_p": valves.Top_p,
             }
-            response = await generate_chat_completions(
+            if tools_specs:
+                form_data["tools"] = tools_specs
+            response = await generate_raw_chat_completion(
                 self.__request__,
                 form_data,
                 user=self.__user__,
+                bypass_filter=True,
+                bypass_system_prompt=True,
             )
             if not hasattr(response, "body_iterator"):
                 raise ValueError("Response does not support streaming")
@@ -601,6 +620,186 @@ return (function() {
         content = message.get("content", "") if isinstance(message, dict) else ""
         return content if isinstance(content, str) else ""
 
+    # ── Tool calling helpers ──────────────────────────────────────────
+
+    def _check_model_native_fc(self, model_id: str) -> bool:
+        """Return True if the model is configured for native function calling."""
+        model_info = Models.get_model_by_id(model_id)
+        if model_info and model_info.params:
+            params = (
+                model_info.params.model_dump()
+                if hasattr(model_info.params, "model_dump")
+                else {}
+            )
+            if params.get("function_calling") == "native":
+                return True
+        # Fall back to runtime MODELS state
+        models = getattr(self.__request__.app.state, "MODELS", {})
+        model = models.get(model_id, {})
+        info = model.get("info", {})
+        info_params = info.get("params", {})
+        if isinstance(info_params, dict):
+            return info_params.get("function_calling") == "native"
+        if hasattr(info_params, "model_dump"):
+            return info_params.model_dump().get("function_calling") == "native"
+        return False
+
+    async def _load_tools(self, tool_ids: list[str], extra_params: dict) -> dict:
+        """Load tools using Open WebUI's get_tools(), returns tools_dict."""
+        if not tool_ids:
+            return {}
+        return await get_tools(
+            self.__request__,
+            tool_ids,
+            self.__user__,
+            extra_params,
+        )
+
+    def _build_tool_call_details(
+        self,
+        call_id: str,
+        name: str,
+        arguments: str,
+        done: bool = False,
+        result=None,
+        files=None,
+        embeds=None,
+    ) -> str:
+        """Build <details type='tool_calls'> HTML matching Open WebUI's serialize_output()."""
+        # arguments is already a JSON string, just escape for HTML attribute
+        args_escaped = html_module.escape(arguments)
+        if done:
+            # result may be a string or other type
+            result_text = (
+                result
+                if isinstance(result, str)
+                else json.dumps(result or "", ensure_ascii=False)
+            )
+            result_escaped = html_module.escape(
+                json.dumps(result_text, ensure_ascii=False)
+            )
+            files_escaped = html_module.escape(json.dumps(files)) if files else ""
+            embeds_escaped = html_module.escape(json.dumps(embeds)) if embeds else ""
+            return (
+                f'<details type="tool_calls" done="true" id="{call_id}" '
+                f'name="{name}" arguments="{args_escaped}" '
+                f'result="{result_escaped}" files="{files_escaped}" '
+                f'embeds="{embeds_escaped}">\n'
+                f"<summary>Tool Executed</summary>\n</details>\n"
+            )
+        return (
+            f'<details type="tool_calls" done="false" id="{call_id}" '
+            f'name="{name}" arguments="{args_escaped}">\n'
+            f"<summary>Executing...</summary>\n</details>\n"
+        )
+
+    async def _execute_tool_calls(
+        self,
+        tool_calls: list[dict],
+        tools_dict: dict,
+        metadata: dict,
+        total_emitted: str,
+    ) -> tuple[list[dict], str]:
+        """Execute tool calls, emit <details> tags live. Returns (results, updated_total_emitted)."""
+        results = []
+        for tc in tool_calls:
+            call_id = tc.get("id", str(uuid4()))
+            func = tc.get("function", {})
+            name = func.get("name", "")
+            args_str = func.get("arguments", "{}")
+
+            # Parse arguments
+            params = {}
+            try:
+                params = ast.literal_eval(args_str)
+            except Exception:
+                try:
+                    params = json.loads(args_str)
+                except Exception:
+                    logger.error(f"Failed to parse tool args for {name}: {args_str}")
+                    results.append(
+                        {
+                            "tool_call_id": call_id,
+                            "content": f"Error: malformed arguments for {name}",
+                        }
+                    )
+                    continue
+
+            # Emit "Executing..." tag — ensure newline before (middleware L369-370)
+            executing_tag = self._build_tool_call_details(
+                call_id, name, args_str, done=False
+            )
+            if total_emitted and not total_emitted.endswith("\n"):
+                total_emitted += "\n"
+            total_emitted += executing_tag
+            await self.emit_replace(total_emitted)
+
+            # Execute the tool
+            tool_result = None
+            tool = tools_dict.get(name)
+            tool_type = tool.get("type", "") if tool else ""
+
+            if tool and "callable" in tool:
+                spec = tool.get("spec", {})
+                allowed_params = spec.get("parameters", {}).get("properties", {}).keys()
+                filtered_params = {
+                    k: v for k, v in params.items() if k in allowed_params
+                }
+                try:
+                    tool_result = await tool["callable"](**filtered_params)
+                except Exception as e:
+                    tool_result = str(e)
+            else:
+                tool_result = f"Error: tool '{name}' not found"
+
+            # Process result using Open WebUI's process_tool_result
+            result_str, result_files, result_embeds = process_tool_result(
+                self.__request__,
+                name,
+                tool_result,
+                tool_type,
+                False,
+                metadata,
+                self.__user__,
+            )
+
+            # Replace executing tag with completed tag
+            total_emitted = total_emitted.replace(executing_tag, "")
+            done_tag = self._build_tool_call_details(
+                call_id,
+                name,
+                args_str,
+                done=True,
+                result=result_str,
+                files=result_files,
+                embeds=result_embeds,
+            )
+            if total_emitted and not total_emitted.endswith("\n"):
+                total_emitted += "\n"
+            total_emitted += done_tag
+            await self.emit_replace(total_emitted)
+
+            results.append(
+                {
+                    "tool_call_id": call_id,
+                    "content": str(result_str) if result_str else "",
+                }
+            )
+        return results, total_emitted
+
+    async def _emit_accumulated_tool_files(self):
+        """Emit a single combined chat:message:files event with all accumulated tool files."""
+        if self._accumulated_tool_files and self.__current_event_emitter__:
+            await self.__current_event_emitter__(
+                {
+                    "type": "chat:message:files",
+                    "data": {"files": list(self._accumulated_tool_files)},
+                }
+            )
+            logger.debug(
+                f"Emitted combined chat:message:files with {len(self._accumulated_tool_files)} file(s)"
+            )
+
     async def emit_message(self, message: str):
         if self.__current_event_emitter__:
             await self.__current_event_emitter__(
@@ -608,7 +807,6 @@ return (function() {
             )
 
     async def emit_replace(self, content: str):
-        """Replace the entire message content (used for live-updating thinking blocks)."""
         if self.__current_event_emitter__:
             await self.__current_event_emitter__(
                 {"type": "replace", "data": {"content": content}}
@@ -640,11 +838,13 @@ return (function() {
         __task__=None,
         __model__=None,
         __request__=None,
+        __metadata__=None,
     ) -> str:
         self.__current_event_emitter__ = __event_emitter__
         self.__user__ = Users.get_user_by_id(__user__["id"])
         self.__model__ = __model__
         self.__request__ = __request__
+        self.__metadata__ = __metadata__ or {}
 
         valves = __user__.get("valves", self.UserValves())
         raw_history = body.get("messages", [])
@@ -745,7 +945,89 @@ return (function() {
         use_manager = config.get("use_manager", False)
         last_speaker = None
 
-        # 2. Run Conversation Rounds
+        # 2. Load tools (once, shared across all rounds/participants)
+        # tool_ids come from the request body (UI tool picker) or metadata
+        tool_ids = body.get("tool_ids") or []
+        if not tool_ids:
+            meta = body.get("metadata", {})
+            tool_ids = meta.get("tool_ids") or []
+        tools_dict = {}
+        tools_specs = None
+
+        # Proxy event emitter for tools: intercepts 'chat:message:files' events
+        # and accumulates them, because each tool call replaces rather than
+        # appends files on the message. After all tools execute, the pipe
+        # emits a single combined event with all files.
+        self._accumulated_tool_files = []
+
+        async def _tool_event_proxy(event):
+            event_type = event.get("type", "")
+            if event_type == "chat:message:files":
+                # Capture files instead of emitting immediately
+                files = event.get("data", {}).get("files", [])
+                self._accumulated_tool_files.extend(files)
+                logger.debug(
+                    f"Captured {len(files)} file(s) from tool, "
+                    f"total accumulated: {len(self._accumulated_tool_files)}"
+                )
+            else:
+                # Forward all other events (status, embeds, etc.) directly
+                if __event_emitter__:
+                    await __event_emitter__(event)
+
+        extra_params = {
+            "__event_emitter__": _tool_event_proxy,
+            "__event_call__": __event_call__,
+            "__user__": __user__,
+            "__request__": __request__,
+            "__metadata__": body.get("metadata", {}),
+        }
+
+        # Load user-imported tools
+        if tool_ids:
+            try:
+                tools_dict = await self._load_tools(tool_ids, extra_params)
+            except Exception as e:
+                logger.error(f"Failed to load imported tools: {e}")
+                await self.emit_status(
+                    "warning", f"Failed to load imported tools: {e}", False
+                )
+
+        # Load built-in tools (web search, knowledge, etc.)
+        try:
+            features = self.__metadata__.get("features", {})
+            if not features:
+                features = body.get("features", {})
+            # Get model info for capability checking
+            models_state = getattr(self.__request__.app.state, "MODELS", {})
+            # Use first participant's model for capability checking
+            first_model_id = participants[0]["model"] if participants else ""
+            model_info = models_state.get(first_model_id, {})
+
+            builtin_tools = get_builtin_tools(
+                self.__request__, extra_params, features=features, model=model_info
+            )
+            if builtin_tools:
+                tools_dict.update(builtin_tools)
+                logger.info(
+                    f"Loaded {len(builtin_tools)} built-in tools: {list(builtin_tools.keys())}"
+                )
+        except Exception as e:
+            logger.error(f"Failed to load built-in tools: {e}")
+
+        # Build OpenAI-format tool specs
+        if tools_dict:
+            tools_specs = [
+                {"type": "function", "function": t.get("spec", {})}
+                for t in tools_dict.values()
+            ]
+            logger.info(
+                f"Total tools available: {len(tools_dict)} — {list(tools_dict.keys())}"
+            )
+
+        MAX_TOOL_CALL_RETRIES = 5
+
+        # 3. Run Conversation Rounds
         # total_emitted tracks ALL content sent to the frontend across
         # all participants so that replace events preserve prior output
         total_emitted = ""
@@ -826,22 +1108,52 @@ return (function() {
                 model = participant["model"]
                 alias = participant["alias"]
 
-                system_prompt = (
-                    f"{participant['system_message']}\n\n"
+                # Determine if this model can use tools
+                participant_tools_specs = None
+                if tools_dict and tools_specs:
+                    if self._check_model_native_fc(model):
+                        participant_tools_specs = tools_specs
+                    else:
+                        logger.warning(
+                            f"Model {model} does not have native function calling enabled. "
+                            f"Tools will be skipped for {alias}."
+                        )
+
+                # Get the model's configured system message (from OWUI model settings)
+                model_system_message = ""
+                model_db_info = Models.get_model_by_id(model)
+                if model_db_info and model_db_info.params:
+                    p = (
+                        model_db_info.params.model_dump()
+                        if hasattr(model_db_info.params, "model_dump")
+                        else {}
+                    )
+                    model_system_message = p.get("system", "") or ""
+
+                # Build system prompt: model's system message + participant config + conversation flow
+                system_parts = []
+                if model_system_message.strip():
+                    system_parts.append(model_system_message.strip())
+                if participant["system_message"].strip():
+                    system_parts.append(participant["system_message"].strip())
+                system_parts.append(
                     f"{valves.AllParticipantsApendedMessage} {alias}\n\n"
                     "This is a multi-participant conversation. Messages from other "
                     "participants appear as user messages labeled with their name. "
                     "Respond naturally in character without prefixing your name."
                 )
+                system_prompt = "\n\n".join(system_parts)
 
                 # Build messages with role-based separation:
                 # - Other participants' responses → user role with speaker label
                 # - This participant's own past responses → assistant role
+                #   (including private tool call messages if any)
                 adapted_history = []
                 for msg in conversation_history:
                     speaker = msg.get("_speaker")
                     if speaker and speaker != alias:
                         # Other participant's response → present as user message
+                        # (tool calls are private — only show final text)
                         adapted_history.append(
                             {
                                 "role": "user",
@@ -850,6 +1162,12 @@ return (function() {
                         )
                     elif speaker and speaker == alias:
                         # This participant's own past response → assistant role
+                        # Include private tool interaction chain if any
+                        tool_msgs = msg.get("_tool_messages", [])
+                        for tm in tool_msgs:
+                            adapted_history.append(
+                                {k: v for k, v in tm.items() if not k.startswith("_")}
+                            )
                         adapted_history.append(
                             {"role": "assistant", "content": msg["content"]}
                         )
@@ -872,78 +1190,207 @@ return (function() {
                     total_emitted += title_text
                     await self.emit_replace(total_emitted)
 
+                    # Emit warning if tools configured but model lacks native FC
+                    if tools_dict and not participant_tools_specs:
+                        warn_tag = (
+                            '<details type="tool_calls" done="true" id="warn" '
+                            f'name="⚠️ Tools Unavailable" '
+                            f'arguments="&quot;&quot;" '
+                            f'result="&quot;Model {html_module.escape(model)} does not have '
+                            f'native function calling enabled. Tools skipped for {html_module.escape(alias)}.&quot;" '
+                            f'files="" embeds="">\n'
+                            f"<summary>Tools Unavailable</summary>\n</details>\n"
+                        )
+                        total_emitted += warn_tag
+                        await self.emit_replace(total_emitted)
+
                     full_response = ""
                     reasoning_buffer = ""
                     reasoning_start_time = None
+                    accumulated_tool_calls = []
+                    metadata = body.get("metadata", {})
 
-                    async for event in self.get_streaming_completion(
-                        messages, model=model, valves=valves
-                    ):
-                        event_type = event.get("type")
-                        if event_type == "error":
-                            total_emitted += event.get("text", "")
-                            await self.emit_replace(total_emitted)
-                            continue
+                    # ── Streaming + tool call accumulation helper ────
+                    async def _stream_and_accumulate(stream_messages, tc_specs):
+                        nonlocal full_response, reasoning_buffer
+                        nonlocal reasoning_start_time, total_emitted
+                        nonlocal accumulated_tool_calls
 
-                        if event_type == "reasoning":
-                            reasoning_piece = event.get("text", "")
-                            if reasoning_piece:
-                                if reasoning_start_time is None:
-                                    reasoning_start_time = time.time()
-                                reasoning_buffer += reasoning_piece
-                                # Stream thinking live — the full message
-                                # is replaced each time so the <details>
-                                # block is always complete HTML
-                                await self.emit_replace(
-                                    total_emitted
-                                    + '<details type="reasoning" done="false">\n'
-                                    + "<summary>Thinking...</summary>\n"
-                                    + reasoning_buffer
+                        accumulated_tool_calls = []
+
+                        async for event in self.get_streaming_completion(
+                            stream_messages,
+                            model=model,
+                            valves=valves,
+                            tools_specs=tc_specs,
+                        ):
+                            event_type = event.get("type")
+                            if event_type == "error":
+                                total_emitted += event.get("text", "")
+                                await self.emit_replace(total_emitted)
+                                continue
+
+                            if event_type == "tool_calls":
+                                # Accumulate tool call deltas (same as middleware.py)
+                                for delta_tc in event.get("data", []):
+                                    tc_index = delta_tc.get("index")
+                                    if tc_index is not None:
+                                        existing = None
+                                        for atc in accumulated_tool_calls:
+                                            if atc.get("index") == tc_index:
+                                                existing = atc
+                                                break
+                                        if existing is None:
+                                            delta_tc.setdefault("function", {})
+                                            delta_tc["function"].setdefault("name", "")
+                                            delta_tc["function"].setdefault(
+                                                "arguments", ""
+                                            )
+                                            accumulated_tool_calls.append(delta_tc)
+                                        else:
+                                            dn = delta_tc.get("function", {}).get(
+                                                "name"
+                                            )
+                                            da = delta_tc.get("function", {}).get(
+                                                "arguments"
+                                            )
+                                            if dn:
+                                                existing["function"]["name"] += dn
+                                            if da:
+                                                existing["function"]["arguments"] += da
+                                continue
+
+                            if event_type == "reasoning":
+                                reasoning_piece = event.get("text", "")
+                                if reasoning_piece:
+                                    if reasoning_start_time is None:
+                                        reasoning_start_time = time.time()
+                                    reasoning_buffer += reasoning_piece
+                                    # Format with blockquote prefix (> ) like middleware
+                                    display = "\n".join(
+                                        f"> {line}"
+                                        if not line.startswith(">")
+                                        else line
+                                        for line in reasoning_buffer.splitlines()
+                                    )
+                                    await self.emit_replace(
+                                        total_emitted
+                                        + '<details type="reasoning" done="false">\n'
+                                        + "<summary>Thinking...</summary>\n"
+                                        + display
+                                        + "\n</details>\n\n"
+                                    )
+                                continue
+
+                            # Finalize thinking block when transitioning
+                            if reasoning_buffer:
+                                reasoning_duration = (
+                                    round(time.time() - reasoning_start_time)
+                                    if reasoning_start_time
+                                    else 1
+                                )
+                                display = "\n".join(
+                                    f"> {line}" if not line.startswith(">") else line
+                                    for line in reasoning_buffer.splitlines()
+                                )
+                                total_emitted += (
+                                    f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
+                                    f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
+                                    + display
                                     + "\n</details>\n\n"
                                 )
-                            continue
+                                reasoning_buffer = ""
 
-                        # Finalize thinking block when transitioning
+                            if event_type == "content":
+                                chunk_text = event.get("text", "")
+                                if not chunk_text:
+                                    continue
+                                full_response += chunk_text
+                                total_emitted += self._replace_thinking_tags(chunk_text)
+                                await self.emit_replace(total_emitted)
+                                continue
+
+                        # Flush reasoning if stream ended during thinking
                         if reasoning_buffer:
                             reasoning_duration = (
                                 round(time.time() - reasoning_start_time)
                                 if reasoning_start_time
                                 else 1
                             )
+                            display = "\n".join(
+                                f"> {line}" if not line.startswith(">") else line
+                                for line in reasoning_buffer.splitlines()
+                            )
                             total_emitted += (
                                 f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
                                 f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
-                                + reasoning_buffer
+                                + display
                                 + "\n</details>\n\n"
                             )
+                            await self.emit_replace(total_emitted)
                             reasoning_buffer = ""
 
-                        if event_type == "content":
-                            chunk_text = event.get("text", "")
-                            if not chunk_text:
-                                continue
+                    # ── Initial streaming call ──────────────────────
+                    await _stream_and_accumulate(messages, participant_tools_specs)
 
-                            full_response += chunk_text
-                            total_emitted += self._replace_thinking_tags(chunk_text)
-                            await self.emit_replace(total_emitted)
-                            continue
+                    # ── Tool call execution + re-prompt loop ────────
+                    tool_interaction_messages = []
+                    if accumulated_tool_calls and participant_tools_specs:
+                        tool_call_retries = 0
+                        current_messages = list(messages)
 
-                    # Flush reasoning if stream ended during thinking
-                    if reasoning_buffer:
-                        reasoning_duration = (
-                            round(time.time() - reasoning_start_time)
-                            if reasoning_start_time
-                            else 1
-                        )
-                        total_emitted += (
-                            f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
-                            f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
-                            + reasoning_buffer
-                            + "\n</details>\n\n"
-                        )
-                        await self.emit_replace(total_emitted)
-                        reasoning_buffer = ""
+                        while (
+                            accumulated_tool_calls
+                            and tool_call_retries < MAX_TOOL_CALL_RETRIES
+                        ):
+                            tool_call_retries += 1
 
+                            # Execute the accumulated tool calls
+                            results, total_emitted = await self._execute_tool_calls(
+                                accumulated_tool_calls,
+                                tools_dict,
+                                metadata,
+                                total_emitted,
+                            )
+                            # Emit all accumulated files as a single combined event
+                            await self._emit_accumulated_tool_files()
+
+                            # Build re-prompt messages (OpenAI format):
+                            # 1. Assistant message with tool_calls
+                            assistant_tc_msg = {
+                                "role": "assistant",
+                                "content": full_response or None,
+                                "tool_calls": [
+                                    {
+                                        "id": tc.get("id", str(uuid4())),
+                                        "type": "function",
+                                        "function": tc.get("function", {}),
+                                    }
+                                    for tc in accumulated_tool_calls
+                                ],
+                            }
+                            current_messages.append(assistant_tc_msg)
+                            tool_interaction_messages.append(assistant_tc_msg)
+
+                            # 2. Tool result messages
+                            for result in results:
+                                tool_result_msg = {
+                                    "role": "tool",
+                                    "tool_call_id": result["tool_call_id"],
+                                    "content": result.get("content", ""),
+                                }
+                                current_messages.append(tool_result_msg)
+                                tool_interaction_messages.append(tool_result_msg)
+
+                            # Reset for next streaming round
+                            full_response = ""
+
+                            # Re-call model with tool results
+                            await _stream_and_accumulate(
+                                current_messages, participant_tools_specs
+                            )
+
+                    # ── Fallback for empty response ─────────────────
                     if not full_response.strip():
                         await self.emit_status(
                             "info",
@@ -971,6 +1418,7 @@ return (function() {
                                 "role": "assistant",
                                 "content": cleaned_response.strip(),
                                 "_speaker": alias,
+                                "_tool_messages": tool_interaction_messages,
                             }
                         )
 
