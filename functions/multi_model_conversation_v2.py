@@ -3,7 +3,7 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.5.0
+version: 2.6.0
 """
 
 import logging
@@ -245,6 +245,7 @@ class Pipe:
         return {
             "rounds": valves.ROUNDS_PER_CONVERSATION,
             "use_manager": valves.UseGroupChatManager,
+            "manager_model": valves.ManagerModel,
             "participants": participants,
         }
 
@@ -278,9 +279,12 @@ class Pipe:
 
         use_manager = bool(config.get("use_manager", valves.UseGroupChatManager))
 
+        manager_model = str(config.get("manager_model", "") or valves.ManagerModel or "").strip()
+
         return {
             "rounds": rounds,
             "use_manager": use_manager,
+            "manager_model": manager_model,
             "participants": participants,
         }
 
@@ -396,18 +400,33 @@ return (function() {
     const managerLbl = document.createElement('label');
     managerLbl.textContent = 'Auto-pilot (Use Manager)';
     managerLbl.style.cssText = 'font-size: 14px; font-weight: 500; color: #cbd5e1; cursor: pointer;';
-    managerLbl.onclick = () => managerChk.checked = !managerChk.checked;
+    managerLbl.onclick = () => { managerChk.checked = !managerChk.checked; toggleManagerModel(); };
     managerDiv.appendChild(managerChk); managerDiv.appendChild(managerLbl);
     globalRow.appendChild(managerDiv);
 
     form.appendChild(globalRow);
+
+    const modelOptions = [{id: '', name: 'Select Model...'}, ...availableModels.map(m => ({id: m.id, name: m.name}))];
+
+    // Manager model selector (shown only when manager is enabled)
+    const managerModelRow = document.createElement('div');
+    managerModelRow.style.cssText = 'display: none; gap: 16px; flex-wrap: wrap; background: rgba(59,130,246,0.08); padding: 16px; border-radius: 12px; border: 1px solid rgba(59,130,246,0.2); align-items: flex-end;';
+    const managerModelGrp = createSelectGrp('Manager Model (selects next speaker)', modelOptions, defaults.ManagerModel || '');
+    const managerModelSel = managerModelGrp.querySelector('select');
+    managerModelRow.appendChild(managerModelGrp);
+    form.appendChild(managerModelRow);
+
+    function toggleManagerModel() {
+      managerModelRow.style.display = managerChk.checked ? 'flex' : 'none';
+    }
+    managerChk.onchange = toggleManagerModel;
+    toggleManagerModel();
 
     const partsCont = document.createElement('div');
     partsCont.style.cssText = 'display: flex; flex-direction: column; gap: 12px;';
     form.appendChild(partsCont);
 
     const partUIs = [];
-    const modelOptions = [{id: '', name: 'Select Model...'}, ...availableModels.map(m => ({id: m.id, name: m.name}))];
 
     function renderParticipants() {
       partsCont.innerHTML = '';
@@ -477,6 +496,7 @@ return (function() {
       const config = {
         rounds: parseInt(roundsInp.value) || 3,
         use_manager: managerChk.checked,
+        manager_model: managerChk.checked ? managerModelSel.value : '',
         participants: partUIs.map(ui => ({
           model: ui.sel.value,
           alias: ui.alias.value.trim() || (ui.sel.selectedIndex > 0 ? ui.sel.options[ui.sel.selectedIndex].text : 'Participant'),
@@ -967,6 +987,7 @@ return (function() {
 
         rounds = config.get("rounds", 3)
         use_manager = config.get("use_manager", False)
+        manager_model = config.get("manager_model", "") or ""
         last_speaker = None
 
         # 2. Load tools (per-participant instead of global-only)
@@ -1214,279 +1235,353 @@ return (function() {
         # 3. Run Conversation Rounds
         # total_emitted tracks ALL content sent to the frontend across
         # all participants so that replace events preserve prior output
+        #
+        # One "round" = len(participants) turns.
+        # Without manager: each participant speaks once per round in order.
+        # With manager: the manager picks who speaks each turn (no consecutive repeats).
+        # Total turns = len(participants) * rounds.
         total_emitted = ""
-        for round_num in range(rounds):
-            if use_manager:
-                participant_aliases = [p["alias"] for p in participants]
-                history_str = "\n".join(
-                    f"{msg['role']}: {msg['content']}" for msg in conversation_history
-                )
-                manager_prompt = valves.ManagerSelectionPrompt.format(
-                    history=history_str,
-                    last_speaker=last_speaker or "None",
-                    participant_list=", ".join(participant_aliases),
-                )
-                manager_messages = [
-                    {"role": "system", "content": valves.ManagerSystemMessage},
-                    {"role": "user", "content": manager_prompt},
-                ]
+        turns_per_round = len(participants)
 
-                manager_model = valves.ManagerModel or self.__model__
+        # Resolve the manager model once (fall back to first participant's model)
+        if use_manager:
+            resolved_manager_model = (
+                manager_model
+                or valves.ManagerModel
+                or participants[0]["model"]
+            )
+            if not resolved_manager_model:
                 await self.emit_status(
-                    "info", "Group Chat Manager selecting next speaker...", False
+                    "error",
+                    "No manager model configured. Please set a Manager Model.",
+                    True,
                 )
+                return "Error: No manager model configured."
+            logger.info(f"[MultiModelTools] Using manager model: {resolved_manager_model}")
 
-                try:
-                    manager_response = await generate_chat_completions(
-                        self.__request__,
-                        {
-                            "model": manager_model,
-                            "messages": manager_messages,
-                            "stream": False,
-                        },
-                        user=self.__user__,
+        for round_num in range(rounds):
+            # With manager: len(participants) turns per round, manager picks each.
+            # Without manager: 1 "turn" that runs all participants sequentially.
+            num_turns = turns_per_round if use_manager else 1
+
+            for turn in range(num_turns):
+                if use_manager:
+                    participant_aliases = [p["alias"] for p in participants]
+                    # Build a clean conversation dump for the manager:
+                    # only user messages and final assistant text (with speaker labels),
+                    # no tool calls, files, embeds, or internal metadata.
+                    history_lines = []
+                    for msg in conversation_history:
+                        speaker = msg.get("_speaker")
+                        role = msg.get("role", "")
+                        content = msg.get("content", "")
+                        if not content or not content.strip():
+                            continue
+                        if speaker:
+                            # Participant response — label with alias
+                            history_lines.append(f"{speaker}: {content.strip()}")
+                        elif role == "user":
+                            history_lines.append(f"User: {content.strip()}")
+                        elif role == "system":
+                            continue  # skip system prompts
+                        else:
+                            history_lines.append(f"{role}: {content.strip()}")
+                    history_str = "\n".join(history_lines)
+                    manager_prompt = valves.ManagerSelectionPrompt.format(
+                        history=history_str,
+                        last_speaker=last_speaker or "None",
+                        participant_list=", ".join(participant_aliases),
                     )
-                    selected_alias = manager_response["choices"][0]["message"][
-                        "content"
-                    ].strip()
-                except Exception as e:
-                    logger.error(f"Manager failed to select: {e}")
-                    selected_alias = ""
+                    manager_messages = [
+                        {"role": "system", "content": valves.ManagerSystemMessage},
+                        {"role": "user", "content": manager_prompt},
+                    ]
 
-                normalized_selected_alias = self._normalize_alias(selected_alias)
-                selected_participant = next(
-                    (
-                        p
-                        for p in participants
-                        if self._normalize_alias(p["alias"])
-                        == normalized_selected_alias
-                    ),
-                    None,
-                )
-
-                if not selected_participant or self._normalize_alias(
-                    selected_participant["alias"]
-                ) == self._normalize_alias(last_speaker or ""):
                     await self.emit_status(
                         "info",
-                        "Manager selection was invalid/repeated. Falling back.",
+                        f"Round {round_num + 1}/{rounds} — Turn {turn + 1}/{turns_per_round}: Manager selecting next speaker...",
                         False,
                     )
-                    last_speaker_index = next(
-                        (
-                            i
-                            for i, p in enumerate(participants)
-                            if p["alias"] == last_speaker
-                        ),
-                        -1,
-                    )
-                    fallback_index = (last_speaker_index + 1) % len(participants)
-                    selected_participant = participants[fallback_index]
 
-                participants_to_run = [selected_participant]
-                last_speaker = selected_participant["alias"]
-            else:
-                participants_to_run = participants
-
-            for participant in participants_to_run:
-                model = participant["model"]
-                alias = participant["alias"]
-
-                # Determine if this model can use tools
-                participant_tools_specs = None
-                p_tools = participant_tools_map.get(model, {})
-                tools_dict = p_tools.get("dict", {})
-                tools_specs = p_tools.get("specs", None)
-
-                if tools_dict and tools_specs:
-                    if self._check_model_native_fc(model):
-                        participant_tools_specs = tools_specs
-                        logger.info(
-                            f"[MultiModelTools] Sending {len(tools_specs)} tool specs to {alias} ({model})"
-                        )
-                    else:
-                        logger.warning(
-                            f"Model {model} does not have native function calling enabled. "
-                            f"Tools will be skipped for {alias}."
-                        )
-
-                # Get the model's configured system message (from OWUI model settings)
-                model_system_message = ""
-                model_db_info = Models.get_model_by_id(model)
-                if model_db_info and model_db_info.params:
-                    p = (
-                        model_db_info.params.model_dump()
-                        if hasattr(model_db_info.params, "model_dump")
-                        else {}
-                    )
-                    model_system_message = p.get("system", "") or ""
-
-                # Build system prompt: model's system message + participant config + conversation flow
-                system_parts = []
-                if model_system_message.strip():
-                    system_parts.append(model_system_message.strip())
-                if participant["system_message"].strip():
-                    system_parts.append(participant["system_message"].strip())
-                system_parts.append(
-                    f"{valves.AllParticipantsApendedMessage} {alias}\n\n"
-                    "This is a multi-participant conversation. Messages from other "
-                    "participants appear as user messages labeled with their name. "
-                    "Respond naturally in character without prefixing your name."
-                )
-
-                # If this participant has tools, add explicit tool-use guidance
-                if participant_tools_specs:
-                    tool_names = [t["function"]["name"] for t in participant_tools_specs if "function" in t]
-                    system_parts.append(
-                        "TOOL USE INSTRUCTIONS:\n"
-                        f"You have access to the following tools: {', '.join(tool_names)}.\n"
-                        "When the user's request can be fulfilled by a tool, call the appropriate tool.\n"
-                        "CRITICAL: After every tool call, once you receive the tool results, "
-                        "you MUST produce a visible text response summarizing or presenting the result to the user. "
-                        "Never stop at just the tool call — always follow up with a written reply."
-                    )
-
-                system_prompt = "\n\n".join(system_parts)
-
-                # Build messages with role-based separation:
-                # - Other participants' responses → user role with speaker label
-                # - This participant's own past responses → assistant role
-                #   (including private tool call messages if any)
-                adapted_history = []
-                for msg in conversation_history:
-                    speaker = msg.get("_speaker")
-                    if speaker and speaker != alias:
-                        # Other participant's response → present as user message
-                        # (tool calls are private — only show final text)
-                        adapted_history.append(
+                    try:
+                        manager_response = await generate_chat_completions(
+                            self.__request__,
                             {
-                                "role": "user",
-                                "content": f"{speaker} says: {msg['content']}",
-                            }
+                                "model": resolved_manager_model,
+                                "messages": manager_messages,
+                                "stream": False,
+                            },
+                            user=self.__user__,
                         )
-                    elif speaker and speaker == alias:
-                        # This participant's own past response → assistant role
-                        # Include private tool interaction chain if any
-                        tool_msgs = msg.get("_tool_messages", [])
-                        for tm in tool_msgs:
-                            adapted_history.append(
-                                {k: v for k, v in tm.items() if not k.startswith("_")}
+                        selected_alias = manager_response["choices"][0]["message"][
+                            "content"
+                        ].strip()
+                    except Exception as e:
+                        logger.error(f"Manager failed to select: {e}")
+                        selected_alias = ""
+
+                    normalized_selected_alias = self._normalize_alias(selected_alias)
+                    selected_participant = next(
+                        (
+                            p
+                            for p in participants
+                            if self._normalize_alias(p["alias"])
+                            == normalized_selected_alias
+                        ),
+                        None,
+                    )
+
+                    if not selected_participant or self._normalize_alias(
+                        selected_participant["alias"]
+                    ) == self._normalize_alias(last_speaker or ""):
+                        await self.emit_status(
+                            "info",
+                            "Manager selection was invalid/repeated. Falling back.",
+                            False,
+                        )
+                        last_speaker_index = next(
+                            (
+                                i
+                                for i, p in enumerate(participants)
+                                if p["alias"] == last_speaker
+                            ),
+                            -1,
+                        )
+                        fallback_index = (last_speaker_index + 1) % len(participants)
+                        selected_participant = participants[fallback_index]
+
+                    participants_to_run = [selected_participant]
+                    last_speaker = selected_participant["alias"]
+                else:
+                    participants_to_run = participants
+
+                for participant in participants_to_run:
+                    model = participant["model"]
+                    alias = participant["alias"]
+
+                    # Determine if this model can use tools
+                    participant_tools_specs = None
+                    p_tools = participant_tools_map.get(model, {})
+                    tools_dict = p_tools.get("dict", {})
+                    tools_specs = p_tools.get("specs", None)
+
+                    if tools_dict and tools_specs:
+                        if self._check_model_native_fc(model):
+                            participant_tools_specs = tools_specs
+                            logger.info(
+                                f"[MultiModelTools] Sending {len(tools_specs)} tool specs to {alias} ({model})"
                             )
-                        adapted_history.append(
-                            {"role": "assistant", "content": msg["content"]}
+                        else:
+                            logger.warning(
+                                f"Model {model} does not have native function calling enabled. "
+                                f"Tools will be skipped for {alias}."
+                            )
+
+                    # Get the model's configured system message (from OWUI model settings)
+                    model_system_message = ""
+                    model_db_info = Models.get_model_by_id(model)
+                    if model_db_info and model_db_info.params:
+                        p = (
+                            model_db_info.params.model_dump()
+                            if hasattr(model_db_info.params, "model_dump")
+                            else {}
                         )
-                    else:
-                        # Original user/system messages → keep as-is
-                        adapted_history.append(msg)
+                        model_system_message = p.get("system", "") or ""
 
-                messages = [
-                    {"role": "system", "content": system_prompt}
-                ] + adapted_history
+                    # Build system prompt: model's system message + participant config + conversation flow
+                    system_parts = []
+                    if model_system_message.strip():
+                        system_parts.append(model_system_message.strip())
+                    if participant["system_message"].strip():
+                        system_parts.append(participant["system_message"].strip())
+                    system_parts.append(
+                        f"{valves.AllParticipantsApendedMessage} {alias}\n\n"
+                        "This is a multi-participant conversation. Messages from other "
+                        "participants appear as user messages labeled with their name. "
+                        "Respond naturally in character without prefixing your name."
+                    )
 
-                await self.emit_status(
-                    "info", f"Getting response from: {alias} ({model})...", False
-                )
-
-                try:
-                    p_idx = participants.index(participant) % len(SPEAKER_COLORS)
-                    color = SPEAKER_COLORS[p_idx]
-                    title_text = f"\n\n### {color} {alias}\n\n"
-                    total_emitted += title_text
-                    await self.emit_replace(total_emitted)
-
-                    # Emit warning if tools configured but model lacks native FC
-                    if tools_dict and not participant_tools_specs:
-                        warn_tag = (
-                            '<details type="tool_calls" done="true" id="warn" '
-                            f'name="⚠️ Tools Unavailable" '
-                            f'arguments="&quot;&quot;" '
-                            f'result="&quot;Model {html_module.escape(model)} does not have '
-                            f'native function calling enabled. Tools skipped for {html_module.escape(alias)}.&quot;" '
-                            f'files="" embeds="">\n'
-                            f"<summary>Tools Unavailable</summary>\n</details>\n"
+                    # If this participant has tools, add explicit tool-use guidance
+                    if participant_tools_specs:
+                        tool_names = [t["function"]["name"] for t in participant_tools_specs if "function" in t]
+                        system_parts.append(
+                            "TOOL USE INSTRUCTIONS:\n"
+                            f"You have access to the following tools: {', '.join(tool_names)}.\n"
+                            "When the user's request can be fulfilled by a tool, call the appropriate tool.\n"
+                            "CRITICAL: After every tool call, once you receive the tool results, "
+                            "you MUST produce a visible text response summarizing or presenting the result to the user. "
+                            "Never stop at just the tool call — always follow up with a written reply."
                         )
-                        total_emitted += warn_tag
+
+                    system_prompt = "\n\n".join(system_parts)
+
+                    # Build messages with role-based separation:
+                    # - Other participants' responses → user role with speaker label
+                    # - This participant's own past responses → assistant role
+                    #   (including private tool call messages if any)
+                    adapted_history = []
+                    for msg in conversation_history:
+                        speaker = msg.get("_speaker")
+                        if speaker and speaker != alias:
+                            # Other participant's response → present as user message
+                            # (tool calls are private — only show final text)
+                            adapted_history.append(
+                                {
+                                    "role": "user",
+                                    "content": f"{speaker} says: {msg['content']}",
+                                }
+                            )
+                        elif speaker and speaker == alias:
+                            # This participant's own past response → assistant role
+                            # Include private tool interaction chain if any
+                            tool_msgs = msg.get("_tool_messages", [])
+                            for tm in tool_msgs:
+                                adapted_history.append(
+                                    {k: v for k, v in tm.items() if not k.startswith("_")}
+                                )
+                            adapted_history.append(
+                                {"role": "assistant", "content": msg["content"]}
+                            )
+                        else:
+                            # Original user/system messages → keep as-is
+                            adapted_history.append(msg)
+
+                    messages = [
+                        {"role": "system", "content": system_prompt}
+                    ] + adapted_history
+
+                    await self.emit_status(
+                        "info", f"Getting response from: {alias} ({model})...", False
+                    )
+
+                    try:
+                        p_idx = participants.index(participant) % len(SPEAKER_COLORS)
+                        color = SPEAKER_COLORS[p_idx]
+                        title_text = f"\n\n### {color} {alias}\n\n"
+                        total_emitted += title_text
                         await self.emit_replace(total_emitted)
 
-                    full_response = ""
-                    reasoning_buffer = ""
-                    reasoning_start_time = None
-                    accumulated_tool_calls = []
-                    metadata = body.get("metadata", {})
+                        # Emit warning if tools configured but model lacks native FC
+                        if tools_dict and not participant_tools_specs:
+                            warn_tag = (
+                                '<details type="tool_calls" done="true" id="warn" '
+                                f'name="⚠️ Tools Unavailable" '
+                                f'arguments="&quot;&quot;" '
+                                f'result="&quot;Model {html_module.escape(model)} does not have '
+                                f'native function calling enabled. Tools skipped for {html_module.escape(alias)}.&quot;" '
+                                f'files="" embeds="">\n'
+                                f"<summary>Tools Unavailable</summary>\n</details>\n"
+                            )
+                            total_emitted += warn_tag
+                            await self.emit_replace(total_emitted)
 
-                    # ── Streaming + tool call accumulation helper ────
-                    async def _stream_and_accumulate(stream_messages, tc_specs):
-                        nonlocal full_response, reasoning_buffer
-                        nonlocal reasoning_start_time, total_emitted
-                        nonlocal accumulated_tool_calls
-
+                        full_response = ""
+                        reasoning_buffer = ""
+                        reasoning_start_time = None
                         accumulated_tool_calls = []
+                        metadata = body.get("metadata", {})
 
-                        async for event in self.get_streaming_completion(
-                            stream_messages,
-                            model=model,
-                            valves=valves,
-                            tools_specs=tc_specs,
-                        ):
-                            event_type = event.get("type")
-                            if event_type == "error":
-                                total_emitted += event.get("text", "")
-                                await self.emit_replace(total_emitted)
-                                continue
+                        # ── Streaming + tool call accumulation helper ────
+                        async def _stream_and_accumulate(stream_messages, tc_specs):
+                            nonlocal full_response, reasoning_buffer
+                            nonlocal reasoning_start_time, total_emitted
+                            nonlocal accumulated_tool_calls
 
-                            if event_type == "tool_calls":
-                                # Accumulate tool call deltas (same as middleware.py)
-                                for delta_tc in event.get("data", []):
-                                    tc_index = delta_tc.get("index")
-                                    if tc_index is not None:
-                                        existing = None
-                                        for atc in accumulated_tool_calls:
-                                            if atc.get("index") == tc_index:
-                                                existing = atc
-                                                break
-                                        if existing is None:
-                                            delta_tc.setdefault("function", {})
-                                            delta_tc["function"].setdefault("name", "")
-                                            delta_tc["function"].setdefault(
-                                                "arguments", ""
-                                            )
-                                            accumulated_tool_calls.append(delta_tc)
-                                        else:
-                                            dn = delta_tc.get("function", {}).get(
-                                                "name"
-                                            )
-                                            da = delta_tc.get("function", {}).get(
-                                                "arguments"
-                                            )
-                                            if dn:
-                                                existing["function"]["name"] += dn
-                                            if da:
-                                                existing["function"]["arguments"] += da
-                                continue
+                            accumulated_tool_calls = []
 
-                            if event_type == "reasoning":
-                                reasoning_piece = event.get("text", "")
-                                if reasoning_piece:
-                                    if reasoning_start_time is None:
-                                        reasoning_start_time = time.time()
-                                    reasoning_buffer += reasoning_piece
-                                    # Format with blockquote prefix (> ) like middleware
+                            async for event in self.get_streaming_completion(
+                                stream_messages,
+                                model=model,
+                                valves=valves,
+                                tools_specs=tc_specs,
+                            ):
+                                event_type = event.get("type")
+                                if event_type == "error":
+                                    total_emitted += event.get("text", "")
+                                    await self.emit_replace(total_emitted)
+                                    continue
+
+                                if event_type == "tool_calls":
+                                    # Accumulate tool call deltas (same as middleware.py)
+                                    for delta_tc in event.get("data", []):
+                                        tc_index = delta_tc.get("index")
+                                        if tc_index is not None:
+                                            existing = None
+                                            for atc in accumulated_tool_calls:
+                                                if atc.get("index") == tc_index:
+                                                    existing = atc
+                                                    break
+                                            if existing is None:
+                                                delta_tc.setdefault("function", {})
+                                                delta_tc["function"].setdefault("name", "")
+                                                delta_tc["function"].setdefault(
+                                                    "arguments", ""
+                                                )
+                                                accumulated_tool_calls.append(delta_tc)
+                                            else:
+                                                dn = delta_tc.get("function", {}).get(
+                                                    "name"
+                                                )
+                                                da = delta_tc.get("function", {}).get(
+                                                    "arguments"
+                                                )
+                                                if dn:
+                                                    existing["function"]["name"] += dn
+                                                if da:
+                                                    existing["function"]["arguments"] += da
+                                    continue
+
+                                if event_type == "reasoning":
+                                    reasoning_piece = event.get("text", "")
+                                    if reasoning_piece:
+                                        if reasoning_start_time is None:
+                                            reasoning_start_time = time.time()
+                                        reasoning_buffer += reasoning_piece
+                                        # Format with blockquote prefix (> ) like middleware
+                                        display = "\n".join(
+                                            f"> {line}"
+                                            if not line.startswith(">")
+                                            else line
+                                            for line in reasoning_buffer.splitlines()
+                                        )
+                                        await self.emit_replace(
+                                            total_emitted
+                                            + '<details type="reasoning" done="false">\n'
+                                            + "<summary>Thinking...</summary>\n"
+                                            + display
+                                            + "\n</details>\n\n"
+                                        )
+                                    continue
+
+                                # Finalize thinking block when transitioning
+                                if reasoning_buffer:
+                                    reasoning_duration = (
+                                        round(time.time() - reasoning_start_time)
+                                        if reasoning_start_time
+                                        else 1
+                                    )
                                     display = "\n".join(
-                                        f"> {line}"
-                                        if not line.startswith(">")
-                                        else line
+                                        f"> {line}" if not line.startswith(">") else line
                                         for line in reasoning_buffer.splitlines()
                                     )
-                                    await self.emit_replace(
-                                        total_emitted
-                                        + '<details type="reasoning" done="false">\n'
-                                        + "<summary>Thinking...</summary>\n"
+                                    total_emitted += (
+                                        f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
+                                        f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
                                         + display
                                         + "\n</details>\n\n"
                                     )
-                                continue
+                                    reasoning_buffer = ""
 
-                            # Finalize thinking block when transitioning
+                                if event_type == "content":
+                                    chunk_text = event.get("text", "")
+                                    if not chunk_text:
+                                        continue
+                                    full_response += chunk_text
+                                    total_emitted += self._replace_thinking_tags(chunk_text)
+                                    await self.emit_replace(total_emitted)
+                                    continue
+
+                            # Flush reasoning if stream ended during thinking
                             if reasoning_buffer:
                                 reasoning_duration = (
                                     round(time.time() - reasoning_start_time)
@@ -1503,225 +1598,197 @@ return (function() {
                                     + display
                                     + "\n</details>\n\n"
                                 )
+                                await self.emit_replace(total_emitted)
                                 reasoning_buffer = ""
 
-                            if event_type == "content":
-                                chunk_text = event.get("text", "")
-                                if not chunk_text:
-                                    continue
-                                full_response += chunk_text
-                                total_emitted += self._replace_thinking_tags(chunk_text)
-                                await self.emit_replace(total_emitted)
-                                continue
+                        # ── Initial streaming call ──────────────────────
+                        await _stream_and_accumulate(messages, participant_tools_specs)
 
-                        # Flush reasoning if stream ended during thinking
-                        if reasoning_buffer:
-                            reasoning_duration = (
-                                round(time.time() - reasoning_start_time)
-                                if reasoning_start_time
-                                else 1
-                            )
-                            display = "\n".join(
-                                f"> {line}" if not line.startswith(">") else line
-                                for line in reasoning_buffer.splitlines()
-                            )
-                            total_emitted += (
-                                f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
-                                f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
-                                + display
-                                + "\n</details>\n\n"
-                            )
-                            await self.emit_replace(total_emitted)
-                            reasoning_buffer = ""
+                        # ── Tool call execution + re-prompt loop ────────
+                        tool_interaction_messages = []
+                        if accumulated_tool_calls and participant_tools_specs:
+                            tool_call_retries = 0
+                            malformed_retries = 0
+                            current_messages = list(messages)
 
-                    # ── Initial streaming call ──────────────────────
-                    await _stream_and_accumulate(messages, participant_tools_specs)
+                            while (
+                                accumulated_tool_calls
+                                and tool_call_retries < MAX_TOOL_CALL_RETRIES
+                            ):
+                                tool_call_retries += 1
 
-                    # ── Tool call execution + re-prompt loop ────────
-                    tool_interaction_messages = []
-                    if accumulated_tool_calls and participant_tools_specs:
-                        tool_call_retries = 0
-                        malformed_retries = 0
-                        current_messages = list(messages)
+                                # ── Silent retry for malformed tool calls ───
+                                malformed = []
+                                valid = []
+                                for tc in accumulated_tool_calls:
+                                    func = tc.get("function", {})
+                                    tc_name = func.get("name", "").strip()
+                                    tc_args = func.get("arguments", "{}")
 
-                        while (
-                            accumulated_tool_calls
-                            and tool_call_retries < MAX_TOOL_CALL_RETRIES
-                        ):
-                            tool_call_retries += 1
-
-                            # ── Silent retry for malformed tool calls ───
-                            malformed = []
-                            valid = []
-                            for tc in accumulated_tool_calls:
-                                func = tc.get("function", {})
-                                tc_name = func.get("name", "").strip()
-                                tc_args = func.get("arguments", "{}")
-
-                                # Check: name must exist and be a known tool
-                                if not tc_name or tc_name not in tools_dict:
-                                    malformed.append(
-                                        f"Unknown tool '{tc_name}'" if tc_name
-                                        else "Tool call with empty name"
-                                    )
-                                    continue
-
-                                # Check: arguments must be parseable
-                                try:
-                                    ast.literal_eval(tc_args)
-                                except Exception:
-                                    try:
-                                        json.loads(tc_args)
-                                    except Exception:
+                                    # Check: name must exist and be a known tool
+                                    if not tc_name or tc_name not in tools_dict:
                                         malformed.append(
-                                            f"Malformed arguments for '{tc_name}': {tc_args[:100]}"
+                                            f"Unknown tool '{tc_name}'" if tc_name
+                                            else "Tool call with empty name"
                                         )
                                         continue
 
-                                valid.append(tc)
+                                    # Check: arguments must be parseable
+                                    try:
+                                        ast.literal_eval(tc_args)
+                                    except Exception:
+                                        try:
+                                            json.loads(tc_args)
+                                        except Exception:
+                                            malformed.append(
+                                                f"Malformed arguments for '{tc_name}': {tc_args[:100]}"
+                                            )
+                                            continue
 
-                            if malformed and malformed_retries < MAX_MALFORMED_RETRIES:
-                                malformed_retries += 1
-                                logger.warning(
-                                    f"[MultiModelTools] Silent retry {malformed_retries}/{MAX_MALFORMED_RETRIES} "
-                                    f"for {alias}: {'; '.join(malformed)}"
-                                )
+                                    valid.append(tc)
 
-                                # Build correction messages without showing anything to user
-                                available_tools = list(tools_dict.keys())
-                                correction_msg = {
-                                    "role": "user",
-                                    "content": (
-                                        f"Your previous tool call was malformed: {'; '.join(malformed)}. "
-                                        f"Available tools are: {', '.join(available_tools)}. "
-                                        "Please try again with a valid tool name and properly formatted JSON arguments. "
-                                        "After the tool call, always provide a text response."
-                                    ),
-                                }
-                                current_messages.append(correction_msg)
+                                if malformed and malformed_retries < MAX_MALFORMED_RETRIES:
+                                    malformed_retries += 1
+                                    logger.warning(
+                                        f"[MultiModelTools] Silent retry {malformed_retries}/{MAX_MALFORMED_RETRIES} "
+                                        f"for {alias}: {'; '.join(malformed)}"
+                                    )
 
-                                # Reset and re-call model
-                                full_response = ""
-                                accumulated_tool_calls = []
-                                await _stream_and_accumulate(
-                                    current_messages, participant_tools_specs
-                                )
-                                continue
-
-                            # If some valid and some malformed (past retry limit),
-                            # just execute the valid ones
-                            if malformed and valid:
-                                logger.warning(
-                                    f"[MultiModelTools] Skipping {len(malformed)} malformed tool call(s), "
-                                    f"executing {len(valid)} valid one(s) for {alias}"
-                                )
-                                accumulated_tool_calls = valid
-                            elif malformed and not valid:
-                                logger.warning(
-                                    f"[MultiModelTools] All tool calls malformed for {alias}, "
-                                    "skipping tool execution"
-                                )
-                                accumulated_tool_calls = []
-                                break
-
-                            # Execute the accumulated tool calls
-                            results, total_emitted = await self._execute_tool_calls(
-                                accumulated_tool_calls,
-                                tools_dict,
-                                metadata,
-                                total_emitted,
-                            )
-                            # Emit all accumulated files and embeds as single combined events
-                            await self._emit_accumulated_tool_files()
-                            await self._emit_accumulated_tool_embeds()
-
-                            # Build re-prompt messages (OpenAI format):
-                            # 1. Assistant message with tool_calls
-                            assistant_tc_msg = {
-                                "role": "assistant",
-                                "content": full_response or None,
-                                "tool_calls": [
-                                    {
-                                        "id": tc.get("id", str(uuid4())),
-                                        "type": "function",
-                                        "function": tc.get("function", {}),
+                                    # Build correction messages without showing anything to user
+                                    available_tools = list(tools_dict.keys())
+                                    correction_msg = {
+                                        "role": "user",
+                                        "content": (
+                                            f"Your previous tool call was malformed: {'; '.join(malformed)}. "
+                                            f"Available tools are: {', '.join(available_tools)}. "
+                                            "Please try again with a valid tool name and properly formatted JSON arguments. "
+                                            "After the tool call, always provide a text response."
+                                        ),
                                     }
-                                    for tc in accumulated_tool_calls
-                                ],
-                            }
-                            current_messages.append(assistant_tc_msg)
-                            tool_interaction_messages.append(assistant_tc_msg)
+                                    current_messages.append(correction_msg)
 
-                            # 2. Tool result messages
-                            for result in results:
-                                tool_result_msg = {
-                                    "role": "tool",
-                                    "tool_call_id": result["tool_call_id"],
-                                    "content": result.get("content", ""),
+                                    # Reset and re-call model
+                                    full_response = ""
+                                    accumulated_tool_calls = []
+                                    await _stream_and_accumulate(
+                                        current_messages, participant_tools_specs
+                                    )
+                                    continue
+
+                                # If some valid and some malformed (past retry limit),
+                                # just execute the valid ones
+                                if malformed and valid:
+                                    logger.warning(
+                                        f"[MultiModelTools] Skipping {len(malformed)} malformed tool call(s), "
+                                        f"executing {len(valid)} valid one(s) for {alias}"
+                                    )
+                                    accumulated_tool_calls = valid
+                                elif malformed and not valid:
+                                    logger.warning(
+                                        f"[MultiModelTools] All tool calls malformed for {alias}, "
+                                        "skipping tool execution"
+                                    )
+                                    accumulated_tool_calls = []
+                                    break
+
+                                # Execute the accumulated tool calls
+                                results, total_emitted = await self._execute_tool_calls(
+                                    accumulated_tool_calls,
+                                    tools_dict,
+                                    metadata,
+                                    total_emitted,
+                                )
+                                # Emit all accumulated files and embeds as single combined events
+                                await self._emit_accumulated_tool_files()
+                                await self._emit_accumulated_tool_embeds()
+
+                                # Build re-prompt messages (OpenAI format):
+                                # 1. Assistant message with tool_calls
+                                assistant_tc_msg = {
+                                    "role": "assistant",
+                                    "content": full_response or None,
+                                    "tool_calls": [
+                                        {
+                                            "id": tc.get("id", str(uuid4())),
+                                            "type": "function",
+                                            "function": tc.get("function", {}),
+                                        }
+                                        for tc in accumulated_tool_calls
+                                    ],
                                 }
-                                current_messages.append(tool_result_msg)
-                                tool_interaction_messages.append(tool_result_msg)
+                                current_messages.append(assistant_tc_msg)
+                                tool_interaction_messages.append(assistant_tc_msg)
 
-                            # Reset for next streaming round
-                            full_response = ""
+                                # 2. Tool result messages
+                                for result in results:
+                                    tool_result_msg = {
+                                        "role": "tool",
+                                        "tool_call_id": result["tool_call_id"],
+                                        "content": result.get("content", ""),
+                                    }
+                                    current_messages.append(tool_result_msg)
+                                    tool_interaction_messages.append(tool_result_msg)
 
-                            # On last retry, don't pass tools so model is forced to produce text
-                            reprompt_tools = (
-                                participant_tools_specs
-                                if tool_call_retries < MAX_TOOL_CALL_RETRIES
-                                else None
-                            )
+                                # Reset for next streaming round
+                                full_response = ""
 
-                            # Re-call model with tool results
-                            await _stream_and_accumulate(
-                                current_messages, reprompt_tools
-                            )
+                                # On last retry, don't pass tools so model is forced to produce text
+                                reprompt_tools = (
+                                    participant_tools_specs
+                                    if tool_call_retries < MAX_TOOL_CALL_RETRIES
+                                    else None
+                                )
 
-                    # ── Fallback for empty response ─────────────────
-                    if not full_response.strip():
-                        await self.emit_status(
-                            "info",
-                            f"Empty stream from {alias} ({model}). Retrying once (non-stream).",
-                            False,
-                        )
-                        # Use current_messages (includes tool results) if available,
-                        # otherwise fall back to original messages
-                        fallback_msgs = (
-                            current_messages
-                            if tool_interaction_messages
-                            else messages
-                        )
-                        fallback_response = await self.get_completion(
-                            fallback_msgs, model=model, valves=valves
-                        )
-                        if fallback_response.strip():
-                            full_response = fallback_response
-                            total_emitted += fallback_response
-                            await self.emit_replace(total_emitted)
-                        else:
+                                # Re-call model with tool results
+                                await _stream_and_accumulate(
+                                    current_messages, reprompt_tools
+                                )
+
+                        # ── Fallback for empty response ─────────────────
+                        if not full_response.strip():
                             await self.emit_status(
-                                "warning",
-                                f"No response produced by {alias} ({model}).",
+                                "info",
+                                f"Empty stream from {alias} ({model}). Retrying once (non-stream).",
                                 False,
                             )
+                            # Use current_messages (includes tool results) if available,
+                            # otherwise fall back to original messages
+                            fallback_msgs = (
+                                current_messages
+                                if tool_interaction_messages
+                                else messages
+                            )
+                            fallback_response = await self.get_completion(
+                                fallback_msgs, model=model, valves=valves
+                            )
+                            if fallback_response.strip():
+                                full_response = fallback_response
+                                total_emitted += fallback_response
+                                await self.emit_replace(total_emitted)
+                            else:
+                                await self.emit_status(
+                                    "warning",
+                                    f"No response produced by {alias} ({model}).",
+                                    False,
+                                )
 
-                    cleaned_response = clean_thinking_tags(full_response)
-                    if cleaned_response.strip():
-                        conversation_history.append(
-                            {
-                                "role": "assistant",
-                                "content": cleaned_response.strip(),
-                                "_speaker": alias,
-                                "_tool_messages": tool_interaction_messages,
-                            }
+                        cleaned_response = clean_thinking_tags(full_response)
+                        if cleaned_response.strip():
+                            conversation_history.append(
+                                {
+                                    "role": "assistant",
+                                    "content": cleaned_response.strip(),
+                                    "_speaker": alias,
+                                    "_tool_messages": tool_interaction_messages,
+                                }
+                            )
+
+                    except Exception as e:
+                        error_message = (
+                            f"Error getting response from {alias} ({model}): {e}"
                         )
-
-                except Exception as e:
-                    error_message = (
-                        f"Error getting response from {alias} ({model}): {e}"
-                    )
-                    await self.emit_status("error", error_message, True)
-                    await self.emit_message(f"\n\n**ERROR**: {error_message}\n\n")
+                        await self.emit_status("error", error_message, True)
+                        await self.emit_message(f"\n\n**ERROR**: {error_message}\n\n")
 
         await self.emit_status("success", "Conversation round completed.", True)
 
