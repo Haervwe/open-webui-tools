@@ -3,7 +3,7 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.3.0
+version: 2.5.0
 """
 
 import logging
@@ -763,6 +763,13 @@ return (function() {
                 self.__user__,
             )
 
+            # Accumulate embeds from process_tool_result (same pattern as files)
+            if result_embeds:
+                self._accumulated_tool_embeds.extend(result_embeds)
+                logger.debug(
+                    f"Accumulated {len(result_embeds)} embed(s) from process_tool_result for {name}"
+                )
+
             # Replace executing tag with completed tag
             total_emitted = total_emitted.replace(executing_tag, "")
             done_tag = self._build_tool_call_details(
@@ -801,6 +808,21 @@ return (function() {
             )
             # Clear after emitting so the next participant doesn't re-emit previous files
             self._accumulated_tool_files = []
+
+    async def _emit_accumulated_tool_embeds(self):
+        """Emit a single combined embeds event with all accumulated tool embeds.
+        Unlike files, embeds are NOT cleared after emitting — each emission sends
+        the full list so that all embeds from all participants remain visible."""
+        if self._accumulated_tool_embeds and self.__current_event_emitter__:
+            await self.__current_event_emitter__(
+                {
+                    "type": "embeds",
+                    "data": {"embeds": list(self._accumulated_tool_embeds)},
+                }
+            )
+            logger.debug(
+                f"Emitted combined embeds with {len(self._accumulated_tool_embeds)} embed(s)"
+            )
 
     async def emit_message(self, message: str):
         if self.__current_event_emitter__:
@@ -948,13 +970,18 @@ return (function() {
         last_speaker = None
 
         # 2. Load tools (per-participant instead of global-only)
-        # tool_ids come from the request body (UI tool picker) or metadata
-        global_tool_ids = body.get("tool_ids") or []
+        # tool_ids come from metadata (which is popped from form_data by functions.py
+        # before the pipe receives body, so we must read from __metadata__)
+        global_tool_ids = self.__metadata__.get("tool_ids") or []
         if not global_tool_ids:
-            global_tool_ids = body.get("metadata", {}).get("tool_ids") or []
+            # Fallback: check body in case it wasn't popped (e.g. direct API calls)
+            global_tool_ids = body.get("tool_ids") or []
 
-        # Proxy event emitter for tools: intercepts 'chat:message:files' events
+        logger.info(f"[MultiModelTools] Global tool_ids from request: {global_tool_ids}")
+
+        # Proxy event emitter for tools: intercepts 'chat:message:files' and 'embeds' events
         self._accumulated_tool_files = []
+        self._accumulated_tool_embeds = []
 
         async def _tool_event_proxy(event):
             event_type = event.get("type", "")
@@ -964,6 +991,13 @@ return (function() {
                 logger.debug(
                     f"Captured {len(files)} file(s) from tool, "
                     f"total accumulated: {len(self._accumulated_tool_files)}"
+                )
+            elif event_type == "embeds":
+                embeds = event.get("data", {}).get("embeds", [])
+                self._accumulated_tool_embeds.extend(embeds)
+                logger.debug(
+                    f"Captured {len(embeds)} embed(s) from tool, "
+                    f"total accumulated: {len(self._accumulated_tool_embeds)}"
                 )
             else:
                 if __event_emitter__:
@@ -1175,6 +1209,7 @@ return (function() {
             }
 
         MAX_TOOL_CALL_RETRIES = 5
+        MAX_MALFORMED_RETRIES = 2  # Silent retries for malformed tool calls
 
         # 3. Run Conversation Rounds
         # total_emitted tracks ALL content sent to the frontend across
@@ -1506,6 +1541,7 @@ return (function() {
                     tool_interaction_messages = []
                     if accumulated_tool_calls and participant_tools_specs:
                         tool_call_retries = 0
+                        malformed_retries = 0
                         current_messages = list(messages)
 
                         while (
@@ -1514,6 +1550,80 @@ return (function() {
                         ):
                             tool_call_retries += 1
 
+                            # ── Silent retry for malformed tool calls ───
+                            malformed = []
+                            valid = []
+                            for tc in accumulated_tool_calls:
+                                func = tc.get("function", {})
+                                tc_name = func.get("name", "").strip()
+                                tc_args = func.get("arguments", "{}")
+
+                                # Check: name must exist and be a known tool
+                                if not tc_name or tc_name not in tools_dict:
+                                    malformed.append(
+                                        f"Unknown tool '{tc_name}'" if tc_name
+                                        else "Tool call with empty name"
+                                    )
+                                    continue
+
+                                # Check: arguments must be parseable
+                                try:
+                                    ast.literal_eval(tc_args)
+                                except Exception:
+                                    try:
+                                        json.loads(tc_args)
+                                    except Exception:
+                                        malformed.append(
+                                            f"Malformed arguments for '{tc_name}': {tc_args[:100]}"
+                                        )
+                                        continue
+
+                                valid.append(tc)
+
+                            if malformed and malformed_retries < MAX_MALFORMED_RETRIES:
+                                malformed_retries += 1
+                                logger.warning(
+                                    f"[MultiModelTools] Silent retry {malformed_retries}/{MAX_MALFORMED_RETRIES} "
+                                    f"for {alias}: {'; '.join(malformed)}"
+                                )
+
+                                # Build correction messages without showing anything to user
+                                available_tools = list(tools_dict.keys())
+                                correction_msg = {
+                                    "role": "user",
+                                    "content": (
+                                        f"Your previous tool call was malformed: {'; '.join(malformed)}. "
+                                        f"Available tools are: {', '.join(available_tools)}. "
+                                        "Please try again with a valid tool name and properly formatted JSON arguments. "
+                                        "After the tool call, always provide a text response."
+                                    ),
+                                }
+                                current_messages.append(correction_msg)
+
+                                # Reset and re-call model
+                                full_response = ""
+                                accumulated_tool_calls = []
+                                await _stream_and_accumulate(
+                                    current_messages, participant_tools_specs
+                                )
+                                continue
+
+                            # If some valid and some malformed (past retry limit),
+                            # just execute the valid ones
+                            if malformed and valid:
+                                logger.warning(
+                                    f"[MultiModelTools] Skipping {len(malformed)} malformed tool call(s), "
+                                    f"executing {len(valid)} valid one(s) for {alias}"
+                                )
+                                accumulated_tool_calls = valid
+                            elif malformed and not valid:
+                                logger.warning(
+                                    f"[MultiModelTools] All tool calls malformed for {alias}, "
+                                    "skipping tool execution"
+                                )
+                                accumulated_tool_calls = []
+                                break
+
                             # Execute the accumulated tool calls
                             results, total_emitted = await self._execute_tool_calls(
                                 accumulated_tool_calls,
@@ -1521,8 +1631,9 @@ return (function() {
                                 metadata,
                                 total_emitted,
                             )
-                            # Emit all accumulated files as a single combined event
+                            # Emit all accumulated files and embeds as single combined events
                             await self._emit_accumulated_tool_files()
+                            await self._emit_accumulated_tool_embeds()
 
                             # Build re-prompt messages (OpenAI format):
                             # 1. Assistant message with tool_calls
