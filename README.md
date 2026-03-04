@@ -1553,10 +1553,32 @@ MIT License
 
 - Developed by Haervwe
 - Credit to the amazing teams behind:
-  - https://github.com/ollama/ollama
-  - https://github.com/open-webui/open-webui
+  - [Ollama](https://github.com/ollama/ollama)
+  - [Open WebUI](https://github.com/open-webui/open-webui)
+  - [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
+  - [Perplexica](https://github.com/ItzCrazyKns/Perplexica)
+  - [Letta](https://github.com/letta-ai/letta)
+  - [Mopidy](https://github.com/mopidy/mopidy)
+  - [Mopidy-Iris](https://github.com/jaedb/Iris)
+  - [SearXNG](https://github.com/searxng/searxng)
 - And all model trainers out there providing these amazing tools.
 
+
+### Contributors
+- [Adriaan Knapen](https://github.com/AKnapen)
+- [Florian Euler](https://github.com/FlorianEuler)
+- [Hristo Karamanliev](https://github.com/karamanliev)
+- [iChristGit](https://github.com/iChristGit)
+- [Ikko Eltociear Ashimine](https://github.com/eltociear)
+- [rahxam](https://github.com/rahxam)
+- [Tan Yong Sheng](https://github.com/tan-yong-sheng)
+- [The JSN](https://github.com/The-JSN)
+- [Zed Unknown](https://github.com/ZedUnknown)
+
+
+### Security Audit
+- [Haoyu Wang](https://github.com/LeaveerWang)
+- [Rui Yang](https://github.com/BrookeYangRui)
 ---
 
 ## 🎯 Usage Examples
