@@ -142,6 +142,17 @@ def clean_ollama_params(payload: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def extract_models_list(response: Any) -> list:
+    """Helper to safely extract model lists from Open WebUI response objects"""
+    if hasattr(response, "data"):
+        return list(response.data)
+    elif isinstance(response, dict) and "data" in response:
+        return list(response["data"])
+    elif isinstance(response, list):
+        return list(response)
+    return []
+
+
 class Filter:
     class Valves(BaseModel):
         vision_fallback_model_id: str = Field(
@@ -336,9 +347,9 @@ class Filter:
         if has_images:
             from open_webui.routers.models import get_models, get_base_models
 
-            all_models = await get_models(
-                self.__request__, self.__user__
-            ) + await get_base_models(self.__user__)
+            raw_models = await get_models(user=self.__user__)
+            raw_base_models = await get_base_models(user=self.__user__)
+            all_models = extract_models_list(raw_models) + extract_models_list(raw_base_models)
 
             router_model_obj = next(
                 (
@@ -818,9 +829,7 @@ class Filter:
                     content = msg.get("content", "")
                     if isinstance(content, str):
                         # Pattern to match marker with optional newlines before/after
-                        marker_pattern = (
-                            r"\n*\u200B\u200C\u200D\u2060(.*?)\u200B\u200C\u200D\u2060\n*"
-                        )
+                        marker_pattern = r"\n*\u200B\u200C\u200D\u2060(.*?)\u200B\u200C\u200D\u2060\n*"
                         match = re.search(marker_pattern, content)
                         if match:
                             routed_model_id = match.group(1)
@@ -844,9 +853,9 @@ class Filter:
                 logger.info("=" * 80)
 
                 try:
-                    models = await get_models(
-                        self.__request__, self.__user__
-                    ) + await get_base_models(self.__user__)
+                    raw_models = await get_models(user=self.__user__)
+                    raw_base_models = await get_base_models(user=self.__user__)
+                    models = extract_models_list(raw_models) + extract_models_list(raw_base_models)
 
                     selected_model_full = next(
                         (
@@ -880,7 +889,9 @@ class Filter:
                             logger.info(
                                 f"  Current model: {routed_model_id} (vision_capable=False)"
                             )
-                            logger.info("  Triggering fresh routing with vision filter...")
+                            logger.info(
+                                "  Triggering fresh routing with vision filter..."
+                            )
                             logger.info("=" * 80)
                             # Fall through to routing logic below by not returning
                             has_assistant_messages = False
@@ -903,10 +914,12 @@ class Filter:
 
                             knowledge = meta.get("knowledge", [])
                             if isinstance(knowledge, list) and knowledge:
-                                knowledge_files = await self._get_files_from_collections(
-                                    knowledge
+                                knowledge_files = (
+                                    await self._get_files_from_collections(knowledge)
                                 )
-                                files_data = self._merge_files(files_data, knowledge_files)
+                                files_data = self._merge_files(
+                                    files_data, knowledge_files
+                                )
                                 if self.valves.debug:
                                     logger.debug(
                                         f"Restored {len(knowledge_files)} knowledge files from routed model"
@@ -916,13 +929,17 @@ class Filter:
                                 body, selected_model, selected_model_full, files_data
                             )
                             source_owned_by = (
-                                body.get("metadata", {}).get("model", {}).get("owned_by")
+                                body.get("metadata", {})
+                                .get("model", {})
+                                .get("owned_by")
                             )
                             target_owned_by = model_data.get("owned_by")
 
                             if source_owned_by != target_owned_by:
                                 if target_owned_by == "ollama":
-                                    new_body = convert_payload_openai_to_ollama(new_body)
+                                    new_body = convert_payload_openai_to_ollama(
+                                        new_body
+                                    )
                                 else:
                                     new_body = clean_ollama_params(new_body)
 
@@ -948,17 +965,18 @@ class Filter:
                         exc_info=True,
                     )
                     return body
+
             else:
                 # No routing marker found - check if we need to re-route for vision
                 has_images_now = self._has_images(messages)
-                
+
                 if has_images_now:
                     # Check if current model has vision capability
                     try:
-                        models = await get_models(
-                            self.__request__, self.__user__
-                        ) + await get_base_models(self.__user__)
-                        
+                        raw_models = await get_models(user=self.__user__)
+                        raw_base_models = await get_base_models(user=self.__user__)
+                        models = extract_models_list(raw_models) + extract_models_list(raw_base_models)
+
                         current_model_id = body.get("model")
                         current_model_full = next(
                             (
@@ -968,7 +986,7 @@ class Filter:
                             ),
                             None,
                         )
-                        
+
                         if current_model_full:
                             current_model_data = extract_model_data(current_model_full)
                             if not is_vision_capable(current_model_data):
@@ -979,28 +997,27 @@ class Filter:
                                 logger.info(
                                     f"  Current model: {current_model_id} (vision_capable=False)"
                                 )
-                                logger.info("  Triggering fresh routing with vision filter...")
+                                logger.info(
+                                    "  Triggering fresh routing with vision filter..."
+                                )
                                 logger.info("=" * 80)
                                 # Fall through to routing logic below
                                 has_assistant_messages = False
                             else:
                                 # Current model has vision, continue without routing
                                 logger.info("=" * 80)
-                                logger.info("SKIPPING ROUTING - Conversation continuation detected")
-                                logger.info(f"  Current body['model']: {body.get('model')}")
+                                logger.info(
+                                    "SKIPPING ROUTING - Conversation continuation detected"
+                                )
+                                logger.info(
+                                    f"  Current body['model']: {body.get('model')}"
+                                )
                                 logger.info(f"  Message count: {len(messages)}")
-                                logger.info("  Current model has vision capability, no re-routing needed")
+                                logger.info(
+                                    "  Current model has vision capability, no re-routing needed"
+                                )
                                 logger.info("=" * 80)
                                 return body
-                        else:
-                            # Model not found, return as-is
-                            logger.info("=" * 80)
-                            logger.info("SKIPPING ROUTING - Conversation continuation detected")
-                            logger.info(f"  Current body['model']: {body.get('model')}")
-                            logger.info(f"  Message count: {len(messages)}")
-                            logger.info("  Current model not found in available models")
-                            logger.info("=" * 80)
-                            return body
                     except Exception as e:
                         logger.error(
                             f"Error checking current model vision capability: {e}",
@@ -1021,9 +1038,9 @@ class Filter:
         has_images = self._has_images(messages)
 
         try:
-            models = await get_models(
-                self.__request__, self.__user__
-            ) + await get_base_models(self.__user__)
+            raw_models = await get_models(user=self.__user__)
+            raw_base_models = await get_base_models(user=self.__user__)
+            models = extract_models_list(raw_models) + extract_models_list(raw_base_models)
 
             if not models:
                 logger.warning("No models returned from get_models()")
