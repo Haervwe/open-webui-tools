@@ -1574,6 +1574,7 @@ MIT License
 - [Tan Yong Sheng](https://github.com/tan-yong-sheng)
 - [The JSN](https://github.com/The-JSN)
 - [Zed Unknown](https://github.com/ZedUnknown)
+- [Ampersandru](https://github.com/ampersandru)
 
 
 ### Security Audit
