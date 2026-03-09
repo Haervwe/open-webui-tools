@@ -1566,6 +1566,7 @@ MIT License
 
 ### Contributors
 - [Adriaan Knapen](https://github.com/AKnapen)
+- [Ampersandru](https://github.com/ampersandru)
 - [Florian Euler](https://github.com/FlorianEuler)
 - [Hristo Karamanliev](https://github.com/karamanliev)
 - [iChristGit](https://github.com/iChristGit)
@@ -1574,6 +1575,7 @@ MIT License
 - [Tan Yong Sheng](https://github.com/tan-yong-sheng)
 - [The JSN](https://github.com/The-JSN)
 - [Zed Unknown](https://github.com/ZedUnknown)
+
 
 
 ### Security Audit
