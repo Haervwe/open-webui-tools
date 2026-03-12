@@ -1108,8 +1108,17 @@ To configure the conversation:
 3. **Configure agents**: Set your models, aliases and system prompts.
 4. **Save and Start**: Click "Start Conversation" to begin the multi-agent session.
 
-![Multi Model Conversation Valves](img/conversations.png)
+![Multi Model Conversation Valves](img/conversation_user_valves.png)
 *Example of Multi Model Conversations User Valves configuration panel*
+
+![Conversations Setup Popup](img/conversations_setup_popup.png)
+*Example of Multi Model Conversations Setup Popup*
+
+### Video Demos
+
+![Conversation v2 Demo 1](img/conversations_v2_1.gif)
+
+![Conversation v2 Demo 2](img/conversations_v2_2.gif)
 
 ### Usage
 
