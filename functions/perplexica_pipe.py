@@ -265,16 +265,21 @@ class Pipe:
         chat_provider_id = None
         embedding_provider_id = None
 
+        target_chat = self.valves.perplexica_chat_model.lower()
+        target_embed = self.valves.perplexica_embedding_model.lower()
+
         for provider in providers:
             pid = provider.get("id", "")
             if not chat_provider_id:
                 for m in provider.get("chatModels", []):
-                    if m.get("key") == self.valves.perplexica_chat_model:
+                    aliases = [m.get("key"), m.get("name"), m.get("displayName")]
+                    if any(a and str(a).lower() == target_chat for a in aliases):
                         chat_provider_id = pid
                         break
             if not embedding_provider_id:
                 for m in provider.get("embeddingModels", []):
-                    if m.get("key") == self.valves.perplexica_embedding_model:
+                    aliases = [m.get("key"), m.get("name"), m.get("displayName")]
+                    if any(a and str(a).lower() == target_embed for a in aliases):
                         embedding_provider_id = pid
                         break
 

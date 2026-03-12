@@ -32,7 +32,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 
 - **Planner Agent v2** - Advanced autonomous agent with specialized models, interactive guidance, and comprehensive execution management
 - **arXiv Research MCTS** - Advanced research with Monte Carlo Tree Search
-- **Multi Model Conversations** - Multi-agent discussions
+- **Multi Model Conversations v2** - Multi-agent discussions with interactive UI, tool support, and improved reasoning handling
 - **Resume Analyzer** - Professional resume analysis
 - **Mopidy Music Controller** - Music server management
 - **Letta Agent** - Autonomous agent integration
@@ -113,7 +113,7 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 15. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
 16. [Planner Agent v2](#planner-agent-v2)
 17. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-18. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
+18. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
 19. [Resume Analyzer Pipe](#resume-analyzer-pipe)
 20. [Mopidy Music Controller](#mopidy-music-controller)
 21. [Letta Agent Pipe](#letta-agent-pipe)
@@ -1070,41 +1070,43 @@ Search arXiv.org for relevant academic papers and iteratively refine a research 
 
 ---
 
-### Multi Model Conversations Pipe
+### Multi Model Conversations v2 Pipe
 
 ### Description
 
-Simulate conversations between multiple language models, each acting as a distinct character. Configure up to 5 participants with unique personas, models, and behaviors. This pipe enables engaging multi-agent discussions, debates, and collaborative problem-solving scenarios.
+An advanced multi-model conversation system that enables interactive, multi-agent discussions with a custom configuration UI. Feature parity with the latest Open WebUI capabilities including tool support, reasoning tag handling (thinking blocks), and dynamic speaker management. Configure up to 5 participants with unique personas and models, and use the optional Group Chat Manager to orchestrate the discussion flow.
 
 ### Configuration
 
-This pipe features **User Valves** - configurable settings that are unique per user and can be customized for each individual chat session. This means each user can have their own conversation setups, and different chats can have different participant configurations.
+Version 2 introduces a sophisticated **Configuration Overlay** that allows you to set up your multi-agent conversation visually. It still supports **User Valves** for defaults, but the primary way to configure a chat is through the interactive UI.
+
+**Key Features:**
+
+- **Dynamic Speaker Selection**: Enables or disables the Group Chat Manager.
+- **Model-Specific Prompts**: Set unique system messages for each participant.
+- **Tool Integration**: Models can now use available tools within the conversation.
+- **Reasoning Support**: Full support for "thinking" models with collapsible reasoning blocks.
 
 **Core Settings:**
 
-- `number_of_participants`: Set the number of participants (1-5)
-- `rounds_per_user_message`: How many rounds of replies before the user can send another message
+- `NUM_PARTICIPANTS`: Set the number of participants (1-5)
+- `ROUNDS_PER_CONVERSATION`: Total rounds of replies in the conversation
+- `UseGroupChatManager`: Enable dynamic speaker selection by a manager model
 
-**Per-Participant Configuration (for each of the 5 participants):**
+**Per-Participant Configuration:**
 
-- `participant_[1-5]_model`: Model for each participant (e.g., qwen3:14b, gpt-4, claude-3)
-- `participant_[1-5]_alias`: Display name for each participant (e.g., "Optimist", "Skeptic")
-- `participant_[1-5]_system_message`: Persona and instructions for each participant
-- `all_participants_appended_message`: Global instruction appended to each prompt
+- `Participant[1-5]Model`: Model for each participant
+- `Participant[1-5]Alias`: Display name for each participant
+- `Participant[1-5]SystemMessage`: Persona and instructions for each participant
 
-**Model Parameters:**
+### Accessing the Configuration UI
 
-- `temperature`, `top_k`, `top_p`: Standard model parameters for generation control
+To configure the conversation:
 
-### Accessing User Valves
-
-To configure the conversation participants and settings:
-
-1. **In the new chat interface:** Click the settings icon (gear icon) in the chat input area
-2. A "Valves" panel will open showing all configurable parameters
-3. Adjust the number of participants, models, aliases, and system messages
-4. Each chat can have its own unique configuration
-5. Settings are saved per-chat, allowing you to maintain different conversation setups
+1. **Select the Pipe**: Choose "Multi Model Conversations v2 Pipe" as your model.
+2. **Open Configuration**: Click the **settings icon** (list icon in a new message) in the chat input area OR look for the **Configuration Overlay** that appears when starting a new chat.
+3. **Configure agents**: Set your models, aliases and system prompts.
+4. **Save and Start**: Click "Start Conversation" to begin the multi-agent session.
 
 ![Multi Model Conversation Valves](img/conversations.png)
 *Example of Multi Model Conversations User Valves configuration panel*
