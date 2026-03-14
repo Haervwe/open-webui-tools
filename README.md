@@ -41,6 +41,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 
 ### 🔧 **Filters**
 
+- **Doodle Paint** - Toggleable filter that opens a paint canvas before sending each message
 - **Prompt Enhancer** - Automatic prompt improvement
 - **Semantic Router** - Intelligent model selection
 - **Full Document** - File processing capabilities
@@ -120,16 +121,17 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 22. [Perplexica Pipe](#perplexica-pipe)
 23. [OpenRouter Image Pipe](#openrouter-image-pipe)
 24. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-25. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-26. [Semantic Router Filter](#semantic-router-filter)
-27. [Full Document Filter](#full-document-filter)
-28. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-29. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-30. [Installation](#installation)
-31. [Contributing](#contributing)
-32. [License](#license)
-33. [Credits](#credits)
-34. [Support](#support)
+25. [Doodle Paint Filter](#doodle-paint-filter)
+26. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+27. [Semantic Router Filter](#semantic-router-filter)
+28. [Full Document Filter](#full-document-filter)
+29. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+30. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+31. [Installation](#installation)
+32. [Contributing](#contributing)
+33. [License](#license)
+34. [Credits](#credits)
+35. [Support](#support)
 ---
 
 ## 🧪 Tools
@@ -1329,6 +1331,40 @@ Example: [nytimes.com](https://nytimes.com/some-page).
 The filter processes annotations in the response stream and emits citation events with source URLs, titles, and metadata for each web search result.
 
 ## 🔧 Filters
+
+### Doodle Paint Filter
+
+### Description
+
+Toggleable filter that opens a paint canvas before sending each message, letting you attach a hand-drawn sketch to your prompt. Perfect for visually explaining concepts, requesting changes to UI drafts, or adding a personal touch to your AI interactions.
+
+### Features
+
+- **Integrated Canvas**: Opens a sleek, fullscreen paint canvas directly within your Open WebUI space.
+- **Rich Tools**: Includes a pen, eraser, color palette, custom color picker, brush size adjustment, clear canvas, and undo/redo functionality.
+- **Native Persistence**: Uses Open WebUI's native `Chats` model so generated doodles permanently attach to the user's message body, persisting seamlessly across the entire conversation history instead of as hacky assistant attachments.
+
+### Usage
+
+1. **Enable the Filter**: Turn on the Doodle Paint filter within your model configuration or parameters.
+2. **Send a Message**: Type your message and hit send.
+3. **Draw**: A beautiful fullscreen Doodle Paint canvas will automatically appear. Draw your sketch!
+4. **Attach**: Click **✔ Attach & Send** to append the drawing to your message (or "Skip" to send text-only).
+
+
+![Doodle Paint Prompt](img/doodle_paint_prompt.png)
+*Sending a promt triggers the doodle paint canvas if active*
+
+
+![Doodle Paint Canvas](img/doodle_paint_popup.png)
+*Fullscreen paint canvas overlay*
+
+
+
+![Doodle Paint Result](img/doodle_paint_result.png)
+*Final interaction with the AI model*
+
+---
 
 ### Prompt Enhancer Filter
 
