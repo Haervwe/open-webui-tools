@@ -19,9 +19,9 @@ from typing import Callable, Awaitable, Any, Optional
 
 from fastapi import UploadFile
 from open_webui.constants import TASKS
+from open_webui.models.chats import Chats
 from open_webui.models.users import Users
 from open_webui.routers.files import upload_file_handler
-from open_webui.utils.misc import get_last_user_message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("doodle_paint")
@@ -49,7 +49,6 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
         self.toggle = True
-        self._last_doodle_file = None
         self.icon = """data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGZpbGw9Im5vbmUiIHZpZXdCb3g9IjAgMCAyNCAyNCIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2U9ImN1cnJlbnRDb2xvciI+PHBhdGggc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiBkPSJNOS41MyAxNi4xMjJhMyAzIDAgMCAwLTUuNzggMS4xMjggMi4yNSAyLjI1IDAgMCAxLTIuNCAxLjYxNCAuMTEuMTEgMCAwIDAgLjA1NS4yMUE0Ljk3NCA0Ljk3NCAwIDAgMCA1LjI1IDIwLjVjLjczIDAgMS40My0uMTYgMi4wNi0uNDM4QTE1LjAxIDE1LjAxIDAgMCAwIDkuNTMgMTYuMTIyWk05LjUzIDE2LjEyMmExNS4wNDIgMTUuMDQyIDAgMCAxIDMuMDktNC42MTFBMTUuMDgyIDE1LjA4MiAwIDAgMSAxOS43NTIgNS4yODVhLjExLjExIDAgMCAxIC4xNjUgMCAuMTEuMTEgMCAwIDEgLjAyNC4wM0ExNC41NSAxNC41NSAwIDAgMSAyMS42IDguNmwuMDQ0LjA2NGExNS4wMTYgMTUuMDE2IDAgMCAxLTIuMDg1IDUuMjE0Yy0uMjQuMzY2LS40OTYuNzItLjc2OCAxLjA2Ii8+PC9zdmc+"""
 
     def _build_canvas_js(self) -> str:
@@ -404,6 +403,7 @@ return (function() {{
         __user__: Optional[dict] = None,
         __model__: Optional[dict] = None,
         __request__: Optional[Any] = None,
+        __chat_id__: Optional[str] = None,
         __task__=None,
     ) -> dict:
         # Skip non-default tasks (title generation, search queries, etc.)
@@ -463,11 +463,24 @@ return (function() {{
                 file_entry = self._save_doodle_file(data_url, user_id, __request__)
                 if file_entry:
                     logger.info(f"Doodle Paint: file saved (id={file_entry['id']})")
+                    
+                    if __chat_id__:
+                        messages = body.get("messages", [])
+                        if messages:
+                            last_msg = messages[-1]
+                            last_msg_id = last_msg.get("id")
+                            if last_msg_id:
+                                try:
+                                    Chats.add_message_files_by_id_and_message_id(
+                                        __chat_id__,
+                                        last_msg_id,
+                                        [file_entry],
+                                    )
+                                    logger.info(f"Doodle Paint: file persisted to message {last_msg_id}")
+                                except Exception as e:
+                                    logger.error(f"Doodle Paint: failed to persist to chat {__chat_id__} message {last_msg_id}: {e}")
             except Exception as e:
                 logger.error(f"Doodle Paint: failed to save file: {e}")
-
-        # Store file entry so the outlet can attach it to the response
-        self._last_doodle_file = data_url
 
         # Inject the image into the last user message as multimodal content
         # This ensures the LLM sees the image on the current request
@@ -532,34 +545,4 @@ return (function() {{
         __user__: Optional[dict] = None,
         __model__: Optional[dict] = None,
     ) -> dict:
-        # Attach the doodle file to the assistant response so it persists
-        # in the chat and is accessible for future reference / image edits.
-        data_url = self._last_doodle_file
-        messages = body.get("messages", [])
-        message = get_last_user_message(messages)
-        if message:
-            last_msg = messages[-1]
-            current_content = last_msg.get("content", "")
-
-            # Build multimodal content array
-            content_parts = []
-
-            # Preserve existing content (could already be multimodal)
-            if isinstance(current_content, str):
-                if current_content.strip():
-                    content_parts.append({"type": "text", "text": current_content})
-            elif isinstance(current_content, list):
-                content_parts.extend(current_content)
-
-            # Append the doodle image
-            content_parts.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": data_url},
-                }
-            )
-
-        last_msg["content"] = content_parts
-        messages[-1] = last_msg
-        body["messages"] = messages
         return body
