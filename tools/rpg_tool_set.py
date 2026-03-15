@@ -6,7 +6,7 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 version: 1.0.0
 license: MIT
-required_open_webui_version: 0.6.5
+required_open_webui_version: 0.8.10
 """
 
 import random
@@ -15,6 +15,10 @@ import json
 import logging
 from typing import Optional, Dict, Any, Callable, Awaitable, List
 from pydantic import BaseModel, Field
+from open_webui.routers.images import image_generations, GenerateImageForm
+from open_webui.models.users import Users
+from open_webui.models.notes import Notes, NoteForm, NoteUpdateForm
+from fastapi import Request
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rpg_tool_set")
@@ -215,6 +219,100 @@ def format_modifier(mod: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def get_die_geometry(sides: int) -> Dict[str, Any]:
+    """Helper to return CSS geometry configurations for polyhedral dice."""
+    if sides == 4:
+        clip = "polygon(50% 0%, 0% 86.6%, 100% 86.6%)"
+        origin = "50% 57.7%"
+        faces = [
+            "rotateY(0deg) rotateX(19.5deg) translateZ(14px)",
+            "rotateY(120deg) rotateX(19.5deg) translateZ(14px)",
+            "rotateY(240deg) rotateX(19.5deg) translateZ(14px)",
+            "rotateX(-90deg) translateZ(14px)",
+        ]
+        return {"clip": clip, "origin": origin, "cx": -19.5, "cy": 0, "faces": faces}
+
+    elif sides == 8:
+        clip = "polygon(50% 0%, 0% 86.6%, 100% 86.6%)"
+        origin = "50% 57.7%"
+        tz = 28
+        faces = []
+        for i in range(4):
+            faces.append(f"rotateY({i * 90}deg) rotateX(35.3deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 90}deg) rotateX(-35.3deg) rotateZ(180deg) translateZ({tz}px)")
+        return {"clip": clip, "origin": origin, "cx": -35.3, "cy": 0, "faces": faces}
+
+    elif sides == 10 or sides == 100:
+        clip = "polygon(50% 0%, 100% 30%, 50% 100%, 0% 30%)"
+        origin = "50% 50%"
+        tz = 35
+        faces = []
+        for i in range(5):
+            faces.append(f"rotateY({i * 72}deg) rotateX(25deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(-25deg) rotateZ(180deg) translateZ({tz}px)")
+        return {"clip": clip, "origin": origin, "cx": -25, "cy": 0, "faces": faces}
+
+    elif sides == 12:
+        clip = "polygon(50% 0%, 100% 38%, 81% 100%, 19% 100%, 0% 38%)"
+        origin = "50% 50%"
+        tz = 46
+        faces = ["rotateX(90deg) translateZ(46px)"]
+        for i in range(5):
+            faces.append(f"rotateY({i * 72}deg) rotateX(26.6deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(-26.6deg) rotateZ(180deg) translateZ({tz}px)")
+        faces.append("rotateX(-90deg) translateZ(46px)")
+        return {"clip": clip, "origin": origin, "cx": -90, "cy": 0, "faces": faces}
+
+    elif sides == 20:
+        clip = "polygon(50% 0%, 0% 86.6%, 100% 86.6%)"
+        origin = "50% 57.7%"
+        tz = 51
+        faces = []
+        for i in range(5):
+            faces.append(f"rotateY({i * 72}deg) rotateX(52.6deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 72}deg) rotateX(-52.6deg) rotateZ(180deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(10.8deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(-10.8deg) rotateZ(180deg) translateZ({tz}px)")
+        return {"clip": clip, "origin": origin, "cx": -52.6, "cy": 0, "faces": faces}
+
+    faces = [
+        "rotateY(0deg) translateZ(34px)",
+        "rotateY(180deg) translateZ(34px)",
+        "rotateY(90deg) translateZ(34px)",
+        "rotateY(-90deg) translateZ(34px)",
+        "rotateX(90deg) translateZ(34px)",
+        "rotateX(-90deg) translateZ(34px)",
+    ]
+    return {
+        "clip": "none",
+        "origin": "50% 50%",
+        "cx": 0,
+        "cy": 0,
+        "faces": faces[:sides] if sides < 6 else faces,
+    }
+
+def get_die_silhouette(sides: int) -> str:
+    if sides == 4: return "polygon(50% 0%, 0% 100%, 100% 100%)"
+    if sides == 8: return "polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)"
+    if sides in (10, 100): return "polygon(50% 0%, 100% 40%, 50% 100%, 0% 40%)"
+    if sides == 12: return "polygon(50% 0%, 100% 38%, 81% 100%, 19% 100%, 0% 38%)"
+    if sides == 20: return "polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)"
+    return "none"
+
+
+
+def get_die_geometry_dict() -> Dict[int, Any]:
+    return {
+        4: get_die_geometry(4),
+        6: get_die_geometry(6),
+        8: get_die_geometry(8),
+        10: get_die_geometry(10),
+        12: get_die_geometry(12),
+        20: get_die_geometry(20),
+    }
+
+
+
 def generate_roll_embed(
     result: Dict[str, Any], context: str = "", palette_seed: int = None
 ) -> str:
@@ -236,24 +334,16 @@ def generate_roll_embed(
         r == 1 and g["sides"] == 20 for g in result["groups"] for r in g["rolls"]
     )
 
-    # Build 3D dice cubes HTML + keyframes
-    dice_cubes_html = ""
-    dice_keyframes = ""
+    # Build 2D stylized dice icons HTML
+    dice_blocks_html = ""
     die_idx = 0
     for g in result["groups"]:
         prefix = "" if g["sign"] > 0 else "-"
         for r_val in g["rolls"]:
             is_crit = r_val == g["sides"]
             is_fumble = r_val == 1 and g["sides"] >= 4
-            # Randomize spin amounts per die
-            rng = random.Random(palette_seed + die_idx * 17)
-            sx = rng.randint(2, 4)
-            sy = rng.randint(2, 4)
-            sz = rng.randint(1, 2)
-            bounce_y = rng.randint(10, 25)
-            delay_ms = die_idx * 120
+            delay_ms = die_idx * 100
 
-            # Face color for the result face
             face_bg = "#ffd700" if is_crit else ("#c0392b" if is_fumble else c0)
             face_glow = (
                 f"box-shadow:0 0 24px rgba(255,215,0,0.7),0 0 48px rgba(255,215,0,0.3);"
@@ -265,51 +355,24 @@ def generate_roll_embed(
                 )
             )
 
-            # Generate 5 random "other" face values for visual variety
-            others = [rng.randint(1, g["sides"]) for _ in range(5)]
-
-            dice_cubes_html += f"""
-      <div style="perspective:500px;width:68px;height:68px;animation-delay:{delay_ms}ms;" class="{pid}_dwrap">
-        <div class="{pid}_cube {pid}_c{die_idx}" style="width:68px;height:68px;position:relative;
-          transform-style:preserve-3d;animation:{pid}_r{die_idx} {anim_ms}ms cubic-bezier(.15,.7,.3,1) {delay_ms}ms both;">
-          <div style="position:absolute;width:68px;height:68px;display:flex;align-items:center;justify-content:center;
-            font-size:26px;font-weight:800;color:#fff;border-radius:10px;backface-visibility:hidden;
-            background:{face_bg};border:2px solid rgba(255,255,255,0.35);{face_glow}
-            transform:rotateY(0deg) translateZ(34px);">{prefix}{r_val}</div>
-          <div style="position:absolute;width:68px;height:68px;display:flex;align-items:center;justify-content:center;
-            font-size:18px;font-weight:600;color:rgba(255,255,255,0.6);border-radius:10px;backface-visibility:hidden;
-            background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.06);
-            transform:rotateY(180deg) translateZ(34px);">{others[0]}</div>
-          <div style="position:absolute;width:68px;height:68px;display:flex;align-items:center;justify-content:center;
-            font-size:18px;font-weight:600;color:rgba(255,255,255,0.6);border-radius:10px;backface-visibility:hidden;
-            background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.06);
-            transform:rotateY(90deg) translateZ(34px);">{others[1]}</div>
-          <div style="position:absolute;width:68px;height:68px;display:flex;align-items:center;justify-content:center;
-            font-size:18px;font-weight:600;color:rgba(255,255,255,0.6);border-radius:10px;backface-visibility:hidden;
-            background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.06);
-            transform:rotateY(-90deg) translateZ(34px);">{others[2]}</div>
-          <div style="position:absolute;width:68px;height:68px;display:flex;align-items:center;justify-content:center;
-            font-size:18px;font-weight:600;color:rgba(255,255,255,0.6);border-radius:10px;backface-visibility:hidden;
-            background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.06);
-            transform:rotateX(90deg) translateZ(34px);">{others[3]}</div>
-          <div style="position:absolute;width:68px;height:68px;display:flex;align-items:center;justify-content:center;
-            font-size:18px;font-weight:600;color:rgba(255,255,255,0.6);border-radius:10px;backface-visibility:hidden;
-            background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.06);
-            transform:rotateX(-90deg) translateZ(34px);">{others[4]}</div>
-        </div>
+            sil_clip = get_die_silhouette(g["sides"])
+            text_mt = '8px' if g["sides"] == 4 else '0px'
+            
+            dice_blocks_html += f"""
+      <div style="width:52px;height:52px;display:flex;align-items:center;justify-content:center;
+        font-size:20px;font-weight:800;color:#fff;background:{face_bg};
+        clip-path:{sil_clip};{face_glow};margin-bottom:8px;
+        animation:{pid}_pop 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) {delay_ms}ms both;">
+        <span style="display:block;margin-top:{text_mt};">{prefix}{r_val}</span>
       </div>"""
-
-            dice_keyframes += f"""
-    @keyframes {pid}_r{die_idx} {{
-      0%   {{ transform: rotateX(0) rotateY(0) rotateZ(0) translateY(-60px) scale(0.3); opacity:0; }}
-      15%  {{ opacity:1; transform: rotateX({sx * 360 + 200}deg) rotateY({sy * 180 + 90}deg) rotateZ({sz * 90}deg) translateY(-{bounce_y}px) scale(1.1); }}
-      40%  {{ transform: rotateX({sx * 360 + 400}deg) rotateY({sy * 360 + 180}deg) rotateZ({sz * 180 + 45}deg) translateY({bounce_y // 2}px) scale(0.95); }}
-      60%  {{ transform: rotateX({sx * 360 + 520}deg) rotateY({sy * 360 + 300}deg) rotateZ({sz * 90 - 20}deg) translateY(-{bounce_y // 3}px) scale(1.02); }}
-      80%  {{ transform: rotateX(710deg) rotateY(355deg) rotateZ(5deg) translateY(4px) scale(1); }}
-      90%  {{ transform: rotateX(720deg) rotateY(360deg) rotateZ(-2deg) translateY(-2px); }}
-      100% {{ transform: rotateX(720deg) rotateY(360deg) rotateZ(0deg) translateY(0); }}
-    }}"""
             die_idx += 1
+
+    dice_keyframes = f"""
+    @keyframes {pid}_pop {{
+      0%   {{ transform: scale(0.3); opacity:0; }}
+      60%  {{ transform: scale(1.1); opacity:1; }}
+      100% {{ transform: scale(1); opacity:1; }}
+    }}"""
 
     # Modifier chip
     mod = result["modifier"]
@@ -381,7 +444,7 @@ def generate_roll_embed(
     <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:center;
       margin-bottom:18px;padding:16px 12px;border-radius:12px;
       background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.05);min-height:80px;">
-      {dice_cubes_html}
+      {dice_blocks_html}
       {mod_html}
     </div>
 
@@ -441,6 +504,12 @@ def generate_character_embed(
     hp = char_data.get("hp", 10)
     portrait_key = char_data.get("portrait", "warrior")
     portrait_svg = PORTRAIT_SVGS.get(portrait_key, PORTRAIT_SVGS["warrior"])
+    image_url = char_data.get("image_url", "")
+
+    if image_url:
+        portrait_html = f'<img src="{_esc(image_url)}" style="width:100%;height:100%;object-fit:cover;border-radius:12px;" />'
+    else:
+        portrait_html = f'<svg viewBox="0 0 24 24" style="width:30px;height:30px;fill:{c0};">{portrait_svg}</svg>'
 
     abilities = char_data.get("abilities", {})
 
@@ -476,7 +545,7 @@ def generate_character_embed(
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
       <div style="width:56px;height:56px;border-radius:14px;background:rgba(255,255,255,0.06);
         border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-        <svg viewBox="0 0 24 24" style="width:30px;height:30px;fill:{c0};">{portrait_svg}</svg>
+        {portrait_html}
       </div>
       <div style="min-width:0;">
         <div style="font-size:20px;font-weight:700;color:#f0f0f0;letter-spacing:-0.3px;
@@ -560,6 +629,8 @@ def build_dice_roller_js(notation: str, dice_color: str, anim_speed: float) -> s
     js += f"var NOTATION='{esc_notation}';\n"
     js += f"var ANIM_MS={anim_ms};\n"
     js += f"var DICE_COLOR='{dice_color}';\n"
+    geo_data_json = json.dumps(get_die_geometry_dict())
+    js += f"var GEO_DATA={geo_data_json};\n"
     js += r"""
 var overlay=document.createElement('div');
 overlay.style.cssText='position:fixed;inset:0;z-index:999999;background:rgba(0,0,0,0.7);backdrop-filter:blur(14px);display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,sans-serif;';
@@ -620,31 +691,29 @@ rollBtn.onclick=function(){
     var cube=document.createElement('div');
     cube.style.cssText='width:72px;height:72px;position:relative;transform-style:preserve-3d;animation:rpgSpin_'+idx+' '+ANIM_MS+'ms cubic-bezier(0.2,0.8,0.3,1) forwards;';
 
-    var faceData=[
-      {tr:'rotateY(0deg) translateZ(36px)',lbl:val,main:true},
-      {tr:'rotateY(180deg) translateZ(36px)',lbl:Math.ceil(Math.random()*d.sides),main:false},
-      {tr:'rotateY(90deg) translateZ(36px)',lbl:Math.ceil(Math.random()*d.sides),main:false},
-      {tr:'rotateY(-90deg) translateZ(36px)',lbl:Math.ceil(Math.random()*d.sides),main:false},
-      {tr:'rotateX(90deg) translateZ(36px)',lbl:Math.ceil(Math.random()*d.sides),main:false},
-      {tr:'rotateX(-90deg) translateZ(36px)',lbl:Math.ceil(Math.random()*d.sides),main:false}
-    ];
+    var geo = GEO_DATA[d.sides] || GEO_DATA[6];
+    if (d.sides === 100) geo = GEO_DATA[10];
 
-    faceData.forEach(function(f){
+    geo.faces.forEach(function(tr, fi){
+      var isMain = (fi === 0);
+      var lbl = isMain ? val : Math.ceil(Math.random()*d.sides);
       var face=document.createElement('div');
-      var sz=f.main?'28':'20';
-      var wt=f.main?'800':'600';
-      var bg=f.main?DICE_COLOR:'rgba(255,255,255,0.08)';
-      var bd=f.main?'0.3':'0.06';
-      var glow=f.main?'box-shadow:0 0 20px '+DICE_COLOR+'44;':'';
-      face.style.cssText='position:absolute;width:72px;height:72px;display:flex;align-items:center;justify-content:center;font-size:'+sz+'px;font-weight:'+wt+';color:#fff;border-radius:12px;backface-visibility:hidden;background:'+bg+';border:1px solid rgba(255,255,255,'+bd+');'+glow+'transform:'+f.tr+';';
-      face.textContent=f.lbl;
+      var sz=isMain?'28':'20';
+      var wt=isMain?'800':'600';
+      var bg=isMain?DICE_COLOR:'rgba(20,20,30,0.85)';
+      var bd=isMain?'0.4':'0.25';
+      var glow=isMain?'box-shadow:0 0 20px '+DICE_COLOR+'44;':'';
+      var mt=geo.clip.startsWith('polygon(50% 0%') ? '12px' : '0px';
+      var rt=tr.includes('rotateZ(180deg)') ? 'transform:rotateZ(180deg);' : '';
+      face.style.cssText='position:absolute;width:72px;height:72px;display:flex;align-items:center;justify-content:center;font-size:'+sz+'px;font-weight:'+wt+';color:#fff;border-radius:12px;backface-visibility:hidden;background:'+bg+';border:1px solid rgba(255,255,255,'+bd+');'+glow+'clip-path:'+geo.clip+';transform-origin:'+geo.origin+';transform:'+tr+';';
+      face.innerHTML='<span style="display:block;margin-top:'+mt+';'+rt+'">'+lbl+'</span>';
       cube.appendChild(face);
     });
 
     var sx=2+Math.floor(Math.random()*3);
     var sy=2+Math.floor(Math.random()*3);
     var st=document.createElement('style');
-    st.textContent='@keyframes rpgSpin_'+idx+'{0%{transform:rotateX(0) rotateY(0) rotateZ(0)}30%{transform:rotateX('+(sx*360+180)+'deg) rotateY('+(sy*180)+'deg) rotateZ(45deg)}70%{transform:rotateX('+(sx*360+90)+'deg) rotateY('+(sy*360-45)+'deg) rotateZ(-20deg)}100%{transform:rotateX(0) rotateY(0) rotateZ(0)}}';
+    st.textContent='@keyframes rpgSpin_'+idx+'{0%{transform:rotateX(0) rotateY(0) rotateZ(0)}30%{transform:rotateX('+(sx*360+180)+'deg) rotateY('+(sy*180)+'deg) rotateZ(45deg)}70%{transform:rotateX('+(sx*360+90)+'deg) rotateY('+(sy*360-45)+'deg) rotateZ(-20deg)}100%{transform:rotateX('+(720+geo.cx-15)+'deg) rotateY('+(360+geo.cy-20)+'deg) rotateZ(0deg)}}';
     document.head.appendChild(st);
 
     wrap.appendChild(cube);
@@ -842,32 +911,26 @@ return (function() {{
     pLabel.style.cssText = labelStyle;
     pLabel.textContent = 'Portrait';
     panel.appendChild(pLabel);
-    const pRow = document.createElement('div');
-    pRow.style.cssText = 'display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;';
-    let selectedPortrait = PORTRAITS[0];
-    const pBtns = [];
-    PORTRAITS.forEach((p, i) => {{
-      const btn = document.createElement('button');
-      btn.style.cssText = `width:44px;height:44px;border-radius:10px;cursor:pointer;
-        border:2px solid ${{i===0?'#e67e22':'rgba(255,255,255,0.1)'}};
-        background:${{i===0?'rgba(230,126,34,0.15)':'rgba(255,255,255,0.04)'}};
-        color:${{i===0?'#e67e22':'#666'}};display:flex;align-items:center;justify-content:center;
-        transition:all 0.2s;`;
-      btn.innerHTML = '<svg viewBox="0 0 24 24" style="width:22px;height:22px;fill:currentColor;"><text x="12" y="17" text-anchor="middle" font-size="12">'+p[0].toUpperCase()+'</text></svg>';
-      btn.onclick = () => {{
-        selectedPortrait = p;
-        pBtns.forEach((b,j) => {{
-          const active = j === PORTRAITS.indexOf(p);
-          b.style.borderColor = active ? '#e67e22' : 'rgba(255,255,255,0.1)';
-          b.style.background = active ? 'rgba(230,126,34,0.15)' : 'rgba(255,255,255,0.04)';
-          b.style.color = active ? '#e67e22' : '#666';
-        }});
-      }};
-      pBtns.push(btn);
-      pRow.appendChild(btn);
-    }});
-    panel.appendChild(pRow);
 
+    const portraitModeWrap = document.createElement('div');
+    portraitModeWrap.style.cssText = 'display:flex;gap:12px;margin-bottom:12px;align-items:center;';
+    const portraitModeLabel = document.createElement('label');
+    portraitModeLabel.style.cssText = 'color:#ccc;font-size:12px;display:flex;align-items:center;cursor:pointer;';
+    const portraitModeCbox = document.createElement('input');
+    portraitModeCbox.type = 'checkbox';
+    portraitModeCbox.style.marginRight = '6px';
+    portraitModeLabel.appendChild(portraitModeCbox);
+    portraitModeLabel.appendChild(document.createTextNode('Generate AI Portrait'));
+    const customUrlInput = makeInput('Or Custom Image URL...');
+    customUrlInput.style.flex = '1';
+    portraitModeWrap.appendChild(portraitModeLabel);
+    portraitModeWrap.appendChild(customUrlInput);
+    panel.appendChild(portraitModeWrap);
+
+    const pRow = document.createElement('div');
+    pRow.style.cssText = 'display:none;'; // hide the row entirely
+    let selectedPortrait = PORTRAITS[0];
+    
     const actions = document.createElement('div');
     actions.style.cssText = 'display:flex;gap:8px;';
 
@@ -895,6 +958,13 @@ return (function() {{
       const hitDie = HIT_DIE[charClass] || 8;
       const hp = hitDie + conMod + ((level - 1) * (Math.floor(hitDie/2) + 1 + conMod));
 
+      // Auto-assign fallback portrait
+      let autoPortrait = 'warrior';
+      const lowerClass = charClass.toLowerCase();
+      if (lowerClass.includes('mage') || lowerClass.includes('wizard') || lowerClass.includes('sorcerer')) autoPortrait = 'mage';
+      if (lowerClass.includes('rogue') || lowerClass.includes('bard') || lowerClass.includes('ranger')) autoPortrait = 'rogue';
+      if (lowerClass.includes('cleric') || lowerClass.includes('paladin')) autoPortrait = 'cleric';
+
       cleanup();
       resolve(JSON.stringify({{
         name: charName,
@@ -903,7 +973,9 @@ return (function() {{
         level: level,
         hp: Math.max(1, hp),
         abilities: abilities,
-        portrait: selectedPortrait,
+        portrait: autoPortrait,
+        generate_image: portraitModeCbox.checked,
+        image_url: customUrlInput.value.trim()
       }}));
     }};
     btnCancel.onclick = () => {{ cleanup(); resolve(null); }};
@@ -924,6 +996,339 @@ return (function() {{
   }});
 }})()
 """
+
+
+# ---------------------------------------------------------------------------
+# Choice selector JS overlay (called via __event_call__)
+# ---------------------------------------------------------------------------
+
+
+def build_choice_selector_js(
+    prompt_text: str, choices: List[str], context: str = ""
+) -> str:
+    """Build JavaScript for an interactive choice selector overlay."""
+    safe_prompt = json.dumps(prompt_text)
+    safe_context = json.dumps(context)
+    choices_json = json.dumps(choices)
+
+    return f"""
+return (function() {{
+  return new Promise((resolve) => {{
+    const PROMPT = {safe_prompt};
+    const CONTEXT = {safe_context};
+    const CHOICES = {choices_json};
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `position:fixed;inset:0;z-index:999999;
+      background:rgba(0,0,0,0.75);backdrop-filter:blur(16px);
+      display:flex;align-items:center;justify-content:center;
+      font-family:system-ui,-apple-system,'Segoe UI',sans-serif;
+      animation:rpgChoiceFadeIn 0.3s ease;`;
+
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes rpgChoiceFadeIn {{ 0%{{opacity:0;}} 100%{{opacity:1;}} }}
+      @keyframes rpgChoiceSlideUp {{ 0%{{opacity:0;transform:translateY(20px);}} 100%{{opacity:1;transform:translateY(0);}} }}
+      @keyframes rpgChoicePulse {{ 0%{{box-shadow:0 0 0 0 rgba(230,126,34,0.4);}} 70%{{box-shadow:0 0 0 8px rgba(230,126,34,0);}} 100%{{box-shadow:0 0 0 0 rgba(230,126,34,0);}} }}
+    `;
+    document.head.appendChild(style);
+
+    const panel = document.createElement('div');
+    panel.style.cssText = `background:rgba(20,20,25,0.4);backdrop-filter:blur(12px);
+      border:1px solid rgba(255,255,255,0.1);border-radius:18px;padding:28px;
+      max-width:480px;width:92vw;max-height:90vh;overflow-y:auto;
+      box-shadow:0 16px 48px rgba(0,0,0,0.5);color:#fff;
+      animation:rpgChoiceSlideUp 0.4s cubic-bezier(0.2,0.8,0.3,1);`;
+    overlay.appendChild(panel);
+
+    // Header icon
+    const icon = document.createElement('div');
+    icon.style.cssText = 'text-align:center;margin-bottom:16px;';
+    icon.innerHTML = '<div style="display:inline-flex;width:48px;height:48px;border-radius:14px;background:rgba(230,126,34,0.15);border:1px solid rgba(230,126,34,0.25);align-items:center;justify-content:center;font-size:22px;">\\u2694\\uFE0F</div>';
+    panel.appendChild(icon);
+
+    // Prompt text
+    const prompt = document.createElement('div');
+    prompt.style.cssText = 'text-align:center;font-size:17px;font-weight:600;color:#f0f0f0;line-height:1.5;margin-bottom:8px;';
+    prompt.textContent = PROMPT;
+    panel.appendChild(prompt);
+
+    // Context text
+    if (CONTEXT) {{
+      const ctx = document.createElement('div');
+      ctx.style.cssText = 'text-align:center;font-size:12px;color:#888;font-style:italic;margin-bottom:16px;line-height:1.4;';
+      ctx.textContent = CONTEXT;
+      panel.appendChild(ctx);
+    }}
+
+    // Divider
+    const divider = document.createElement('div');
+    divider.style.cssText = 'height:1px;background:rgba(255,255,255,0.08);margin:12px 0 18px;';
+    panel.appendChild(divider);
+
+    // Choice buttons
+    const choicesWrap = document.createElement('div');
+    choicesWrap.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
+    panel.appendChild(choicesWrap);
+
+    CHOICES.forEach((choice, idx) => {{
+      const btn = document.createElement('button');
+      btn.style.cssText = `width:100%;padding:14px 18px;border-radius:12px;
+        background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);
+        color:#f0f0f0;font-size:14px;font-weight:500;cursor:pointer;
+        text-align:left;font-family:inherit;transition:all 0.2s;
+        display:flex;align-items:center;gap:12px;
+        animation:rpgChoiceSlideUp 0.4s cubic-bezier(0.2,0.8,0.3,1) ${{idx * 80 + 200}}ms both;`;
+
+      const num = document.createElement('span');
+      num.style.cssText = `display:inline-flex;align-items:center;justify-content:center;
+        width:28px;height:28px;border-radius:8px;background:rgba(230,126,34,0.2);
+        border:1px solid rgba(230,126,34,0.3);font-size:12px;font-weight:700;
+        color:#e67e22;flex-shrink:0;`;
+      num.textContent = String.fromCharCode(65 + idx);
+
+      const label = document.createElement('span');
+      label.style.cssText = 'flex:1;';
+      label.textContent = choice;
+
+      btn.appendChild(num);
+      btn.appendChild(label);
+
+      btn.onmouseenter = () => {{
+        btn.style.background = 'rgba(230,126,34,0.15)';
+        btn.style.borderColor = 'rgba(230,126,34,0.4)';
+        btn.style.transform = 'translateX(4px)';
+      }};
+      btn.onmouseleave = () => {{
+        btn.style.background = 'rgba(255,255,255,0.06)';
+        btn.style.borderColor = 'rgba(255,255,255,0.1)';
+        btn.style.transform = 'translateX(0)';
+      }};
+      btn.onclick = () => {{
+        // Highlight selection before closing
+        btn.style.background = 'rgba(230,126,34,0.3)';
+        btn.style.borderColor = 'rgba(230,126,34,0.6)';
+        btn.style.animation = 'rpgChoicePulse 0.6s ease';
+        setTimeout(() => {{
+          cleanup();
+          resolve(JSON.stringify({{ choice: choice, index: idx }}));
+        }}, 300);
+      }};
+      choicesWrap.appendChild(btn);
+    }});
+
+    const keyHandler = (e) => {{
+      if (e.key === 'Escape') {{ cleanup(); resolve(null); }}
+      // Allow keyboard selection with number keys or letter keys
+      const keyIdx = e.key.charCodeAt(0) - 65;
+      const numIdx = parseInt(e.key) - 1;
+      const idx = (keyIdx >= 0 && keyIdx < CHOICES.length) ? keyIdx : ((numIdx >= 0 && numIdx < CHOICES.length) ? numIdx : -1);
+      if (idx >= 0 && idx < CHOICES.length) {{
+        cleanup();
+        resolve(JSON.stringify({{ choice: CHOICES[idx], index: idx }}));
+      }}
+    }};
+    document.addEventListener('keydown', keyHandler);
+    function cleanup() {{
+      document.removeEventListener('keydown', keyHandler);
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }}
+
+    document.body.appendChild(overlay);
+  }});
+}})()
+"""
+
+
+def generate_choice_embed(prompt_text: str, selected: str, accent: str) -> str:
+    """Generate a small embed showing the player's choice."""
+    safe_prompt = _esc(prompt_text)
+    safe_choice = _esc(selected)
+    pid = f"rpgc{random.randint(100000, 999999)}"
+    return f"""
+<div style="display:flex;justify-content:center;width:100%;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
+<div style="position:relative;overflow:hidden;border-radius:14px;max-width:400px;width:100%;
+  box-shadow:0 12px 36px rgba(0,0,0,0.35),0 0 0 1px rgba(255,255,255,0.08);
+  color:#fff;box-sizing:border-box;margin-bottom:12px;">
+  <div style="position:absolute;inset:0;background:rgba(15,15,20,0.85);backdrop-filter:blur(12px);"></div>
+  <div style="position:relative;z-index:2;padding:16px 20px;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+      <span style="font-size:16px;">&#9876;&#65039;</span>
+      <div style="font-size:8px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:{accent};opacity:0.8;">Player Choice</div>
+    </div>
+    <div style="font-size:12px;color:#999;margin-bottom:8px;font-style:italic;">{safe_prompt}</div>
+    <div style="padding:10px 14px;border-radius:10px;background:rgba(230,126,34,0.12);
+      border:1px solid rgba(230,126,34,0.25);font-size:14px;font-weight:600;color:#f0f0f0;">
+      &#10148; {safe_choice}
+    </div>
+  </div>
+</div>
+</div>"""
+
+
+# ---------------------------------------------------------------------------
+# Confirmation prompt JS overlay (called via __event_call__)
+# ---------------------------------------------------------------------------
+
+
+def build_confirm_js(
+    prompt_text: str, confirm_label: str, cancel_label: str
+) -> str:
+    """Build JavaScript for a dramatic yes/no confirmation overlay."""
+    safe_prompt = json.dumps(prompt_text)
+    safe_confirm = json.dumps(confirm_label)
+    safe_cancel = json.dumps(cancel_label)
+
+    return f"""
+return (function() {{
+  return new Promise((resolve) => {{
+    const PROMPT = {safe_prompt};
+    const CONFIRM = {safe_confirm};
+    const CANCEL = {safe_cancel};
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `position:fixed;inset:0;z-index:999999;
+      background:rgba(0,0,0,0.8);backdrop-filter:blur(18px);
+      display:flex;align-items:center;justify-content:center;
+      font-family:system-ui,-apple-system,'Segoe UI',sans-serif;
+      animation:rpgConfFadeIn 0.3s ease;`;
+
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes rpgConfFadeIn {{ 0%{{opacity:0;}} 100%{{opacity:1;}} }}
+      @keyframes rpgConfSlideUp {{ 0%{{opacity:0;transform:translateY(30px) scale(0.95);}} 100%{{opacity:1;transform:translateY(0) scale(1);}} }}
+      @keyframes rpgConfGlow {{ 0%,100%{{opacity:0.5;}} 50%{{opacity:1;}} }}
+    `;
+    document.head.appendChild(style);
+
+    const panel = document.createElement('div');
+    panel.style.cssText = `background:rgba(25,15,15,0.5);backdrop-filter:blur(12px);
+      border:1px solid rgba(255,80,80,0.15);border-radius:18px;padding:32px;
+      max-width:420px;width:90vw;
+      box-shadow:0 20px 56px rgba(0,0,0,0.5),0 0 80px rgba(255,50,50,0.08);color:#fff;
+      text-align:center;
+      animation:rpgConfSlideUp 0.5s cubic-bezier(0.2,0.8,0.3,1);`;
+    overlay.appendChild(panel);
+
+    // Warning icon
+    const icon = document.createElement('div');
+    icon.style.cssText = 'margin-bottom:18px;';
+    icon.innerHTML = `<div style="display:inline-flex;width:56px;height:56px;border-radius:50%;
+      background:rgba(255,80,80,0.15);border:2px solid rgba(255,80,80,0.3);
+      align-items:center;justify-content:center;font-size:26px;
+      animation:rpgConfGlow 2s ease infinite;">\\u26A0\\uFE0F</div>`;
+    panel.appendChild(icon);
+
+    // Prompt
+    const prompt = document.createElement('div');
+    prompt.style.cssText = 'font-size:18px;font-weight:600;color:#f0f0f0;line-height:1.5;margin-bottom:24px;';
+    prompt.textContent = PROMPT;
+    panel.appendChild(prompt);
+
+    // Buttons
+    const btnWrap = document.createElement('div');
+    btnWrap.style.cssText = 'display:flex;gap:12px;';
+    panel.appendChild(btnWrap);
+
+    function makeBtn(label, primary) {{
+      const b = document.createElement('button');
+      b.textContent = label;
+      if (primary) {{
+        b.style.cssText = `flex:1;padding:14px 20px;border-radius:12px;
+          background:rgba(220,50,50,0.25);border:1px solid rgba(220,50,50,0.4);
+          color:#ff8a8a;font-size:14px;font-weight:700;cursor:pointer;
+          font-family:inherit;transition:all 0.2s;`;
+        b.onmouseenter = () => {{
+          b.style.background = 'rgba(220,50,50,0.4)';
+          b.style.borderColor = 'rgba(220,50,50,0.7)';
+          b.style.color = '#fff';
+        }};
+        b.onmouseleave = () => {{
+          b.style.background = 'rgba(220,50,50,0.25)';
+          b.style.borderColor = 'rgba(220,50,50,0.4)';
+          b.style.color = '#ff8a8a';
+        }};
+      }} else {{
+        b.style.cssText = `flex:1;padding:14px 20px;border-radius:12px;
+          background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);
+          color:#ccc;font-size:14px;font-weight:500;cursor:pointer;
+          font-family:inherit;transition:all 0.2s;`;
+        b.onmouseenter = () => {{
+          b.style.background = 'rgba(255,255,255,0.12)';
+          b.style.borderColor = 'rgba(255,255,255,0.2)';
+        }};
+        b.onmouseleave = () => {{
+          b.style.background = 'rgba(255,255,255,0.06)';
+          b.style.borderColor = 'rgba(255,255,255,0.1)';
+        }};
+      }}
+      return b;
+    }}
+
+    const cancelBtn = makeBtn(CANCEL, false);
+    const confirmBtn = makeBtn(CONFIRM, true);
+
+    cancelBtn.onclick = () => {{
+      cleanup();
+      resolve(JSON.stringify({{ confirmed: false, label: CANCEL }}));
+    }};
+    confirmBtn.onclick = () => {{
+      confirmBtn.style.background = 'rgba(220,50,50,0.6)';
+      confirmBtn.style.color = '#fff';
+      setTimeout(() => {{
+        cleanup();
+        resolve(JSON.stringify({{ confirmed: true, label: CONFIRM }}));
+      }}, 200);
+    }};
+
+    btnWrap.appendChild(cancelBtn);
+    btnWrap.appendChild(confirmBtn);
+
+    const keyHandler = (e) => {{
+      if (e.key === 'Escape') {{ cleanup(); resolve(JSON.stringify({{ confirmed: false, label: CANCEL }})); }}
+      if (e.key === 'Enter') {{ cleanup(); resolve(JSON.stringify({{ confirmed: true, label: CONFIRM }})); }}
+    }};
+    document.addEventListener('keydown', keyHandler);
+    function cleanup() {{
+      document.removeEventListener('keydown', keyHandler);
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }}
+
+    document.body.appendChild(overlay);
+  }});
+}})()
+"""
+
+
+def generate_confirm_embed(
+    prompt_text: str, confirmed: bool, action: str, accent: str
+) -> str:
+    """Generate a small embed showing the player's decision."""
+    safe_prompt = _esc(prompt_text)
+    safe_action = _esc(action)
+    pid = f"rpgcf{random.randint(100000, 999999)}"
+    icon = "&#9989;" if confirmed else "&#10060;"
+    color = "#4ade80" if confirmed else "#f87171"
+    label = "Confirmed" if confirmed else "Declined"
+    return f"""
+<div style="display:flex;justify-content:center;width:100%;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
+<div style="position:relative;overflow:hidden;border-radius:14px;max-width:400px;width:100%;
+  box-shadow:0 12px 36px rgba(0,0,0,0.35),0 0 0 1px rgba(255,255,255,0.08);
+  color:#fff;box-sizing:border-box;margin-bottom:12px;">
+  <div style="position:absolute;inset:0;background:rgba(15,15,20,0.85);backdrop-filter:blur(12px);"></div>
+  <div style="position:relative;z-index:2;padding:16px 20px;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+      <span style="font-size:16px;">{icon}</span>
+      <div style="font-size:8px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:{color};">{label}</div>
+    </div>
+    <div style="font-size:12px;color:#999;margin-bottom:8px;font-style:italic;">{safe_prompt}</div>
+    <div style="padding:10px 14px;border-radius:10px;background:rgba({('74,222,128' if confirmed else '248,113,113')},0.1);
+      border:1px solid {color}33;font-size:14px;font-weight:600;color:#f0f0f0;">
+      {safe_action}
+    </div>
+  </div>
+</div>
+</div>"""
 
 
 # ---------------------------------------------------------------------------
@@ -959,11 +1364,12 @@ class Tools:
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
     ) -> str:
         """
-        Roll dice with an interactive 3D animated overlay. The user sees the dice
-        tumble and can re-roll or accept the result.
+        Roll dice for the PLAYER with a 3D animated overlay. The player physically clicks to roll and accepts the result.
+        ONLY use this when the player character performs an action that requires a dice check (attacks, saves, skill checks, etc.).
+        NEVER use this for NPC or GM rolls — use quick_roll instead.
 
         :param notation: Dice notation (e.g. "2d20+5", "4d6", "1d100", "3d8-2").
-        :param context: Optional context for the roll (e.g. "Attack roll", "Perception check").
+        :param context: What the roll is for — always provide this (e.g. "Strength check to break the door", "Attack roll vs Goblin").
         """
         if __event_emitter__:
             await __event_emitter__(
@@ -1052,13 +1458,15 @@ class Tools:
 
     async def create_character(
         self,
+        __request__: Request | None = None,
+        __user__: dict[str, Any] | None = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
     ) -> str:
         """
-        Open an interactive character creation form. The user fills in name, race,
-        class, level, and ability scores (with 4d6-drop-lowest rolling).
-        Returns a character sheet card and text summary.
+        Open the interactive character creation form. The player fills in their name, race, class, level, and rolls ability scores.
+        Call this at the START of a new campaign or when the player explicitly wants to create/re-create a character.
+        Returns a rendered character sheet card and structured text data for you to use throughout the session.
         """
         if __event_emitter__:
             await __event_emitter__(
@@ -1097,6 +1505,32 @@ class Tools:
         if char_data is None:
             return "Character creation was cancelled."
 
+        # Handle Image Generation
+        if char_data.get("generate_image") and __request__ and __user__:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Generating character portrait...",
+                            "done": False,
+                        },
+                    }
+                )
+            try:
+                race = char_data.get("race", "Human")
+                cls = char_data.get("class", "Fighter")
+                prompt = f"A high-fantasy engaging portrait of a {race} {cls}. RPG character art style, detailed, digital painting."
+                images = await image_generations(
+                    request=__request__,
+                    form_data=GenerateImageForm(prompt=prompt),
+                    user=Users.get_user_by_id(__user__["id"]),
+                )
+                if images and len(images) > 0:
+                    char_data["image_url"] = images[0]["url"]
+            except Exception as e:
+                logger.error(f"Image generation failed: {e}")
+
         if __event_emitter__:
             embed_html = generate_character_embed(char_data)
             await __event_emitter__(
@@ -1123,11 +1557,12 @@ class Tools:
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
     ) -> str:
         """
-        Roll dice with the interactive 3D overlay. The user sees the dice
-        tumble and can re-roll or accept. Faster animation than roll_dice.
+        Instantly roll dice for NPCs, monsters, and GM-driven events — NO player interaction needed.
+        Use this for enemy attack rolls, NPC saves, random encounter tables, damage from traps, etc.
+        The result is shown as a visual embed but the player does NOT click anything.
 
         :param notation: Dice notation (e.g. "1d20+5", "2d6", "1d100").
-        :param context: Optional context (e.g. "Stealth check", "Damage roll").
+        :param context: What the roll is for — always provide this (e.g. "Goblin attack roll", "Trap damage", "Wandering monster check").
         """
         if __event_emitter__:
             await __event_emitter__(
@@ -1137,61 +1572,7 @@ class Tools:
                 }
             )
 
-        result = None
-
-        if __event_call__:
-            try:
-                js_code = build_dice_roller_js(
-                    notation,
-                    self.valves.default_dice_color,
-                    max(0.5, self.valves.dice_animation_speed * 0.6),
-                )
-                raw = await __event_call__(
-                    {"type": "execute", "data": {"code": js_code}}
-                )
-                if raw:
-                    data = (
-                        raw
-                        if isinstance(raw, str)
-                        else (
-                            raw.get("result") or raw.get("value") or raw.get("data")
-                            if isinstance(raw, dict)
-                            else None
-                        )
-                    )
-                    if data and isinstance(data, str):
-                        parsed = json.loads(data)
-                        groups = []
-                        for r in parsed.get("results", []):
-                            found = False
-                            for g in groups:
-                                if g["sides"] == r["sides"] and g["sign"] == r["sign"]:
-                                    g["rolls"].append(r["value"])
-                                    g["count"] += 1
-                                    g["subtotal"] += r["value"] * r["sign"]
-                                    found = True
-                                    break
-                            if not found:
-                                groups.append(
-                                    {
-                                        "count": 1,
-                                        "sides": r["sides"],
-                                        "rolls": [r["value"]],
-                                        "subtotal": r["value"] * r["sign"],
-                                        "sign": r["sign"],
-                                    }
-                                )
-                        result = {
-                            "notation": parsed.get("notation", notation),
-                            "groups": groups,
-                            "modifier": parsed.get("modifier", 0),
-                            "total": parsed.get("total", 0),
-                        }
-            except Exception as e:
-                logger.warning(f"RPG Tool: quick roll overlay failed ({e})")
-
-        if result is None:
-            result = roll_dice_server(notation)
+        result = roll_dice_server(notation)
 
         if __event_emitter__:
             embed_html = generate_roll_embed(result, context)
@@ -1213,3 +1594,335 @@ class Tools:
             "The dice roll result has been displayed in the embed above. "
             "Use the following to narrate the outcome:\n\n" + text
         )
+
+    async def save_rpg_session(
+        self,
+        session_name: str,
+        character_data: str,
+        game_notes: str,
+        __user__: dict[str, Any] | None = None,
+        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
+    ) -> str:
+        """
+        Persist the current campaign state so the player can resume later.
+        Call this when the player asks to save, at natural story breakpoints, or before ending a session.
+        Saves character sheet + story progress + inventory + quest log to Open WebUI Notes.
+
+        :param session_name: Campaign/session name (e.g. "Curse of Strahd", "Dragon's Lair"). Keep it consistent across saves.
+        :param character_data: Full character JSON or text — include abilities, HP, level, inventory, conditions.
+        :param game_notes: Current story state — location, active quests, NPCs met, recent events, party inventory.
+        """
+        if not __user__:
+            return "Requires user context to save session."
+
+        session_name = session_name.replace("RPG Session: ", "").strip()
+
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"Saving session '{session_name}'...",
+                        "done": False,
+                    },
+                }
+            )
+
+        try:
+            note_form = NoteForm(
+                title=f"RPG Session: {session_name}",
+                data={
+                    "character_data": character_data,
+                    "game_notes": game_notes,
+                    "type": "rpg_session",
+                },
+            )
+
+            existing_notes = Notes.get_notes_by_user_id(__user__["id"])
+            session_note = None
+            for n in existing_notes:
+                if n.title == f"RPG Session: {session_name}":
+                    session_note = n
+                    break
+
+            if session_note:
+                Notes.update_note_by_id(
+                    session_note.id, NoteUpdateForm(data=note_form.data)
+                )
+                result_str = f"Session updated! Full Title: 'RPG Session: {session_name}' (ID: {session_note.id}). Always refer to this session simply as '{session_name}' in future tools."
+            else:
+                new_note = Notes.insert_new_note(__user__["id"], note_form)
+                result_str = f"Session saved! Full Title: 'RPG Session: {session_name}' (ID: {new_note.id}). Always refer to this session simply as '{session_name}' in future tools."
+
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": result_str, "done": True},
+                    }
+                )
+            return result_str
+
+        except Exception as e:
+            logger.error(f"Failed to save RPG session: {e}")
+            return f"Error saving session: {e}"
+
+    async def load_rpg_session(
+        self,
+        session_name: str,
+        __user__: dict[str, Any] | None = None,
+        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
+    ) -> str:
+        """
+        Resume a previously saved campaign. Call this when the player wants to continue an existing adventure.
+        Returns the full character sheet and story state so you can pick up where you left off.
+
+        :param session_name: The campaign name to load (e.g. "Curse of Strahd"). If unsure, call with a best guess — the tool will list available sessions if not found.
+        """
+        if not __user__:
+            return "Requires user context to load session."
+
+        session_name = session_name.replace("RPG Session: ", "").strip()
+
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"Loading session '{session_name}'...",
+                        "done": False,
+                    },
+                }
+            )
+
+        try:
+            existing_notes = Notes.get_notes_by_user_id(__user__["id"])
+            for n in existing_notes:
+                if n.title == f"RPG Session: {session_name}":
+                    data = n.data or {}
+                    char_data = data.get("character_data", "No character data found.")
+                    notes = data.get("game_notes", "No game notes found.")
+
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"Loaded session '{session_name}'.",
+                                    "done": True,
+                                },
+                            }
+                        )
+
+                    return f"Successfully loaded session '{session_name}'.\n\nCharacter Data:\n{char_data}\n\nGame Notes:\n{notes}"
+
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"Session '{session_name}' not found.",
+                            "done": True,
+                        },
+                    }
+                )
+            available = [
+                n.title.replace("RPG Session: ", "")
+                for n in existing_notes
+                if n.title.startswith("RPG Session:")
+            ]
+            available_str = ", ".join(available) if available else "None"
+            return f"Session '{session_name}' not found. Available sessions: {available_str}"
+
+        except Exception as e:
+            logger.error(f"Failed to load RPG session: {e}")
+            return f"Error loading session: {e}"
+
+    async def update_rpg_session(
+        self,
+        session_name: str,
+        character_data: str,
+        game_notes: str,
+        __user__: dict[str, Any] | None = None,
+        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
+    ) -> str:
+        """
+        Update an existing saved campaign with current state. Use this after significant events:
+        leveling up, acquiring items, completing quests, HP changes, new story developments.
+        Overwrites the previous save for this session name.
+
+        :param session_name: The campaign name (must match the original save name exactly).
+        :param character_data: Updated character JSON/text — include all current stats, inventory, conditions.
+        :param game_notes: Updated story state — current location, quest progress, NPCs, recent events.
+        """
+        return await self.save_rpg_session(
+            session_name, character_data, game_notes, __user__, __event_emitter__
+        )
+
+    async def present_choices(
+        self,
+        prompt_text: str,
+        choices: str,
+        context: str = "",
+        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
+        __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ) -> str:
+        """
+        Present the player with interactive clickable choices. Use this to make the RPG feel alive and give the player agency.
+        Perfect for: branching story paths, dialogue options, combat action selection, exploration choices, NPC interactions.
+        Call this INSTEAD of asking the player to type a choice — let them click.
+        Returns the player's selection as text you can use to continue the narrative.
+
+        :param prompt_text: The question or situation to present (e.g. "The corridor splits into three passages. Which do you take?").
+        :param choices: JSON array of choice strings, 2-6 options (e.g. '["Take the left passage", "Take the right passage", "Go back"]').
+        :param context: Optional flavor text or additional details shown below the prompt.
+        """
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Awaiting player choice...", "done": False},
+                }
+            )
+
+        try:
+            choice_list = json.loads(choices) if isinstance(choices, str) else choices
+        except (json.JSONDecodeError, TypeError):
+            choice_list = [c.strip() for c in choices.split(",") if c.strip()]
+
+        if not choice_list or len(choice_list) < 2:
+            return "Error: provide at least 2 choices as a JSON array."
+
+        selected = None
+
+        if __event_call__:
+            try:
+                js_code = build_choice_selector_js(
+                    prompt_text, choice_list, context
+                )
+                raw = await __event_call__(
+                    {"type": "execute", "data": {"code": js_code}}
+                )
+                if raw:
+                    data = (
+                        raw
+                        if isinstance(raw, str)
+                        else (
+                            raw.get("result") or raw.get("value") or raw.get("data")
+                            if isinstance(raw, dict)
+                            else None
+                        )
+                    )
+                    if data and isinstance(data, str):
+                        try:
+                            parsed = json.loads(data)
+                            selected = parsed.get("choice", data)
+                        except json.JSONDecodeError:
+                            selected = data
+            except Exception as e:
+                logger.warning(f"RPG Tool: choice selector failed ({e})")
+
+        if selected is None:
+            return "The player did not make a choice (overlay was dismissed)."
+
+        if __event_emitter__:
+            # Emit a small embed showing what was chosen
+            palette_seed = random.randint(0, 9999999)
+            c0, c1, c2, c3, c4 = _rpg_palette(palette_seed)
+            embed_html = generate_choice_embed(prompt_text, selected, c0)
+            await __event_emitter__(
+                {"type": "embeds", "data": {"embeds": [embed_html]}}
+            )
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Player has chosen!", "done": True},
+                }
+            )
+
+        return (
+            f"The player chose: **{selected}**\n\n"
+            f"Continue the narrative based on this choice. Be descriptive and immersive."
+        )
+
+    async def confirm_action(
+        self,
+        prompt_text: str,
+        confirm_label: str = "Yes, do it",
+        cancel_label: str = "No, back away",
+        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
+        __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ) -> str:
+        """
+        Ask the player for a dramatic yes/no confirmation before a risky or consequential action.
+        Use this for: opening cursed items, entering dangerous areas, making irreversible deals,
+        triggering traps, confronting powerful enemies, accepting quests with consequences.
+        Builds tension and gives the player a moment to reconsider.
+
+        :param prompt_text: The dramatic question (e.g. "The chest radiates dark energy. Do you dare open it?").
+        :param confirm_label: Text for the confirm button (e.g. "Open the chest", "Accept the deal").
+        :param cancel_label: Text for the cancel button (e.g. "Step back", "Refuse").
+        """
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Awaiting player decision...", "done": False},
+                }
+            )
+
+        confirmed = None
+
+        if __event_call__:
+            try:
+                js_code = build_confirm_js(prompt_text, confirm_label, cancel_label)
+                raw = await __event_call__(
+                    {"type": "execute", "data": {"code": js_code}}
+                )
+                if raw:
+                    data = (
+                        raw
+                        if isinstance(raw, str)
+                        else (
+                            raw.get("result") or raw.get("value") or raw.get("data")
+                            if isinstance(raw, dict)
+                            else None
+                        )
+                    )
+                    if data and isinstance(data, str):
+                        try:
+                            parsed = json.loads(data)
+                            confirmed = parsed.get("confirmed", False)
+                        except json.JSONDecodeError:
+                            confirmed = data.lower().strip() in ("true", "yes", "confirmed")
+            except Exception as e:
+                logger.warning(f"RPG Tool: confirm overlay failed ({e})")
+
+        if confirmed is None:
+            return "The player did not respond (overlay was dismissed). Treat as hesitation — describe them pausing uncertainly."
+
+        if __event_emitter__:
+            palette_seed = random.randint(0, 9999999)
+            c0, c1, c2, c3, c4 = _rpg_palette(palette_seed)
+            action = confirm_label if confirmed else cancel_label
+            embed_html = generate_confirm_embed(prompt_text, confirmed, action, c0)
+            await __event_emitter__(
+                {"type": "embeds", "data": {"embeds": [embed_html]}}
+            )
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Player decided!", "done": True},
+                }
+            )
+
+        if confirmed:
+            return (
+                f"The player chose to proceed: **{confirm_label}**\n\n"
+                f"Narrate the consequences — they committed to this action. Be dramatic and immersive."
+            )
+        else:
+            return (
+                f"The player chose to back away: **{cancel_label}**\n\n"
+                f"Narrate their hesitation or retreat. The danger still looms but they avoided it for now."
+            )
