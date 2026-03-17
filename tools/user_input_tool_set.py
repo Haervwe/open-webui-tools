@@ -8,12 +8,15 @@ version: 1.6.0
 license: MIT
 required_open_webui_version: 0.8.10
 """
-
 import json
 import logging
+import base64
+from pathlib import Path
 from typing import Optional, Any, Callable, Awaitable, List
 from fastapi import Request
 from open_webui.models.chats import Chats
+from open_webui.models.files import Files
+from open_webui.config import UPLOAD_DIR
 from open_webui.routers.images import get_image_data, upload_image
 from open_webui.models.users import UserModel
 
@@ -370,6 +373,33 @@ return (function() {{
     """
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_base64_from_file_id(file_id: str) -> Optional[str]:
+    """Resolves a file ID to a base64 data URL."""
+    try:
+        file = Files.get_file_by_id(file_id)
+        if not file or not file.path:
+            return None
+        
+        file_path = Path(file.path)
+        if not file_path.is_absolute():
+            file_path = UPLOAD_DIR / file_path
+            
+        if not file_path.exists():
+            return None
+            
+        with open(file_path, "rb") as f:
+            data = f.read()
+            encoded = base64.b64encode(data).decode("utf-8")
+            mime_type = file.meta.get("content_type", "image/png") if file.meta else "image/png"
+            return f"data:{mime_type};base64,{encoded}"
+    except Exception as e:
+        logger.error(f"User Input Tool Set: Failed to resolve base64 for {file_id}: {e}")
+        return None
+
+# ---------------------------------------------------------------------------
 # Tools Class
 # ---------------------------------------------------------------------------
 
@@ -429,13 +459,14 @@ class Tools:
     async def get_image(
         self,
         prompt_text: str = "Please provide an image",
-        __user__: dict = None,
-        __request__: Request = None,
+        __user__: Optional[dict] = None,
+        __request__: Optional[Request] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __chat_id__: str = None,
         __message_id__: str = None,
         __files__: Optional[list] = None,
+        __messages__: Optional[list] = None,
     ) -> str:
         """
         Request an image (Upload, URL, or Doodle/Sketch).
@@ -534,39 +565,105 @@ class Tools:
 
 
             # Add file metadata for model context (__files__)
-            image_file_entry = {"type": "image", "url": file_url, "name": name, "content_type": content_type}
+            image_file_entry = {
+                "type": "image", 
+                "url": file_url, 
+                "id": file_item.id if hasattr(file_item, 'id') else (file_item.get('id') if isinstance(file_item, dict) else None),
+                "name": name, 
+                "content_type": content_type
+            }
             image_files = [image_file_entry]
             if __files__ is not None:
                 __files__.append(image_file_entry)
 
+            # Vision Secret Sauce: Attach to messages/history and inject Multimodal Content
             if __chat_id__ and __message_id__:
-                db_files = Chats.add_message_files_by_id_and_message_id(
-                    __chat_id__,
-                    __message_id__,
-                    image_files,
-                )
-                if db_files is not None:
-                    image_files = db_files
+                # 1. Permanent Vision Context (Database Persistence)
+                # Attach to both Assistant (current) and User (parent) messages for consistency
+                # Matches built-in tool pattern for Assistant + historical perception for User
+                try:
+                    # Assistant sync
+                    Chats.add_message_files_by_id_and_message_id(__chat_id__, __message_id__, image_files)
+                    
+                    chat = Chats.get_chat_by_id(__chat_id__)
+                    chat_data = chat.chat if hasattr(chat, 'chat') else (chat if isinstance(chat, dict) else {})
+                    
+                    if chat_data and "messages" in chat_data:
+                        messages = chat_data["messages"]
+                        messages_map = chat_data.get("messages_map", {}) or {m.get("id"): m for m in messages if m.get("id")}
+                        
+                        current_msg = messages_map.get(__message_id__)
+                        parent_id = current_msg.get("parentId") if current_msg else None
+                        
+                        if parent_id:
+                            logger.info(f"User Input Tool Set: Syncing to parent User message {parent_id}")
+                            Chats.add_message_files_by_id_and_message_id(__chat_id__, parent_id, image_files)
+                            
+                            parent_msg = next((m for m in messages if m.get("id") == parent_id), None)
+                            if parent_msg:
+                                # Convert string content to multimodal list if needed
+                                content = parent_msg.get("content", "")
+                                if isinstance(content, str):
+                                    parent_msg["content"] = [{"type": "text", "text": content}] if content else []
+                                
+                                for f in image_files:
+                                    f_id = f.get("id") or (f["url"].split("/files/")[1].split("/")[0] if "/api/v1/files/" in f.get("url", "") else None)
+                                    if f_id:
+                                        base64_url = _get_base64_from_file_id(f_id)
+                                        if base64_url:
+                                            exists = any(part.get("image_url", {}).get("url") == base64_url for part in parent_msg["content"] if part.get("type") == "image_url")
+                                            if not exists:
+                                                parent_msg["content"].append({"type": "image_url", "image_url": {"url": base64_url}})
+                                
+                                Chats.update_chat_by_id(__chat_id__, chat_data)
+                except Exception as e:
+                    logger.warning(f"User Input Tool Set: DB Sync failed: {e}")
 
-            if __event_emitter__ and image_files:
-                await __event_emitter__({"type": "chat:message:files", "data": {"files": image_files}})
-                await __event_emitter__({"type": "status", "data": {"description": "Image received", "done": True}})
+                # 2. IMMEDIATE Vision Perception (In-Memory In-place Update for current turn)
+                # This ensures the LLM handles vision during the follow-up request in the same turn
+                if __messages__:
+                    # Find parent user message in the current turn's history
+                    parent_msg_in_mem = None
+                    for m in reversed(__messages__):
+                        if m.get("role") == "user":
+                            parent_msg_in_mem = m
+                            break
+                    
+                    if parent_msg_in_mem:
+                        logger.info(f"User Input Tool Set: Injecting vision into in-memory history for turn awareness")
+                        content = parent_msg_in_mem.get("content", "")
+                        if isinstance(content, str):
+                            parent_msg_in_mem["content"] = [{"type": "text", "text": content}] if content else []
+                        
+                        for f in image_files:
+                            f_id = f.get("id") or (f["url"].split("/files/")[1].split("/")[0] if "/api/v1/files/" in f.get("url", "") else None)
+                            if f_id:
+                                base64_url = _get_base64_from_file_id(f_id)
+                                if base64_url:
+                                    exists = any(part.get("image_url", {}).get("url") == base64_url for part in parent_msg_in_mem["content"] if part.get("type") == "image_url")
+                                    if not exists:
+                                        parent_msg_in_mem["content"].append({"type": "image_url", "image_url": {"url": base64_url}})
+
+            if image_files:
+                if __event_emitter__:
+                    await __event_emitter__({"type": "chat:message:files", "data": {"files": image_files}})
+                    await __event_emitter__({"type": "status", "data": {"description": "Image received", "done": True}})
+
+                # Return simple JSON string. The history mutation handles vision projection.
+                # Returning JSON prevents 'middleware.py' from stringifying raw multimodal data.
                 return json.dumps({
                     "status": "success",
-                    "message": "The image has been successfully uploaded and is already visible to the user in the chat. You do not need to display or embed the image again - just acknowledge that it has been received.",
+                    "message": "Image received and projected into vision context. You can now perceive and describe this image.",
                     "images": image_files,
                 }, ensure_ascii=False)
 
             if __event_emitter__:
-                await __event_emitter__({"type": "status", "data": {"description": "Image received", "done": True}})
+                await __event_emitter__({"type": "status", "data": {"description": "No image received", "done": True}})
 
-            return json.dumps({
-                "status": "success",
-                "images": image_files,
-            }, ensure_ascii=False)
+            return "No image was provided."
 
         except Exception as e:
             logger.exception(f"Error in get_image: {e}")
             if __event_emitter__:
                 await __event_emitter__({"type": "status", "data": {"description": f"Error: {str(e)}", "done": True}})
-            return json.dumps({"status": "error", "message": str(e)})
+            return f"Error receiving image: {str(e)}"
