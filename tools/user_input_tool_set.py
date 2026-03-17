@@ -11,6 +11,8 @@ required_open_webui_version: 0.8.10
 import json
 import logging
 import base64
+import httpx
+import os
 from pathlib import Path
 from typing import Optional, Any, Callable, Awaitable, List
 from fastapi import Request
@@ -19,6 +21,8 @@ from open_webui.models.files import Files
 from open_webui.config import UPLOAD_DIR
 from open_webui.routers.images import get_image_data, upload_image
 from open_webui.models.users import UserModel
+from urllib.parse import urlparse
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("user_input_tool_set")
@@ -505,16 +509,15 @@ class Tools:
             # Handle each input type
             if input_type == "url":
                 # Let backend fetch/process the image from URL as built-in tools do
-                from open_webui.routers.files import upload_file_handler
-                import requests
                 try:
-                    resp = requests.get(data, timeout=10)
-                    resp.raise_for_status()
-                    content_type = resp.headers.get("content-type", "image/png")
-                    image_data = resp.content
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.get(data)
+                        resp.raise_for_status()
+                        content_type = resp.headers.get("content-type", "image/png")
+                        image_data = resp.content
+                    
                     # Use filename from URL if possible
-                    from urllib.parse import urlparse
-                    import os
+
                     url_path = urlparse(data).path
                     name = os.path.basename(url_path) or "image-from-url.png"
                 except Exception as e:
