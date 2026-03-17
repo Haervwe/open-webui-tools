@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 class Filter:
     class Valves(BaseModel):
         max_turns: int = Field(
-            default=5,
-            description="How many past messages to scan for tool images",
+            default=-1,
+            description="How many past messages to scan for tool images (-1 for all)",
         )
         show_status: bool = Field(
             default=True,
@@ -63,6 +63,16 @@ class Filter:
             return body
 
         if not __chat_id__:
+            return body
+
+        # Check for vision support in the model metadata
+        metadata = body.get("metadata", {})
+        model_info = metadata.get("model", {})
+        meta = model_info.get("info", {}).get("meta", {})
+        capabilities = meta.get("capabilities", {})
+        
+        if not capabilities.get("vision", False):
+            logger.info(f"ToolImageVisionFilter: Model {body.get('model')} does not support vision, skipping projection")
             return body
 
         try:
@@ -141,28 +151,27 @@ class Filter:
                 
         logger.info(f"ToolImageVisionFilter: Total messages to scan: {len(scan_list)}")
 
-        # Identify the latest user message in the body to receive projected vision context
-        latest_body_user_msg = None
-        for m in reversed(body_messages):
-            if m.get("role") == "user":
-                latest_body_user_msg = m
-                break
-        
-        if latest_body_user_msg:
+        # 2. Identify all user messages in the body to receive projected vision context
+        body_user_messages = [m for m in body_messages if m.get("role") == "user"]
+        for user_msg in body_user_messages:
             # Ensure content is in multimodal format (list of parts)
-            content = latest_body_user_msg.get("content", "")
+            content = user_msg.get("content", "")
             if isinstance(content, str):
-                latest_body_user_msg["content"] = [{"type": "text", "text": content}] if content else []
+                user_msg["content"] = [{"type": "text", "text": content}] if content else []
             elif not isinstance(content, list):
-                latest_body_user_msg["content"] = []
-                
+                user_msg["content"] = []
+
         max_scan = self.valves.max_turns
         total_images_synced = 0
         scanned = 0
         
+        # Track already injected image URLs for each user message in the body
+        # (Using msg['id'] if available, or its object ID as a fallback)
+        injected_urls_per_msg = {}
+        
         # 3. Scan and Attach
         for i, msg in enumerate(scan_list):
-            if scanned >= max_scan:
+            if max_scan != -1 and scanned >= max_scan:
                 break
             scanned += 1
             
@@ -207,14 +216,35 @@ class Filter:
                     except Exception as e:
                         logger.error(f"ToolImageVisionFilter: DB sync failed: {e}")
 
-            # B. Body Multimodal Injection: Project into the LATEST user message content
-            if latest_body_user_msg:
-                content_parts = latest_body_user_msg["content"]
-                existing_urls = {
-                    part["image_url"]["url"] 
-                    for part in content_parts 
-                    if part.get("type") == "image_url" and "image_url" in part
-                }
+            # B. Body Multimodal Injection: Project into the most appropriate USER message
+            # logic: closest FOLLOWER user message, fallback to closest PRECEDER user message
+            target_user_msg = None
+            
+            # 1. Search for nearest follower (indices 0 to i-1)
+            for j in range(i - 1, -1, -1):
+                m = scan_list[j]
+                if m.get("role") == "user" and m in body_messages:
+                    target_user_msg = m
+                    break
+            
+            # 2. Search for nearest preceder (indices i+1 to len-1)
+            if not target_user_msg:
+                for j in range(i + 1, len(scan_list)):
+                    m = scan_list[j]
+                    if m.get("role") == "user" and m in body_messages:
+                        target_user_msg = m
+                        break
+
+            if target_user_msg:
+                msg_key = id(target_user_msg)
+                if msg_key not in injected_urls_per_msg:
+                    injected_urls_per_msg[msg_key] = set()
+                    # Also include existing image URLs in that message
+                    for part in target_user_msg["content"]:
+                        if part.get("type") == "image_url" and "image_url" in part:
+                            injected_urls_per_msg[msg_key].add(part["image_url"]["url"])
+
+                content_parts = target_user_msg["content"]
                 
                 for f in image_files:
                     f_url = f.get("url", "")
@@ -238,17 +268,46 @@ class Filter:
                         logger.warning(f"ToolImageVisionFilter: Could not resolve base64 for {f_id}")
                         continue
 
-                    if base64_url not in existing_urls:
-                        logger.info(f"ToolImageVisionFilter: Injecting image as base64 into content (id={f_id})")
+                    if base64_url not in injected_urls_per_msg[msg_key]:
+                        logger.info(f"ToolImageVisionFilter: Injecting image as base64 into content of user message")
                         content_parts.append({
                             "type": "image_url",
                             "image_url": {"url": base64_url}
                         })
                         total_images_synced += 1
-                        # Track this URL to avoid duplicates in the same turn
-                        existing_urls.add(base64_url)
+                        injected_urls_per_msg[msg_key].add(base64_url)
                     else:
                         logger.info(f"ToolImageVisionFilter: Image {f_id} already in content, skipping")
+
+
+        if total_images_synced > 0:
+            system_msg = None
+            for m in body.get("messages", []):
+                if m.get("role") == "system":
+                    system_msg = m
+                    break
+            
+            notice = "Images generated on the previous turns are attached to the following user message by default."
+            if system_msg:
+                content = system_msg.get("content", "")
+                if isinstance(content, str):
+                    if notice not in content:
+                        system_msg["content"] = f"{content}\n\nNOTE: {notice}"
+                elif isinstance(content, list):
+                    found_text = False
+                    for part in content:
+                        if part.get("type") == "text":
+                            if notice not in part.get("text", ""):
+                                part["text"] = f"{part.get('text', '')}\n\nNOTE: {notice}"
+                            found_text = True
+                            break
+                    if not found_text:
+                        content.append({"type": "text", "text": f"NOTE: {notice}"})
+            else:
+                body.get("messages", []).insert(0, {
+                    "role": "system",
+                    "content": f"NOTE: {notice}"
+                })
 
         if self.valves.show_status and total_images_synced > 0 and __event_emitter__:
             await __event_emitter__({

@@ -218,7 +218,7 @@ return (function() {{
     overlay.style.cssText = 'position:fixed;inset:0;z-index:999999;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;padding:20px;';
     
     const panel = document.createElement('div');
-    panel.style.cssText = '{panel_css} width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;padding:24px;gap:20px;box-sizing:border-box;';
+    panel.style.cssText = '{panel_css} width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;padding:24px;gap:20px;box-sizing:border-box;position:relative;';
     
     const style = document.createElement('style');
     style.textContent = `
@@ -227,10 +227,16 @@ return (function() {{
         .tab-pane {{ display:none; flex-direction:column; gap:20px; overflow:hidden; flex:1; min-height:0; }}
         .tab-pane.active {{ display:flex; }}
         .drop-zone {{ border:2px dashed #444; border-radius:16px; padding:60px; text-align:center; transition:all 0.2s; color:#777; cursor:pointer; background:#111; flex:1; display:flex; align-items:center; justify-content:center; box-sizing:border-box; }}
-        .drop-zone:hover {{ border-color:#666; color:#fff; }}
+        .drop-zone:hover, .drop-zone.dragover {{ border-color:#fff; color:#fff; background:#1a1a1a; }}
         #urlIn {{ background:#111; border:1px solid #333; border-radius:12px; padding:16px; color:#fff; width:100%; box-sizing:border-box; font-family:inherit; font-size:15px; outline:none; }}
+        .loading-overlay {{ position:absolute; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center; flex-direction:column; gap:16px; z-index:100; border-radius:24px; backdrop-filter:blur(4px); }}
     `;
     document.head.appendChild(style);
+
+    const loading = document.createElement('div');
+    loading.className = 'loading-overlay';
+    loading.innerHTML = '<div style="width:40px;height:40px;border:3px solid #333;border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite;"></div><div style="font-weight:600;color:#fff;">Processing Image...</div><style>@keyframes spin {{ to {{ transform:rotate(360deg); }} }}</style>';
+    panel.appendChild(loading);
 
     const titleBar = document.createElement('div');
     titleBar.style.cssText = 'font-size:20px;font-weight:600;color:#fff;';
@@ -263,8 +269,26 @@ return (function() {{
     uploadPane.appendChild(fileInput);
     fileInput.style.display = 'none';
     const dz = uploadPane.querySelector('#dz');
+    
+    // Click to upload
     dz.onclick = () => fileInput.click();
     fileInput.onchange = (e) => handleFiles(e.target.files);
+
+    // Drag and Drop implementation
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {{
+        dz.addEventListener(evt, (e) => {{ e.preventDefault(); e.stopPropagation(); }}, false);
+    }});
+    ['dragenter', 'dragover'].forEach(evt => {{
+        dz.addEventListener(evt, () => dz.classList.add('dragover'), false);
+    }});
+    ['dragleave', 'drop'].forEach(evt => {{
+        dz.addEventListener(evt, () => dz.classList.remove('dragover'), false);
+    }});
+    dz.addEventListener('drop', (e) => {{
+        const dt = e.dataTransfer;
+        handleFiles(dt.files);
+    }}, false);
+
     content.appendChild(uploadPane);
 
     // URL Pane
@@ -293,8 +317,8 @@ return (function() {{
     const getP = (e) => {{
         const r = canvas.getBoundingClientRect();
         const scX = 512/r.width, scY = 512/r.height;
-        const cx = e.touches ? e.touches[0].clientX : e.clientX;
-        const cy = e.touches ? e.touches[0].clientY : e.clientY;
+        const cx = (e.touches && e.touches[0]) ? e.touches[0].clientX : e.clientX;
+        const cy = (e.touches && e.touches[0]) ? e.touches[0].clientY : e.clientY;
         return [(cx-r.left)*scX, (cy-r.top)*scY];
     }};
     canvas.onmousedown = (e) => {{ draw=true; [lx,ly]=getP(e); }};
@@ -326,8 +350,12 @@ return (function() {{
     confirmBtn.onclick = () => {{
         if(currentTab === 1) {{ 
             const url = urlPane.querySelector('#urlIn').value;
-            if(url) finish({{ type:"url", data:url }});
+            if(url) {{
+                loading.style.display = 'flex';
+                finish({{ type:"url", data:url }});
+            }}
         }} else if(currentTab === 2) {{ 
+            loading.style.display = 'flex';
             finish({{ type:'doodle', data:canvas.toDataURL() }});
         }}
     }};
@@ -361,12 +389,21 @@ return (function() {{
 
     function handleFiles(files) {{
         const f = files[0]; if(!f) return;
+        loading.style.display = 'flex';
         const r = new FileReader();
         r.onload = (e) => finish({{ type:'upload', data: e.target.result, name: f.name, contentType: f.type }});
+        r.onerror = () => {{
+            loading.style.display = 'none';
+            alert('Failed to read file.');
+        }};
         r.readAsDataURL(f);
     }}
 
-    function finish(res) {{ cleanup(); resolve(JSON.stringify(res)); }}
+    function finish(res) {{ 
+        // Resolve immediately so backend can start processing while UI is closing
+        resolve(JSON.stringify(res));
+        cleanup(); 
+    }}
 
     function cleanup() {{
         if(overlay.parentNode) overlay.parentNode.removeChild(overlay);
@@ -511,9 +548,13 @@ class Tools:
                 # Let backend fetch/process the image from URL as built-in tools do
                 try:
                     async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.get(data)
+                        resp = await client.get(data, follow_redirects=True)
                         resp.raise_for_status()
-                        content_type = resp.headers.get("content-type", "image/png")
+                        content_type = resp.headers.get("content-type", "")
+                        if not content_type.startswith("image/"):
+                            if __event_emitter__:
+                                await __event_emitter__({"type": "status", "data": {"description": f"URL does not point to an image (Type: {content_type})", "done": True}})
+                            return json.dumps({"status": "error", "message": f"The provided URL does not point to a valid image file. Detected type: {content_type}"})
                         image_data = resp.content
                     
                     # Use filename from URL if possible
