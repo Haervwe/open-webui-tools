@@ -10,7 +10,6 @@ description: Filter that disables or minimizes Ollama reasoning/thinking based o
 
 from typing import Optional, Dict, Any, Callable, Awaitable
 from pydantic import BaseModel, Field
-from open_webui.utils.middleware import DEFAULT_REASONING_TAGS
 import logging
 
 name = "disable_ollama_reasoning"

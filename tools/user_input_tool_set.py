@@ -435,12 +435,11 @@ class Tools:
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __chat_id__: str = None,
         __message_id__: str = None,
+        __files__: Optional[list] = None,
     ) -> str:
         """
         Request an image (Upload, URL, or Doodle/Sketch).
-
-        :param prompt_text: Instructions shown to the user in the image input modal
-        :return: Confirmation that the image was received, or an error message
+        Handles uploads, URLs, and doodles with correct file type and processing.
         """
         if __request__ is None:
             return json.dumps({"error": "Request context not available"})
@@ -455,48 +454,91 @@ class Tools:
         try:
             js = build_get_image_js(prompt_text)
             result = await __event_call__({"type": "execute", "data": {"code": js}})
-
             raw_data = result if isinstance(result, str) else (result.get("result") or result.get("value") or result.get("data")) if result else None
-
             if not raw_data:
                 if __event_emitter__:
                     await __event_emitter__({"type": "status", "data": {"description": "Cancelled", "done": True}})
                 return json.dumps({"status": "cancelled"})
 
             result_obj = json.loads(raw_data)
-            data_url = result_obj.get("data", "")
+            input_type = result_obj.get("type", "upload")
+            data = result_obj.get("data", "")
+            name = result_obj.get("name", "uploaded-image.png")
+            content_type = result_obj.get("contentType", None)
 
-            if not data_url:
-                if __event_emitter__:
-                    await __event_emitter__({"type": "status", "data": {"description": "No image data received", "done": True}})
-                return json.dumps({"status": "error", "message": "No image data"})
-
-            image_data, detected_type = get_image_data(data_url)
-            if image_data is None:
-                if __event_emitter__:
-                    await __event_emitter__({"type": "status", "data": {"description": "Failed to load image data", "done": True}})
-                return json.dumps({"status": "error", "message": "Failed to load image data"})
-
-            content_type = detected_type or "image/png"
-
-            # Upload image via the router helper (creates file in DB)
             metadata = {
                 "chat_id": __chat_id__,
                 "message_id": __message_id__,
             }
 
-            file_item, file_url = upload_image(
-                __request__,
-                image_data,
-                content_type,
-                metadata,
-                user,
-            )
+            # Handle each input type
+            if input_type == "url":
+                # Let backend fetch/process the image from URL as built-in tools do
+                from open_webui.routers.files import upload_file_handler
+                import requests
+                try:
+                    resp = requests.get(data, timeout=10)
+                    resp.raise_for_status()
+                    content_type = resp.headers.get("content-type", "image/png")
+                    image_data = resp.content
+                    # Use filename from URL if possible
+                    from urllib.parse import urlparse
+                    import os
+                    url_path = urlparse(data).path
+                    name = os.path.basename(url_path) or "image-from-url.png"
+                except Exception as e:
+                    if __event_emitter__:
+                        await __event_emitter__({"type": "status", "data": {"description": f"Failed to fetch image from URL: {e}", "done": True}})
+                    return json.dumps({"status": "error", "message": f"Failed to fetch image from URL: {e}"})
+                # Upload and process
+                file_item, file_url = upload_image(
+                    __request__,
+                    image_data,
+                    content_type,
+                    metadata,
+                    user,
+                )
+            elif input_type == "doodle":
+                # Doodle is always base64 PNG
+                image_data, detected_type = get_image_data(data)
+                if image_data is None:
+                    if __event_emitter__:
+                        await __event_emitter__({"type": "status", "data": {"description": "Failed to load doodle image data", "done": True}})
+                    return json.dumps({"status": "error", "message": "Failed to load doodle image data"})
+                content_type = detected_type or "image/png"
+                name = "sketch.png"
+                # Upload and process
+                file_item, file_url = upload_image(
+                    __request__,
+                    image_data,
+                    content_type,
+                    metadata,
+                    user,
+                )
+            else:  # upload
+                # Uploaded file: decode data URL, preserve filename/content type
+                image_data, detected_type = get_image_data(data)
+                if image_data is None:
+                    if __event_emitter__:
+                        await __event_emitter__({"type": "status", "data": {"description": "Failed to load uploaded image data", "done": True}})
+                    return json.dumps({"status": "error", "message": "Failed to load uploaded image data"})
+                content_type = content_type or detected_type or "image/png"
+                # Upload and process
+                file_item, file_url = upload_image(
+                    __request__,
+                    image_data,
+                    content_type,
+                    metadata,
+                    user,
+                )
 
-            # Prepare file entries for the image
-            image_files = [{"type": "image", "url": file_url}]
 
-            # Persist files to DB if chat context is available
+            # Add file metadata for model context (__files__)
+            image_file_entry = {"type": "image", "url": file_url, "name": name, "content_type": content_type}
+            image_files = [image_file_entry]
+            if __files__ is not None:
+                __files__.append(image_file_entry)
+
             if __chat_id__ and __message_id__:
                 db_files = Chats.add_message_files_by_id_and_message_id(
                     __chat_id__,
@@ -506,35 +548,22 @@ class Tools:
                 if db_files is not None:
                     image_files = db_files
 
-            # Emit the image to the UI if event emitter is available
             if __event_emitter__ and image_files:
-                await __event_emitter__(
-                    {
-                        "type": "chat:message:files",
-                        "data": {"files": image_files},
-                    }
-                )
+                await __event_emitter__({"type": "chat:message:files", "data": {"files": image_files}})
                 await __event_emitter__({"type": "status", "data": {"description": "Image received", "done": True}})
-                # Return a message indicating the image is already displayed
-                return json.dumps(
-                    {
-                        "status": "success",
-                        "message": "The image has been successfully uploaded and is already visible to the user in the chat. You do not need to display or embed the image again - just acknowledge that it has been received.",
-                        "images": [{"url": file_url}],
-                    },
-                    ensure_ascii=False,
-                )
+                return json.dumps({
+                    "status": "success",
+                    "message": "The image has been successfully uploaded and is already visible to the user in the chat. You do not need to display or embed the image again - just acknowledge that it has been received.",
+                    "images": image_files,
+                }, ensure_ascii=False)
 
             if __event_emitter__:
                 await __event_emitter__({"type": "status", "data": {"description": "Image received", "done": True}})
 
-            return json.dumps(
-                {
-                    "status": "success",
-                    "images": [{"url": file_url}],
-                },
-                ensure_ascii=False,
-            )
+            return json.dumps({
+                "status": "success",
+                "images": image_files,
+            }, ensure_ascii=False)
 
         except Exception as e:
             logger.exception(f"Error in get_image: {e}")
