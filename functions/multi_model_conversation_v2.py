@@ -773,7 +773,7 @@ return (function() {
                 tool_result = f"Error: tool '{name}' not found"
 
             # Process result using Open WebUI's process_tool_result
-            result_str, result_files, result_embeds = process_tool_result(
+            tool_return = process_tool_result(
                 self.__request__,
                 name,
                 tool_result,
@@ -782,13 +782,9 @@ return (function() {
                 metadata,
                 self.__user__,
             )
-
-            # Accumulate embeds from process_tool_result (same pattern as files)
-            if result_embeds:
-                self._accumulated_tool_embeds.extend(result_embeds)
-                logger.debug(
-                    f"Accumulated {len(result_embeds)} embed(s) from process_tool_result for {name}"
-                )
+            result_str = tool_return[0] if len(tool_return) > 0 else ""
+            result_files = tool_return[1] if len(tool_return) > 1 else None
+            result_embeds = tool_return[2] if len(tool_return) > 2 else None
 
             # Replace executing tag with completed tag
             total_emitted = total_emitted.replace(executing_tag, "")
@@ -828,21 +824,6 @@ return (function() {
             )
             # Clear after emitting so the next participant doesn't re-emit previous files
             self._accumulated_tool_files = []
-
-    async def _emit_accumulated_tool_embeds(self):
-        """Emit a single combined embeds event with all accumulated tool embeds.
-        Unlike files, embeds are NOT cleared after emitting — each emission sends
-        the full list so that all embeds from all participants remain visible."""
-        if self._accumulated_tool_embeds and self.__current_event_emitter__:
-            await self.__current_event_emitter__(
-                {
-                    "type": "embeds",
-                    "data": {"embeds": list(self._accumulated_tool_embeds)},
-                }
-            )
-            logger.debug(
-                f"Emitted combined embeds with {len(self._accumulated_tool_embeds)} embed(s)"
-            )
 
     async def emit_message(self, message: str):
         if self.__current_event_emitter__:
@@ -1000,9 +981,8 @@ return (function() {
 
         logger.debug(f"[MultiModelTools] Global tool_ids from request: {global_tool_ids}")
 
-        # Proxy event emitter for tools: intercepts 'chat:message:files' and 'embeds' events
+        # Proxy event emitter for tools: intercepts 'chat:message:files'
         self._accumulated_tool_files = []
-        self._accumulated_tool_embeds = []
 
         async def _tool_event_proxy(event):
             event_type = event.get("type", "")
@@ -1012,13 +992,6 @@ return (function() {
                 logger.debug(
                     f"Captured {len(files)} file(s) from tool, "
                     f"total accumulated: {len(self._accumulated_tool_files)}"
-                )
-            elif event_type == "embeds":
-                embeds = event.get("data", {}).get("embeds", [])
-                self._accumulated_tool_embeds.extend(embeds)
-                logger.debug(
-                    f"Captured {len(embeds)} embed(s) from tool, "
-                    f"total accumulated: {len(self._accumulated_tool_embeds)}"
                 )
             else:
                 if __event_emitter__:
@@ -1718,9 +1691,8 @@ return (function() {
                                     metadata,
                                     total_emitted,
                                 )
-                                # Emit all accumulated files and embeds as single combined events
+                                # Emit all accumulated files as single combined events
                                 await self._emit_accumulated_tool_files()
-                                await self._emit_accumulated_tool_embeds()
 
                                 # Build re-prompt messages (OpenAI format):
                                 # 1. Assistant message with tool_calls
