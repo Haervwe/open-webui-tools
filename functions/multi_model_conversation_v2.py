@@ -998,7 +998,7 @@ return (function() {
             # Fallback: check body in case it wasn't popped (e.g. direct API calls)
             global_tool_ids = body.get("tool_ids") or []
 
-        logger.info(f"[MultiModelTools] Global tool_ids from request: {global_tool_ids}")
+        logger.debug(f"[MultiModelTools] Global tool_ids from request: {global_tool_ids}")
 
         # Proxy event emitter for tools: intercepts 'chat:message:files' and 'embeds' events
         self._accumulated_tool_files = []
@@ -1050,7 +1050,7 @@ return (function() {
             model_info = models_state.get(p_model_id, {})
             model_db_info = Models.get_model_by_id(p_model_id)
 
-            logger.info(
+            logger.debug(
                 f"[MultiModelTools] Loading tools for participant model: {p_model_id}"
             )
 
@@ -1180,7 +1180,7 @@ return (function() {
                     }
                     p_model_info["info"]["meta"]["knowledge"] = normalized
                     if needs_normalization:
-                        logger.info(
+                        logger.debug(
                             f"[MultiModelTools] Normalized legacy knowledge items for {p_model_id}"
                         )
             except Exception as e:
@@ -1189,10 +1189,10 @@ return (function() {
                 )
                 p_model_info = model_info  # fall back to original
 
-            logger.info(
+            logger.debug(
                 f"[MultiModelTools] Features for {p_model_id}: {p_features}"
             )
-            logger.info(
+            logger.debug(
                 f"[MultiModelTools] ENABLE_IMAGE_GENERATION={getattr(self.__request__.app.state.config, 'ENABLE_IMAGE_GENERATION', 'NOT_SET')}"
             )
 
@@ -1205,17 +1205,31 @@ return (function() {
                 )
                 if builtin_tools:
                     p_tools_dict.update(builtin_tools)
-                    logger.info(
+                    logger.debug(
                         f"[MultiModelTools] Builtin tools loaded for {p_model_id}: {list(builtin_tools.keys())}"
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         f"[MultiModelTools] No builtin tools returned for {p_model_id}"
                     )
             except Exception as e:
                 logger.error(
                     f"[MultiModelTools] Failed to load built-in tools for {p_model_id}: {e}"
                 )
+
+            # Get native function calling flag
+            native_fc = self._check_model_native_fc(p_model_id)
+
+            # Get system message
+            model_system_message = ""
+            if model_db_info and model_db_info.params:
+                p_params = (
+                    model_db_info.params.model_dump()
+                    if hasattr(model_db_info.params, "model_dump")
+                    else model_db_info.params
+                )
+                if isinstance(p_params, dict):
+                    model_system_message = p_params.get("system", "") or ""
 
             # Build OpenAI-format tool specs
             if p_tools_dict:
@@ -1227,6 +1241,8 @@ return (function() {
             participant_tools_map[p_model_id] = {
                 "dict": p_tools_dict,
                 "specs": p_tools_specs,
+                "native_fc": native_fc,
+                "system_message": model_system_message,
             }
 
         MAX_TOOL_CALL_RETRIES = 5
@@ -1257,7 +1273,7 @@ return (function() {
                     True,
                 )
                 return "Error: No manager model configured."
-            logger.info(f"[MultiModelTools] Using manager model: {resolved_manager_model}")
+            logger.debug(f"[MultiModelTools] Using manager model: {resolved_manager_model}")
 
         for round_num in range(rounds):
             # With manager: len(participants) turns per round, manager picks each.
@@ -1364,11 +1380,13 @@ return (function() {
                     p_tools = participant_tools_map.get(model, {})
                     tools_dict = p_tools.get("dict", {})
                     tools_specs = p_tools.get("specs", None)
+                    native_fc = p_tools.get("native_fc", False)
+                    model_system_message = p_tools.get("system_message", "")
 
                     if tools_dict and tools_specs:
-                        if self._check_model_native_fc(model):
+                        if native_fc:
                             participant_tools_specs = tools_specs
-                            logger.info(
+                            logger.debug(
                                 f"[MultiModelTools] Sending {len(tools_specs)} tool specs to {alias} ({model})"
                             )
                         else:
@@ -1376,17 +1394,6 @@ return (function() {
                                 f"Model {model} does not have native function calling enabled. "
                                 f"Tools will be skipped for {alias}."
                             )
-
-                    # Get the model's configured system message (from OWUI model settings)
-                    model_system_message = ""
-                    model_db_info = Models.get_model_by_id(model)
-                    if model_db_info and model_db_info.params:
-                        p = (
-                            model_db_info.params.model_dump()
-                            if hasattr(model_db_info.params, "model_dump")
-                            else {}
-                        )
-                        model_system_message = p.get("system", "") or ""
 
                     # Build system prompt: model's system message + participant config + conversation flow
                     system_parts = []
@@ -1488,6 +1495,15 @@ return (function() {
                             nonlocal accumulated_tool_calls
 
                             accumulated_tool_calls = []
+                            last_emit_time = 0.0
+                            emit_interval = 0.1
+
+                            async def throttled_emit_replace(html_content, force=False):
+                                nonlocal last_emit_time
+                                now = time.monotonic()
+                                if force or (now - last_emit_time >= emit_interval):
+                                    await self.emit_replace(html_content)
+                                    last_emit_time = now
 
                             async for event in self.get_streaming_completion(
                                 stream_messages,
@@ -1498,7 +1514,7 @@ return (function() {
                                 event_type = event.get("type")
                                 if event_type == "error":
                                     total_emitted += event.get("text", "")
-                                    await self.emit_replace(total_emitted)
+                                    await throttled_emit_replace(total_emitted, force=True)
                                     continue
 
                                 if event_type == "tool_calls":
@@ -1535,7 +1551,7 @@ return (function() {
                                     reasoning_piece = event.get("text", "")
                                     if reasoning_piece:
                                         if reasoning_start_time is None:
-                                            reasoning_start_time = time.time()
+                                            reasoning_start_time = time.monotonic()
                                         reasoning_buffer += reasoning_piece
                                         # Format with blockquote prefix (> ) like middleware
                                         display = "\n".join(
@@ -1544,7 +1560,7 @@ return (function() {
                                             else line
                                             for line in reasoning_buffer.splitlines()
                                         )
-                                        await self.emit_replace(
+                                        await throttled_emit_replace(
                                             total_emitted
                                             + '<details type="reasoning" done="false">\n'
                                             + "<summary>Thinking...</summary>\n"
@@ -1556,7 +1572,7 @@ return (function() {
                                 # Finalize thinking block when transitioning
                                 if reasoning_buffer:
                                     reasoning_duration = (
-                                        round(time.time() - reasoning_start_time)
+                                        round(time.monotonic() - reasoning_start_time)
                                         if reasoning_start_time
                                         else 1
                                     )
@@ -1571,20 +1587,22 @@ return (function() {
                                         + "\n</details>\n\n"
                                     )
                                     reasoning_buffer = ""
+                                    await throttled_emit_replace(total_emitted, force=True)
 
                                 if event_type == "content":
                                     chunk_text = event.get("text", "")
                                     if not chunk_text:
                                         continue
                                     full_response += chunk_text
-                                    total_emitted += self._replace_thinking_tags(chunk_text)
-                                    await self.emit_replace(total_emitted)
+                                    formatted_chunk = self._replace_thinking_tags(chunk_text)
+                                    total_emitted += formatted_chunk
+                                    await self.emit_message(formatted_chunk)
                                     continue
 
                             # Flush reasoning if stream ended during thinking
                             if reasoning_buffer:
                                 reasoning_duration = (
-                                    round(time.time() - reasoning_start_time)
+                                    round(time.monotonic() - reasoning_start_time)
                                     if reasoning_start_time
                                     else 1
                                 )
@@ -1598,8 +1616,10 @@ return (function() {
                                     + display
                                     + "\n</details>\n\n"
                                 )
-                                await self.emit_replace(total_emitted)
                                 reasoning_buffer = ""
+                            
+                            # Final flush at the end of the stream
+                            await throttled_emit_replace(total_emitted, force=True)
 
                         # ── Initial streaming call ──────────────────────
                         await _stream_and_accumulate(messages, participant_tools_specs)
