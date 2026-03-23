@@ -91,16 +91,20 @@ Your goal is to fulfill the user's request.
 
 You have access to the following built-in special tools:
 1. `update_state(task_id: str, status: str, description: str)`: Use this ONLY to track the tasks you are working on. Call this tool when you finish a logical step to mark it 'completed' (or 'failed'). The 'in_progress' status is handled automatically when you call a subagent. Do not change the original 'description'.
-2. `call_subagent(model_id: str, prompt: str, task_id: str)`: Use this to delegate a subtask to a specialized model. If you need it to read results from a previous subagent task, you can pass the previous task's ID as a reference string starting with "@" (e.g., "@task_1") in the prompt. It will be substituted with the full output of that task automatically.
+2. `call_subagent(model_id: str, prompt: str, task_id: str)`: Use this to delegate a subtask to a specialized model. 
+   - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent within this execution. To **continue or follow up** on a previous interaction, you MUST use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.
+   - **Task IDs vs Aliases**:
+     - **Task ID**: Use the raw identifier (e.g., "task_1") in parameters like `task_id`, `task_ids`, or `related_tasks`.
+     - **Task Alias**: Use the reference string starting with "@" (e.g., "@task_1") ONLY in **prompts** or **final responses**. It will be automatically substituted with the final text result of that task.
+   - **Cross-Task Context**: If you need a subagent to read the final result of a DIFFERENT task, list its Task ID in the `related_tasks` parameter.
 
 You must:
 - BE STRICT WITH STATE STRUCTURE. Follow the plan provided exactly.
 - Methodically execute the steps, using `call_subagent` for complex analysis, generation, or reasoning steps.
-- As you finish each small step, call `update_state` to mark that specific task as 'completed'. This allows for small complete checks and visibility as you progress.
-- Once the objective is complete, compile the final result. If your final result needs to include large outputs from previous subagents, simply include the "@task_id" reference in your final text response. It will be replaced automatically.
-- Do not make up information. Use your tools.
-- If a subagent's final response is lacking or incomplete, you MUST ask in a follow-up (e.g. call the subagent again) to get the requested data.
-- Relative API addresses like `/api/v1/...` are fully valid and should be used exactly as is, with no base URL or extra things added.
+- As you finish each small step, call `update_state` to mark that specific task as 'completed'.
+- Once the objective is complete, compile the final result. Use "@task_id" references in your final response to include large previous outputs.
+- do not conflate `related_tasks` with full context threading. `related_tasks` only provides the final result of a different task, while using the same `task_id` provides the full message history (including tool responses) of that specific thread.
+- Relative API addresses like `/api/v1/...` are fully valid and should be used exactly as is.
 
 Available Subagent Models:
 {subagent_models}
@@ -216,6 +220,11 @@ Available Subagent Models:
     def resolve_dict_references(self, params: dict, action_results: dict[str, str]) -> dict:
         resolved = {}
         for k, v in params.items():
+            # Skip resolution for task ID fields to preserve raw IDs
+            if k in ["task_id", "task_ids", "related_tasks"]:
+                resolved[k] = v
+                continue
+                
             if isinstance(v, str):
                 resolved[k] = self.resolve_action_references(v, action_results)
             elif isinstance(v, dict):
@@ -224,7 +233,11 @@ Available Subagent Models:
                 resolved_list = []
                 for item in v:
                     if isinstance(item, str):
-                        resolved_list.append(self.resolve_action_references(item, action_results))
+                        # Only resolve if NOT an ID field
+                        if k not in ["task_ids", "related_tasks"]:
+                            resolved_list.append(self.resolve_action_references(item, action_results))
+                        else:
+                            resolved_list.append(item)
                     elif isinstance(item, dict):
                         resolved_list.append(self.resolve_dict_references(item, action_results))
                     else:
@@ -233,6 +246,49 @@ Available Subagent Models:
             else:
                 resolved[k] = v
         return resolved
+
+    def _extract_json_array(self, text: str) -> list:
+        """Extract the first valid JSON array from text, handled redundantly for robustness."""
+        # 1. Clean thinking tags
+        text = clean_thinking_tags(text)
+        
+        # 2. Extract from markdown if present
+        markdown_match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+        if markdown_match:
+            text = markdown_match.group(1)
+            
+        # 3. Basic cleanup
+        text = text.strip()
+        
+        # 4. Try finding the first [
+        start = text.find("[")
+        if start == -1:
+            return []
+            
+        # 5. Use raw_decode to find the first valid JSON array
+        decoder = json.JSONDecoder()
+        remaining_text = text[start:]
+        
+        try:
+            obj, _ = decoder.raw_decode(remaining_text)
+            if isinstance(obj, list):
+                return obj
+            elif isinstance(obj, dict) and "tasks" in obj:
+                # Handle potential wrap in an object if structured output used a field name
+                return obj["tasks"]
+        except json.JSONDecodeError:
+            # If it failed, try cleaning trailing commas
+            try:
+                cleaned = re.sub(r",\s*([\]}])", r"\1", remaining_text)
+                obj, _ = decoder.raw_decode(cleaned)
+                if isinstance(obj, list):
+                    return obj
+                elif isinstance(obj, dict) and "tasks" in obj:
+                    return obj["tasks"]
+            except:
+                pass
+                
+        return []
 
     # ── Tool calling details emission ──────────────────────────────────────────
 
@@ -498,11 +554,40 @@ Available Subagent Models:
         )
         plan_messages = [{"role": "system", "content": plan_system_prompt}] + messages
         
+        # Add structured output if possible
+        plan_body = {**body}
+        plan_body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "plan",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "tasks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "task_id": {"type": "string"},
+                                    "description": {"type": "string"}
+                                },
+                                "required": ["task_id", "description"],
+                                "additionalProperties": False
+                            }
+                        }
+                    },
+                    "required": ["tasks"],
+                    "additionalProperties": False
+                }
+            }
+        }
+
         await self.emit_status("Planning...", False)
         
         plan_content_chunks = []
         try:
-            async for event in self.get_streaming_completion(plan_messages, model_id, body=body, tools=None):
+            async for event in self.get_streaming_completion(plan_messages, model_id, body=plan_body, tools=None):
                 if event["type"] == "content":
                     plan_content_chunks.append(event["text"])
         except Exception as e:
@@ -510,19 +595,15 @@ Available Subagent Models:
             
         full_plan_text = "".join(plan_content_chunks)
         
-        # Try to parse the json plan
+        # Try to parse the json plan using robust extraction
         try:
-            # Find json array inside text
-            json_start = full_plan_text.find("[")
-            json_end = full_plan_text.rfind("]")
-            if json_start != -1 and json_end != -1:
-                plan_json = json.loads(full_plan_text[json_start:json_end+1])
-                if isinstance(plan_json, list):
-                    for task in plan_json:
-                        tid = task.get("task_id")
-                        desc = task.get("description")
-                        if tid and desc:
-                            planner_state[tid] = {"status": "pending", "description": desc}
+            plan_json = self._extract_json_array(full_plan_text)
+            if plan_json:
+                for task in plan_json:
+                    tid = task.get("task_id")
+                    desc = task.get("description")
+                    if tid and desc:
+                        planner_state[tid] = {"status": "pending", "description": desc}
             
             if not planner_state:
                 raise ValueError("No tasks parsed from plan.")
@@ -565,17 +646,17 @@ Available Subagent Models:
                 "type": "function",
                 "function": {
                     "name": "call_subagent",
-                    "description": "Call a specialized subagent model to perform a task. Returns the output from the model.",
+                    "description": "Call a specialized subagent model to perform a task. Returns the output from the model. Using the same task_id continues the same conversation thread (thread persistence).",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "model_id": {"type": "string", "description": "The ID of the model to use", "enum": subagents_list if subagents_list else ["__none__"]},
-                            "prompt": {"type": "string", "description": "Detailed instructions for the subagent"},
-                            "task_id": {"type": "string", "description": "Unique ID to assign to this subagent task for tracking and future @task_id referencing"},
+                            "prompt": {"type": "string", "description": "Detailed instructions for the subagent. Use '@task_id' (e.g. '@task_1') as text replacement to include results from previous tasks in the prompt text."},
+                            "task_id": {"type": "string", "description": "ID identifying the conversation thread. Use the raw ID (e.g. 'task_1'). Using the same task_id follows up or continues a previous conversation."},
                             "related_tasks": {
                                 "type": "array",
                                 "items": {"type": "string", "enum": available_tasks},
-                                "description": "Optional list of previously completed task IDs whose huge outputs you need inserted raw into this subagent's prompt context."
+                                "description": "Optional list of previously completed Task IDs (e.g. 'task_1') whose results you need contextually available to the subagent."
                             }
                         },
                         "required": ["model_id", "prompt", "task_id"]
@@ -586,11 +667,11 @@ Available Subagent Models:
                 "type": "function",
                 "function": {
                     "name": "read_task_result",
-                    "description": "Read the pure text of a completed task verbatim if you need to fetch small specifics.",
+                    "description": "Read the pure text result of a completed task verbatim.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "task_id": {"type": "string", "enum": available_tasks}
+                            "task_id": {"type": "string", "description": "The Task ID (e.g. 'task_1')", "enum": available_tasks}
                         },
                         "required": ["task_id"]
                     }
@@ -628,6 +709,7 @@ Available Subagent Models:
                 full_reasoning = ""
                 reasoning_start_time = None
                 total_emitted_base = total_emitted
+                turn_start_base = total_emitted # Save original to revert during promotion if needed
                 
                 async for event in self.get_streaming_completion(planner_messages, model_id, body=body, tools=tools_spec):
                     event_type = event["type"]
@@ -715,63 +797,69 @@ Available Subagent Models:
                 # Only clean if not promoting reasoning later
                 final_content = clean_thinking_tags(raw_content)
                 final_content = THINKING_TAG_CLEANER_PATTERN.sub('', final_content).strip()
+
+                # Intercept hallucinated `<tool_call>` XML before promotion check
+                if not tool_calls_dict:
+                    extracted_any = False
+                    # Check both content and reasoning for hallucinated tool calls
+                    xml_count = 0
+                    for source_text in [final_content, full_reasoning]:
+                        if "<tool_call>" in source_text:
+                            xml_matches = re.finditer(r'<tool_call>\s*(.*?)\s*(?:</tool_call>|$)', source_text, re.DOTALL)
+                            for match in xml_matches:
+                                tc_data = match.group(1)
+                                extracted_any = True
+                                func_match = re.search(r'<function\s*=\s*"?([^>"]+)"?>', tc_data)
+                                if func_match:
+                                    func_name = func_match.group(1).strip()
+                                    kwargs = {}
+                                    param_matches = re.findall(r'<parameter\s*=\s*"?([^>"]+)"?>(.*?)(?=</parameter>|<parameter\s*=|</function>|$)', tc_data, re.DOTALL)
+                                    for p_name, p_val in param_matches:
+                                        kwargs[p_name.strip()] = p_val.strip()
+                                        
+                                    tool_calls_dict[f"xml_{xml_count}"] = {
+                                        "id": str(uuid4()),
+                                        "function": {
+                                            "name": func_name,
+                                            "arguments": json.dumps(kwargs)
+                                        }
+                                    }
+                                else:
+                                    try:
+                                        data = json.loads(tc_data.strip())
+                                        if isinstance(data, dict) and "name" in data:
+                                            tool_calls_dict[f"xml_{xml_count}"] = {
+                                                "id": str(uuid4()),
+                                                "function": {
+                                                    "name": data["name"],
+                                                    "arguments": json.dumps(data.get("arguments", data.get("parameters", {})))
+                                                }
+                                            }
+                                    except:
+                                        pass
+                                xml_count += 1
+                    
+                    if extracted_any:
+                        # Clean the XML tags from content/reasoning for a cleaner final_content
+                        # We also clean final_content even if it came from reasoning promotion later to be safe
+                        final_content = re.sub(r'<tool_call>.*?</tool_call>', '', final_content, flags=re.DOTALL).strip()
                 
                 # Promotion logic: only promote if NO content chunks were ever added AND we have reasoning
                 if not content_chunks and not tool_calls_dict and full_reasoning.strip():
                     # Promoting reasoning to final content (clean tags)
                     final_content = THINKING_TAG_CLEANER_PATTERN.sub('', full_reasoning).strip()
                     
-                    # Remove the reasoning thinking details block from total_emitted_base so there's no duplication
-                    total_emitted_base = re.sub(r'\n?\n?<details type="reasoning".*?</details>\s*$', '', total_emitted_base, flags=re.DOTALL).strip()
+                    # Revert total_emitted_base to turn start to avoid duplicating or deleting previous history
+                    total_emitted_base = turn_start_base.strip()
                     if total_emitted_base:
                         total_emitted_base += "\n\n"
+                
+                # Double-check cleanup: if we extracted XML tool calls, make sure they are NOT in the final user-facing text
+                if tool_calls_dict:
+                    final_content = re.sub(r'<tool_call>.*?</tool_call>', '', final_content, flags=re.DOTALL).strip()
                     
                 total_emitted = total_emitted_base + final_content
                 await self.emit_replace(total_emitted)
-
-                # Intercept hallucinated `<tool_call>` XML emitted into the body
-                if not tool_calls_dict and "<tool_call>" in final_content:
-                    extracted_any = False
-                    xml_matches = re.finditer(r'<tool_call>\s*(.*?)\s*(?:</tool_call>|$)', final_content, re.DOTALL)
-                    for idx, match in enumerate(xml_matches):
-                        tc_data = match.group(1)
-                        extracted_any = True
-                        func_match = re.search(r'<function\s*=\s*"?([^>"]+)"?>', tc_data)
-                        if func_match:
-                            func_name = func_match.group(1).strip()
-                            kwargs = {}
-                            param_matches = re.findall(r'<parameter\s*=\s*"?([^>"]+)"?>(.*?)(?=</parameter>|<parameter\s*=|</function>|$)', tc_data, re.DOTALL)
-                            for p_name, p_val in param_matches:
-                                kwargs[p_name.strip()] = p_val.strip()
-                                
-                            tool_calls_dict[idx] = {
-                                "id": str(uuid4()),
-                                "function": {
-                                    "name": func_name,
-                                    "arguments": json.dumps(kwargs)
-                                }
-                            }
-                        else:
-                            try:
-                                data = json.loads(tc_data.strip())
-                                if isinstance(data, dict) and "name" in data:
-                                    tool_calls_dict[idx] = {
-                                        "id": str(uuid4()),
-                                        "function": {
-                                            "name": data["name"],
-                                            "arguments": json.dumps(data.get("arguments", data.get("parameters", {})))
-                                        }
-                                    }
-                            except:
-                                pass
-                    
-                    if extracted_any:
-                        # Clean the XML tags from content and SYNC total_emitted for the UI
-                        cleaned_content = re.sub(r'<tool_call>.*?</tool_call>', '', final_content, flags=re.DOTALL).strip()
-                        if cleaned_content != final_content:
-                            total_emitted = total_emitted.replace(final_content, cleaned_content)
-                            final_content = cleaned_content
-                            await self.emit_replace(total_emitted)
 
                 # Append message to history
                 assistant_message = {"role": "assistant", "content": final_content}
@@ -921,8 +1009,10 @@ Available Subagent Models:
                         sub_sys += "\n\nCRITICAL CONTEXT: You are running as a headless subagent entirely in the background. DO NOT return markdown elements that rely on Open WebUI UI embeds for tool generation output. Any tools you use (like generate_image, search, etc.) will return URLs, base64 data, or raw paths. You MUST return these raw HTML references, URLs, files or images relative or absolute paths unconditionally in your final reply so the main planner can use them."
                         if "related_tasks" in args and isinstance(args["related_tasks"], list):
                             for rt in args["related_tasks"]:
-                                if rt in action_results:
-                                    sub_sys += f"\n\n--- RESULTS FROM PREVIOUS TASK {rt} ---\n{action_results[rt]}\n--- END OF {rt} ---\n"
+                                # Robustness: strip '@' if hallucinated
+                                rt_clean = rt.lstrip("@")
+                                if rt_clean in action_results:
+                                    sub_sys += f"\n\n--- RESULTS FROM PREVIOUS TASK {rt} ---\n{action_results[rt_clean]}\n--- END OF {rt} ---\n"
                             
                         context_key = (chat_id, sub_task_id)
                         if context_key in subagent_contexts:
