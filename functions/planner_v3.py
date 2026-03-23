@@ -50,6 +50,13 @@ THINK_CLOSE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+THINKING_TAG_CLEANER_PATTERN = re.compile(
+    r'</?(?:think|thinking|reason|reasoning|thought|Thought)>|\|begin_of_thought\||\|end_of_thought\|', 
+    re.IGNORECASE
+)
+
+
+
 def clean_thinking_tags(message: str) -> str:
     pattern = re.compile(
         r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>"
@@ -83,15 +90,17 @@ class Pipe:
 Your goal is to fulfill the user's request.
 
 You have access to the following built-in special tools:
-1. `update_state(task_id: str, status: str, description: str)`: Use this to track the tasks you are working on. Call this tool whenever you start, update, or finish a logical step. "status" should be 'pending', 'in_progress', 'completed', or 'failed'.
+1. `update_state(task_id: str, status: str, description: str)`: Use this ONLY to track the tasks you are working on. Call this tool when you finish a logical step to mark it 'completed' (or 'failed'). The 'in_progress' status is handled automatically when you call a subagent. Do not change the original 'description'.
 2. `call_subagent(model_id: str, prompt: str, task_id: str)`: Use this to delegate a subtask to a specialized model. If you need it to read results from a previous subagent task, you can pass the previous task's ID as a reference string starting with "@" (e.g., "@task_1") in the prompt. It will be substituted with the full output of that task automatically.
 
 You must:
-- BE STRICT WITH STATE STRUCTURE. Do NOT lump your entire plan into a single task. Break your plan down into small, distinct steps and create a separate `update_state` entry for EACH step as 'pending' before executing them. 
+- BE STRICT WITH STATE STRUCTURE. Follow the plan provided exactly.
 - Methodically execute the steps, using `call_subagent` for complex analysis, generation, or reasoning steps.
-- As you finish each small step, call `update_state` again to mark that specific task as 'completed'. This allows for small complete checks and visibility as you progress.
+- As you finish each small step, call `update_state` to mark that specific task as 'completed'. This allows for small complete checks and visibility as you progress.
 - Once the objective is complete, compile the final result. If your final result needs to include large outputs from previous subagents, simply include the "@task_id" reference in your final text response. It will be replaced automatically.
 - Do not make up information. Use your tools.
+- If a subagent's final response is lacking or incomplete, you MUST ask in a follow-up (e.g. call the subagent again) to get the requested data.
+- Relative API addresses like `/api/v1/...` are fully valid and should be used exactly as is, with no base URL or extra things added.
 
 Available Subagent Models:
 {subagent_models}
@@ -164,17 +173,17 @@ Available Subagent Models:
         if not tasks_html:
             tasks_html = '''
             <div style="padding: 16px; text-align: center; color: rgba(255,255,255,0.4); font-size: 13px; font-style: italic; background: rgba(0,0,0,0.1); border-radius: 12px; border: 1px dashed rgba(255,255,255,0.1);">
-                Awaiting active plan formation...
+                Planning...
             </div>
             '''
 
         html = f'''
-        <div class="planner-embed" style="background: rgba(20, 20, 25, 0.7); backdrop-filter: blur(24px); border: 1px solid rgba(255,255,255,0.06); box-shadow: 0 30px 60px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1); border-radius: 24px; padding: 24px; margin: 16px 0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;">
-            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 24px;">
-                <div style="font-size: 26px; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3));">🧠</div>
+        <div class="planner-embed" style="background: rgba(15, 15, 15, 0.2); backdrop-filter: blur(24px); border: 1px solid rgba(255,255,255,0.06); box-shadow: 0 0 80px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.1); border-radius: 24px; padding: 32px; margin: 32px; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;">
+            <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 12px; margin-bottom: 32px;">
+                <div style="font-size: 36px; filter: drop-shadow(0 0 8px rgba(0,0,0,0.2));">🧠</div>
                 <div>
-                    <h3 style="margin: 0; color: #fff; font-size: 18px; font-weight: 800; letter-spacing: -0.2px;">Planner Subagents</h3>
-                    <p style="margin: 4px 0 0 0; font-size: 12px; color: #94a3b8; font-weight: 500;">Live Execution State</p>
+                    <h3 style="margin: 0; color: #fff; font-size: 20px; font-weight: 800; letter-spacing: -0.2px;">Planner Subagents</h3>
+                    <p style="margin: 6px 0 0 0; font-size: 13px; color: #94a3b8; font-weight: 500;">Live Execution State</p>
                 </div>
             </div>
             <div style="display: flex; flex-direction: column; gap: 4px;">
@@ -367,6 +376,9 @@ Available Subagent Models:
         self.__user__ = Users.get_user_by_id(__user__.get("id"))
         self.__request__ = __request__
         self.__model__ = body.get("model", "")
+        
+        # Identify chat for context persistence
+        chat_id = body.get("chat_id") or body.get("id") or "default"
 
         messages = body.get("messages", [])
         if not messages:
@@ -470,11 +482,68 @@ Available Subagent Models:
 
         planner_state = {}
         action_results = {}
+        subagent_contexts = {} # Local storage for subagent follow-ups within this session
         total_emitted = ""
 
         # Emit initial html embed state
         await self.emit_html_embed(planner_state)
+        
+        # --- Phase 1: Plan Creation ---
+        plan_system_prompt = (
+            f"{system_prompt}\n\n"
+            "You are currently in the PLANNING PHASE. Your ONLY job is to create a detailed, step-by-step plan to fulfill the user's request. "
+            "You MUST keep in mind the capabilities of the subagents and tools available to you when forming the plan. "
+            "Output your plan strictly as a JSON array of objects, where each object has a 'task_id' (string, e.g., 'task_1') and a 'description' (string, short summary of the step). "
+            "Do not output any options, greetings, or other text. Only the JSON array."
+        )
+        plan_messages = [{"role": "system", "content": plan_system_prompt}] + messages
+        
+        await self.emit_status("Planning...", False)
+        
+        plan_content_chunks = []
+        try:
+            async for event in self.get_streaming_completion(plan_messages, model_id, body=body, tools=None):
+                if event["type"] == "content":
+                    plan_content_chunks.append(event["text"])
+        except Exception as e:
+            logger.error(f"Error during plan formation: {e}")
+            
+        full_plan_text = "".join(plan_content_chunks)
+        
+        # Try to parse the json plan
+        try:
+            # Find json array inside text
+            json_start = full_plan_text.find("[")
+            json_end = full_plan_text.rfind("]")
+            if json_start != -1 and json_end != -1:
+                plan_json = json.loads(full_plan_text[json_start:json_end+1])
+                if isinstance(plan_json, list):
+                    for task in plan_json:
+                        tid = task.get("task_id")
+                        desc = task.get("description")
+                        if tid and desc:
+                            planner_state[tid] = {"status": "pending", "description": desc}
+            
+            if not planner_state:
+                raise ValueError("No tasks parsed from plan.")
+                
+            # Emit the newly populated state
+            await self.emit_html_embed(planner_state)
+        except Exception as e:
+            logger.warning(f"Could not parse planner JSON effectively: {e}. Raw: {full_plan_text}")
+            # Fallback if failed: add a single task
+            planner_state["task_1"] = {"status": "pending", "description": "Process user request"}
+            await self.emit_html_embed(planner_state)
 
+        # Inform the main agent of the approved plan
+        planner_messages.append({"role": "system", "content": f"Here is the established plan. Do not deviate from it. Execute the steps logically:\n{json.dumps(planner_state)}"})
+        # ------------------------------
+
+        final_pass_done = False
+        
+        # Build dynamic tool schemas ONCE after planning to avoid cache busting
+        available_tasks = list(planner_state.keys()) if planner_state else ["task_1"]
+        
         tools_spec = [
             {
                 "type": "function",
@@ -484,7 +553,7 @@ Available Subagent Models:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "task_id": {"type": "string", "description": "Unique identifier for the task"},
+                            "task_id": {"type": "string", "description": "Unique identifier for the task", "enum": available_tasks},
                             "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "failed"]},
                             "description": {"type": "string", "description": "Short description of the task"}
                         },
@@ -500,17 +569,52 @@ Available Subagent Models:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "model_id": {"type": "string", "description": "The ID of the model to use"},
+                            "model_id": {"type": "string", "description": "The ID of the model to use", "enum": subagents_list if subagents_list else ["__none__"]},
                             "prompt": {"type": "string", "description": "Detailed instructions for the subagent"},
-                            "task_id": {"type": "string", "description": "Unique ID to assign to this subagent task for tracking and future @task_id referencing"}
+                            "task_id": {"type": "string", "description": "Unique ID to assign to this subagent task for tracking and future @task_id referencing"},
+                            "related_tasks": {
+                                "type": "array",
+                                "items": {"type": "string", "enum": available_tasks},
+                                "description": "Optional list of previously completed task IDs whose huge outputs you need inserted raw into this subagent's prompt context."
+                            }
                         },
                         "required": ["model_id", "prompt", "task_id"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_task_result",
+                    "description": "Read the pure text of a completed task verbatim if you need to fetch small specifics.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {"type": "string", "enum": available_tasks}
+                        },
+                        "required": ["task_id"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "review_tasks",
+                    "description": "Spawn an invisible LLM cross-review over massive task results using a custom prompt, saving your own context.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task_ids": {
+                                "type": "array",
+                                "items": {"type": "string", "enum": available_tasks}
+                            },
+                            "prompt": {"type": "string", "description": "Instructions on what to review or extract from these given task IDs"}
+                        },
+                        "required": ["task_ids", "prompt"]
+                    }
+                }
             }
         ]
-
-        # Add external tools to tools_spec
         for tool_name, tool_data in tools_dict.items():
             if "spec" in tool_data:
                 tools_spec.append({"type": "function", "function": tool_data["spec"]})
@@ -521,7 +625,9 @@ Available Subagent Models:
                 content_chunks = []
                 tool_calls_dict = {}
                 reasoning_buffer = ""
+                full_reasoning = ""
                 reasoning_start_time = None
+                total_emitted_base = total_emitted
                 
                 async for event in self.get_streaming_completion(planner_messages, model_id, body=body, tools=tools_spec):
                     event_type = event["type"]
@@ -532,13 +638,14 @@ Available Subagent Models:
                             if reasoning_start_time is None:
                                 reasoning_start_time = time.monotonic()
                             reasoning_buffer += reasoning_piece
+                            full_reasoning += reasoning_piece
                             display = "\n".join(
                                 f"> {line}" if not line.startswith(">") else line
                                 for line in reasoning_buffer.splitlines()
                             )
                             await self.emit_replace(
                                 total_emitted
-                                + '<details type="reasoning" done="false">\n'
+                                + '\n\n<details type="reasoning" done="false">\n'
                                 + "<summary>Thinking...</summary>\n"
                                 + display
                                 + "\n</details>\n\n"
@@ -554,20 +661,24 @@ Available Subagent Models:
                                 f"> {line}" if not line.startswith(">") else line
                                 for line in reasoning_buffer.splitlines()
                             )
-                            total_emitted += (
-                                f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
+                            total_emitted_base += (
+                                f'\n\n<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
                                 f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
                                 + display
                                 + "\n</details>\n\n"
                             )
                             reasoning_buffer = ""
+                            total_emitted = total_emitted_base + clean_thinking_tags("".join(content_chunks))
                             await self.emit_replace(total_emitted)
 
                         if event_type == "content":
                             text = event["text"]
                             content_chunks.append(text)
-                            total_emitted += text
-                            await self.emit_message(text)
+                            current_content = "".join(content_chunks)
+                            display_content = clean_thinking_tags(current_content)
+                            display_content = re.sub(r'<(?:think|thinking|reason|reasoning|thought|Thought)>.*', '', display_content, flags=re.DOTALL | re.IGNORECASE)
+                            total_emitted = total_emitted_base + display_content
+                            await self.emit_replace(total_emitted)
                         elif event_type == "tool_calls":
                             for tc in event["data"]:
                                 idx = tc["index"]
@@ -582,34 +693,54 @@ Available Subagent Models:
                                     tool_calls_dict[idx]["function"]["arguments"] += tc["function"]["arguments"]
 
                 if reasoning_buffer:
-                    reasoning_duration = (
-                        round(time.monotonic() - reasoning_start_time)
-                        if reasoning_start_time else 1
-                    )
-                    display = "\n".join(
-                        f"> {line}" if not line.startswith(">") else line
-                        for line in reasoning_buffer.splitlines()
-                    )
-                    total_emitted += (
-                        f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
-                        f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
-                        + display
-                        + "\n</details>\n\n"
-                    )
-                    reasoning_buffer = ""
-                    await self.emit_replace(total_emitted)
+                            reasoning_duration = (
+                                round(time.monotonic() - reasoning_start_time)
+                                if reasoning_start_time else 1
+                            )
+                            display = "\n".join(
+                                f"> {line}" if not line.startswith(">") else line
+                                for line in reasoning_buffer.splitlines()
+                            )
+                            total_emitted_base += (
+                                f'<details type="reasoning" done="true" duration="{reasoning_duration}">\n'
+                                f"<summary>Thought for {reasoning_duration} seconds</summary>\n"
+                                + display
+                                + "\n</details>\n\n"
+                            )
+                            reasoning_buffer = ""
+                            total_emitted = total_emitted_base + clean_thinking_tags("".join(content_chunks))
+                            await self.emit_replace(total_emitted)
 
-                final_content = "".join(content_chunks)
+                raw_content = "".join(content_chunks)
+                # Only clean if not promoting reasoning later
+                final_content = clean_thinking_tags(raw_content)
+                final_content = THINKING_TAG_CLEANER_PATTERN.sub('', final_content).strip()
+                
+                # Promotion logic: only promote if NO content chunks were ever added AND we have reasoning
+                if not content_chunks and not tool_calls_dict and full_reasoning.strip():
+                    # Promoting reasoning to final content (clean tags)
+                    final_content = THINKING_TAG_CLEANER_PATTERN.sub('', full_reasoning).strip()
+                    
+                    # Remove the reasoning thinking details block from total_emitted_base so there's no duplication
+                    total_emitted_base = re.sub(r'\n?\n?<details type="reasoning".*?</details>\s*$', '', total_emitted_base, flags=re.DOTALL).strip()
+                    if total_emitted_base:
+                        total_emitted_base += "\n\n"
+                    
+                total_emitted = total_emitted_base + final_content
+                await self.emit_replace(total_emitted)
 
                 # Intercept hallucinated `<tool_call>` XML emitted into the body
                 if not tool_calls_dict and "<tool_call>" in final_content:
-                    xml_tool_calls = re.findall(r'<tool_call>(.*?)</tool_call>', final_content, re.DOTALL)
-                    for idx, tc_data in enumerate(xml_tool_calls):
-                        func_match = re.search(r'<function=([^>]+)>', tc_data)
+                    extracted_any = False
+                    xml_matches = re.finditer(r'<tool_call>\s*(.*?)\s*(?:</tool_call>|$)', final_content, re.DOTALL)
+                    for idx, match in enumerate(xml_matches):
+                        tc_data = match.group(1)
+                        extracted_any = True
+                        func_match = re.search(r'<function\s*=\s*"?([^>"]+)"?>', tc_data)
                         if func_match:
                             func_name = func_match.group(1).strip()
                             kwargs = {}
-                            param_matches = re.findall(r'<parameter=([^>]+)>(.*?)</parameter>', tc_data, re.DOTALL)
+                            param_matches = re.findall(r'<parameter\s*=\s*"?([^>"]+)"?>(.*?)(?=</parameter>|<parameter\s*=|</function>|$)', tc_data, re.DOTALL)
                             for p_name, p_val in param_matches:
                                 kwargs[p_name.strip()] = p_val.strip()
                                 
@@ -633,7 +764,14 @@ Available Subagent Models:
                                     }
                             except:
                                 pass
-                    final_content = re.sub(r'<tool_call>.*?</tool_call>', '', final_content, flags=re.DOTALL).strip()
+                    
+                    if extracted_any:
+                        # Clean the XML tags from content and SYNC total_emitted for the UI
+                        cleaned_content = re.sub(r'<tool_call>.*?</tool_call>', '', final_content, flags=re.DOTALL).strip()
+                        if cleaned_content != final_content:
+                            total_emitted = total_emitted.replace(final_content, cleaned_content)
+                            final_content = cleaned_content
+                            await self.emit_replace(total_emitted)
 
                 # Append message to history
                 assistant_message = {"role": "assistant", "content": final_content}
@@ -641,14 +779,82 @@ Available Subagent Models:
                     tool_calls_list = list(tool_calls_dict.values())
                     assistant_message["tool_calls"] = tool_calls_list
                 planner_messages.append(assistant_message)
+                
+                # Resolve aliases in the newly streamed response content for the UI
+                resolved_content = self.resolve_action_references(final_content, action_results)
+                if resolved_content != final_content:
+                    total_emitted = total_emitted.replace(final_content, resolved_content)
+                    final_content = resolved_content
+                    await self.emit_replace(total_emitted)
 
                 if not tool_calls_dict:
-                    # Final response from planner - stream final resolved context if any
-                    resolved_content = self.resolve_action_references(final_content, action_results)
-                    if resolved_content != final_content:
-                        # Resend the cleaned up and fully replaced final message
-                        total_emitted = total_emitted.replace(final_content, resolved_content)
+                    # Final verification pass
+                    unresolved_tasks = [tid for tid, info in planner_state.items() if info["status"] not in ["completed"]]
+                    if unresolved_tasks and not final_pass_done:
+                        final_pass_done = True
+                        await self.emit_status("Verifying task states implicitly...", False)
+                        
+                        judge_messages = planner_messages.copy()
+                        judge_messages.append({
+                            "role": "user",
+                            "content": f"SYSTEM: Review the final response. Tasks {', '.join(unresolved_tasks)} are not marked as completed. If they were actually completed in the narrative, use the `update_state` tool to mark them as completed. Do not output text, ONLY tool calls. If more work is needed, do nothing and the planner will continue."
+                        })
+                        
+                        silent_tool_calls = {}
+                        try:
+                            async for sub_event in self.get_streaming_completion(judge_messages, model_id, body=body, tools=tools_spec):
+                                if sub_event["type"] == "tool_calls":
+                                    for tc in sub_event["data"]:
+                                        idx = tc["index"]
+                                        if idx not in silent_tool_calls:
+                                            silent_tool_calls[idx] = {
+                                                "id": tc.get("id"),
+                                                "function": {"name": tc["function"].get("name", ""), "arguments": ""}
+                                            }
+                                        if "name" in tc["function"] and tc["function"]["name"]:
+                                            silent_tool_calls[idx]["function"]["name"] = tc["function"]["name"]
+                                        if "arguments" in tc["function"]:
+                                            silent_tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
+                        except Exception as e:
+                            logger.error(f"Error in silent judge: {e}")
+                            
+                        updated_any = False
+                        if silent_tool_calls:
+                            for tc in silent_tool_calls.values():
+                                if tc["function"]["name"] == "update_state":
+                                    try:
+                                        args = json.loads(tc["function"]["arguments"])
+                                        task_id = args.get("task_id", "")
+                                        status = args.get("status", "pending")
+                                        if task_id in planner_state:
+                                            planner_state[task_id]["status"] = status
+                                            if "description" in args and args["description"]:
+                                                planner_state[task_id]["description"] = args["description"]
+                                            updated_any = True
+                                    except:
+                                        pass
+                                        
+                        if updated_any:
+                            await self.emit_html_embed(planner_state)
+                            await asyncio.sleep(0.1)
+                            await self.emit_replace(total_emitted)
+                            
+                        # If tasks are STILL pending, in progress, or failed, we resume the actual planner
+                        still_incomplete = [tid for tid, info in planner_state.items() if info["status"] not in ["completed"]]
+                        if still_incomplete and updated_any:
+                            # Let it loop one more time if something changed.
+                            continue
+                        elif still_incomplete and not updated_any:
+                             # Judge didn't find anything to update. This is where the loop often hung.
+                             # We'll allow the model to terminate if no further work was suggested.
+                             pass
+
+                    # Final chance to resolve references before returning the final response
+                    resolved_total_emitted = self.resolve_action_references(total_emitted, action_results)
+                    if resolved_total_emitted != total_emitted:
+                        total_emitted = resolved_total_emitted
                         await self.emit_replace(total_emitted)
+                    
                     break
 
                 # Execute sequential/parallel tools from dict
@@ -697,6 +903,13 @@ Available Subagent Models:
                         sub_prompt = args.get("prompt", "")
                         sub_task_id = args.get("task_id", "")
                         
+                        # Auto mark in_progress
+                        if sub_task_id and sub_task_id in planner_state:
+                            planner_state[sub_task_id]["status"] = "in_progress"
+                            await self.emit_html_embed(planner_state)
+                            await asyncio.sleep(0.1)
+                            await self.emit_replace(total_emitted)
+                            
                         await self.emit_status(f"[Subagent: {sub_model}] Executing {sub_task_id}...", False)
                         
                         cached = subagent_tools_cache.get(sub_model, {})
@@ -705,18 +918,32 @@ Available Subagent Models:
                             sub_sys = f"You are a specialized subagent acting as {sub_model}. Follow the prompt directly and accurately using your tools."
                             
                         # Ensure subagents understand they aren't interacting with the UI directly
-                        sub_sys += "\n\nCRITICAL CONTEXT: You are running as a headless subagent entirely in the background. DO NOT return markdown elements that rely on Open WebUI UI embeds for tool generation output. Any tools you use (like generate_image, search, etc.) will return URLs, base64 data, or raw paths. You MUST return these raw HTML references, URLs, or file paths unconditionally in your final reply so the main planner can use them."
+                        sub_sys += "\n\nCRITICAL CONTEXT: You are running as a headless subagent entirely in the background. DO NOT return markdown elements that rely on Open WebUI UI embeds for tool generation output. Any tools you use (like generate_image, search, etc.) will return URLs, base64 data, or raw paths. You MUST return these raw HTML references, URLs, files or images relative or absolute paths unconditionally in your final reply so the main planner can use them."
+                        if "related_tasks" in args and isinstance(args["related_tasks"], list):
+                            for rt in args["related_tasks"]:
+                                if rt in action_results:
+                                    sub_sys += f"\n\n--- RESULTS FROM PREVIOUS TASK {rt} ---\n{action_results[rt]}\n--- END OF {rt} ---\n"
                             
-                        sub_messages = [
-                            {"role": "system", "content": sub_sys},
-                            {"role": "user", "content": sub_prompt}
-                        ]
+                        context_key = (chat_id, sub_task_id)
+                        if context_key in subagent_contexts:
+                            sub_messages = subagent_contexts[context_key]
+                            # Update system message with potentially new sub_sys (including new related_tasks results)
+                            if sub_messages and sub_messages[0]["role"] == "system":
+                                sub_messages[0]["content"] = sub_sys
+                            sub_messages.append({"role": "user", "content": sub_prompt})
+                        else:
+                            sub_messages = [
+                                {"role": "system", "content": sub_sys},
+                                {"role": "user", "content": sub_prompt}
+                            ]
+                            subagent_contexts[context_key] = sub_messages
                         
                         try:
                             sub_tools_dict = cached.get("dict", {})
                             sub_tools = cached.get("specs", None)
                             
                             sub_final_answer_chunks = []
+                            sub_reasoning_chunks = []
                             
                             while True:
                                 sub_tc_dict = {}
@@ -725,6 +952,8 @@ Available Subagent Models:
                                     event_type = sub_event["type"]
                                     if event_type == "content":
                                         sub_final_answer_chunks.append(sub_event["text"])
+                                    elif event_type == "reasoning":
+                                        sub_reasoning_chunks.append(sub_event["text"])
                                     elif event_type == "tool_calls":
                                         for tc in sub_event["data"]:
                                             idx = tc["index"]
@@ -738,18 +967,34 @@ Available Subagent Models:
                                             if "arguments" in tc["function"]:
                                                 sub_tc_dict[idx]["function"]["arguments"] += tc["function"]["arguments"]
                                                     
-                                sub_content = "".join(sub_final_answer_chunks)
+                                raw_sub_content = "".join(sub_final_answer_chunks)
+                                sub_content = clean_thinking_tags(raw_sub_content)
+                                sub_content = THINKING_TAG_CLEANER_PATTERN.sub('', sub_content).strip()
+                                
+                                if not sub_content and not sub_tc_dict:
+                                    if raw_sub_content.strip():
+                                        extracted = THINKING_TAG_CLEANER_PATTERN.sub('', raw_sub_content).strip()
+                                        if extracted:
+                                            sub_content = extracted
+                                    elif "".join(sub_reasoning_chunks).strip():
+                                        sub_content = "".join(sub_reasoning_chunks).strip()
+                                        
+                                if not sub_content:
+                                    sub_content = raw_sub_content
+                                
                                 sub_final_answer_chunks = [] # Reset for next cycle if tool calls happen
+                                sub_reasoning_chunks = []
                                 
                                 # Intercept hallucinated `<tool_call>` XML for subagents
                                 if not sub_tc_dict and "<tool_call>" in sub_content:
-                                    xml_tool_calls = re.findall(r'<tool_call>(.*?)</tool_call>', sub_content, re.DOTALL)
-                                    for idx, tc_data in enumerate(xml_tool_calls):
-                                        func_match = re.search(r'<function=([^>]+)>', tc_data)
+                                    xml_matches = re.finditer(r'<tool_call>\s*(.*?)\s*(?:</tool_call>|$)', sub_content, re.DOTALL)
+                                    for idx, match in enumerate(xml_matches):
+                                        tc_data = match.group(1)
+                                        func_match = re.search(r'<function\s*=\s*"?([^>"]+)"?>', tc_data)
                                         if func_match:
                                             func_name = func_match.group(1).strip()
                                             kwargs = {}
-                                            param_matches = re.findall(r'<parameter=([^>]+)>(.*?)</parameter>', tc_data, re.DOTALL)
+                                            param_matches = re.findall(r'<parameter\s*=\s*"?([^>"]+)"?>(.*?)(?=</parameter>|<parameter\s*=|</function>|$)', tc_data, re.DOTALL)
                                             for p_name, p_val in param_matches:
                                                 kwargs[p_name.strip()] = p_val.strip()
                                                 
@@ -778,6 +1023,7 @@ Available Subagent Models:
                                 if not sub_tc_dict:
                                     # No more tools, we have the final answer!
                                     sub_final_answer_chunks.append(sub_content)
+                                    sub_messages.append({"role": "assistant", "content": sub_content})
                                     break
                                 
                                 # Process subagent tool calls
@@ -822,9 +1068,41 @@ Available Subagent Models:
                             if sub_task_id:
                                 action_results[sub_task_id] = tool_result_str
                                 
+                            await self.emit_status(f"Planner evaluating...", False)
+                                
                         except Exception as e:
                             logger.error(f"Subagent error: {e}")
                             tool_result_str = f"Error calling subagent: {e}"
+
+                    elif function_name == "read_task_result":
+                        rt_id = args.get("task_id", "")
+                        if rt_id in action_results:
+                            tool_result_str = action_results[rt_id]
+                        else:
+                            tool_result_str = f"Task {rt_id} not found."
+                            
+                    elif function_name == "review_tasks":
+                        rt_ids = args.get("task_ids", [])
+                        rt_prompt = args.get("prompt", "")
+                        if not rt_ids or not rt_prompt:
+                            tool_result_str = "Error: must specify task_ids and prompt."
+                        else:
+                            await self.emit_status("Reviewing tasks cross-reference...", False)
+                            review_sys = "You are a specialized review subagent. Read the provided task results carefully and respond strictly to the user's prompt by synthesizing or evaluating the information."
+                            for rx in rt_ids:
+                                if rx in action_results:
+                                    review_sys += f"\n\n--- RESULTS FROM TASK {rx} ---\n{action_results[rx]}\n--- END OF {rx} ---\n"
+                            
+                            review_messages = [{"role": "system", "content": review_sys}, {"role": "user", "content": rt_prompt}]
+                            
+                            try:
+                                review_chunks = []
+                                async for rx_event in self.get_streaming_completion(review_messages, model_id, body=body, tools=None):
+                                    if rx_event["type"] == "content":
+                                        review_chunks.append(rx_event["text"])
+                                tool_result_str = "".join(review_chunks)
+                            except Exception as e:
+                                tool_result_str = f"Review failed: {str(e)}"
 
                     elif function_name in tools_dict:
                         tool_data = tools_dict[function_name]
@@ -840,16 +1118,15 @@ Available Subagent Models:
                     else:
                         tool_result_str = f"Error: Function {function_name} is not recognized or available."
 
-                    # Context Truncation
                     context_result_str = tool_result_str
                     if len(context_result_str) > 2000:
                         ref_id = args.get("task_id", function_name)
-                        context_result_str = context_result_str[:1800] + f"\\n...[TRUNCATED. Full output saved. Use '@{ref_id}' to reference the full output later]..."
+                        context_result_str = context_result_str[:1800] + f"\n\n...[TRUNCATED. Full output saved. Use 'review_tasks' tool passing 'task_ids': ['{ref_id}'] to review it, or use 'related_tasks' parameter in 'call_subagent' to inject its full text context]..."
 
                     # Complete executing tag in the UI stream
                     total_emitted = total_emitted.replace(executing_tag, "")
                     done_tag = self._build_tool_call_details(
-                        call_id, function_name, arguments_str, done=True, result=context_result_str
+                        call_id, function_name, arguments_str, done=True, result=tool_result_str
                     )
                     
                     if not total_emitted.endswith("\n"):
