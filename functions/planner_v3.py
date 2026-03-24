@@ -17,7 +17,7 @@ from uuid import uuid4
 from typing import Callable, Awaitable, Any, Optional
 
 from open_webui.utils.chat import generate_chat_completion
-from open_webui.utils.tools import get_tools, get_builtin_tools
+from open_webui.utils.tools import get_tools, get_builtin_tools, get_terminal_tools
 from open_webui.utils.middleware import process_tool_result
 from open_webui.models.models import Models
 from open_webui.models.users import Users
@@ -75,15 +75,51 @@ class Pipe:
     class Valves(BaseModel):
         PLANNER_MODEL: str = Field(
             default="", 
-            description="The main model driving the planner (leave blank for current default model)"
+            description="Mandatoy. The main model driving the planner, works Best with a Base Model (not workspace presets) | (must support Tool Calling and Structured Outputs and only native tool calling is supported) "
         )
         SUBAGENT_MODELS: str = Field(
             default="", 
-            description="Comma-separated list of model IDs available to be queried as subagents"
+            description="Comma-separated list of model IDs available to be queried as subagents works best with Workspace Model presets | only native tool calling is supported"
         )
         TEMPERATURE: float = Field(
             default=0.7, 
             description="Temperature for the planner agent"
+        )
+        REVIEW_MODEL: str = Field(
+            default="",
+            description="Model used for review_tasks , works Best with a Base Model (not workspace presets) | (leave blank to use the planner model)"
+        )
+        ENABLE_TERMINAL_AGENT: bool = Field(
+            default=True,
+            description="Enable terminal subagent (only active when a terminal is attached to the request)"
+        )
+        TERMINAL_AGENT_MODEL: str = Field(
+            default="",
+            description="Model for the terminal agent, works Best with a Base Model (not workspace presets) | (leave blank to use the planner model)"
+        )
+        ENABLE_IMAGE_GENERATION_AGENT: bool = Field(
+            default=True,
+            description="Enable built-in image generation subagent"
+        )
+        IMAGE_GENERATION_AGENT_MODEL: str = Field(
+            default="",
+            description="Model for the image generation agent , works Best with a Base Model (not workspace presets) |(leave blank to use the planner model)"
+        )
+        ENABLE_WEB_SEARCH_AGENT: bool = Field(
+            default=True,
+            description="Enable built-in web search subagent"
+        )
+        WEB_SEARCH_AGENT_MODEL: str = Field(
+            default="",
+            description="Model for the web search agent , works Best with a Base Model (not workspace presets) | (leave blank to use the planner model)"
+        )
+        ENABLE_KNOWLEDGE_AGENT: bool = Field(
+            default=True,
+            description="Enable built-in knowledge, notes, and chat retrieval subagent"
+        )
+        KNOWLEDGE_AGENT_MODEL: str = Field(
+            default="",
+            description="Model for the knowledge agent , works Best with a Base Model (not workspace presets) | (leave blank to use the planner model)"
         )
         SYSTEM_PROMPT: str = Field(
             default="""You are an advanced agentic Planner. You have the ability to formulate a plan, act on it by delegating tasks to specialized subagents or using tools, and track your progress.
@@ -91,30 +127,59 @@ Your goal is to fulfill the user's request.
 
 You have access to the following built-in special tools:
 1. `update_state(task_id: str, status: str, description: str)`: Use this ONLY to track the tasks you are working on. Call this tool when you finish a logical step to mark it 'completed' (or 'failed'). The 'in_progress' status is handled automatically when you call a subagent. Do not change the original 'description'.
-2. `call_subagent(model_id: str, prompt: str, task_id: str)`: Use this to delegate a subtask to a specialized model. 
+2. `call_subagent(model_id: str, prompt: str, task_id: str, related_tasks: list[str])`: Use this to delegate a subtask to a specialized model. 
    - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent within this execution. To **continue or follow up** on a previous interaction, you MUST use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.
-   - **Task IDs vs Aliases**:
-     - **Task ID**: Use the raw identifier (e.g., "task_1") in parameters like `task_id`, `task_ids`, or `related_tasks`.
-     - **Task Alias**: Use the reference string starting with "@" (e.g., "@task_1") ONLY in **prompts** or **final responses**. It will be automatically substituted with the final text result of that task.
-   - **Cross-Task Context**: If you need a subagent to read the final result of a DIFFERENT task, list its Task ID in the `related_tasks` parameter.
+   - **@task_id Text Replacement**: When you write `@task_id` (e.g., `@task_1`) in a **prompt** or your **final response**, it will be **automatically replaced** with the LAST complete subagent response text for that task_id. This is a literal text substitution — the entire `@task_1` token gets swapped for the full output of that task. Example: If task_1's subagent returned an analysis, writing "Here is the analysis: @task_1" in your final response will embed the full analysis text at that location.
+   - **Raw Task ID (no @)**: Use the plain ID (`task_1`) in tool parameters like `task_id`, `task_ids`, and `related_tasks`. NEVER prefix with @ in these parameter fields.
+   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array. This injects the full result text into the subagent's system context so it can read and use it.
+     - Example: If `task_research` produced research data and you now call a `terminal_agent` via `task_write_report` to save that research to a file, you MUST include `related_tasks: ["task_research"]` — otherwise the terminal agent has NO access to the research content.
+     - Do NOT confuse `related_tasks` with thread persistence: `related_tasks` injects the final result of OTHER completed tasks; using the same `task_id` continues the conversation history of THAT SAME thread.
 
 You must:
 - BE STRICT WITH STATE STRUCTURE. Follow the plan provided exactly.
 - Methodically execute the steps, using `call_subagent` for complex analysis, generation, or reasoning steps.
 - As you finish each small step, call `update_state` to mark that specific task as 'completed'.
-- Once the objective is complete, compile the final result. Use "@task_id" references in your final response to include large previous outputs.
-- do not conflate `related_tasks` with full context threading. `related_tasks` only provides the final result of a different task, while using the same `task_id` provides the full message history (including tool responses) of that specific thread.
+- **ALWAYS pass `related_tasks`** when a subagent needs results from previous tasks. Subagents are isolated and cannot see other tasks' outputs without this.
+- Once the objective is complete, compile the final result. Use `@task_id` references in your final response to include large previous outputs — remember these are **literal text replacements** with the LAST subagent message for that task.
 - Relative API addresses like `/api/v1/...` are fully valid and should be used exactly as is.
-
-Available Subagent Models:
-{subagent_models}
 """,
-            description="System Prompt for the planner agent"
+            description="System Prompt for the planner agent (used when Plan Mode is ON)"
+        )
+        NO_PLAN_SYSTEM_PROMPT: str = Field(
+            default="""You are an advanced agentic assistant with the ability to delegate tasks to specialized subagents and use tools.
+Your goal is to fulfill the user's request by leveraging the available subagents and tools.
+
+You have access to the following built-in special tools:
+1. `call_subagent(model_id: str, prompt: str, task_id: str, related_tasks: list[str])`: Use this to delegate a subtask to a specialized model.
+   - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent. To **continue or follow up** on a previous interaction, use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.
+   - **@task_id Text Replacement**: When you write `@task_id` (e.g., `@task_1`) in a **prompt** or your **final response**, it will be **automatically replaced** with the LAST complete subagent response text for that task_id. This is literal text substitution — `@task_1` gets swapped for the full output. Example: writing "Here is the result: @task_1" embeds the complete task_1 output at that location.
+   - **Raw Task ID (no @)**: Use the plain ID (`task_1`) in tool parameters like `task_id`, `task_ids`, and `related_tasks`. NEVER prefix with @ in parameter fields.
+   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array. This injects the full result text into the subagent's system context.
+     - Example: If `task_research` produced research data and you now call a `terminal_agent` via `task_save` to save it, you MUST include `related_tasks: ["task_research"]` — otherwise the agent has NO access to the content.
+     - Do NOT confuse `related_tasks` with thread persistence: `related_tasks` injects results of OTHER tasks; same `task_id` continues the SAME thread's history.
+2. `read_task_result(task_id: str)`: Read the full text result of a previously completed task.
+3. `review_tasks(task_ids: list, prompt: str)`: Spawn an LLM cross-review over task results using a custom prompt.
+
+You must:
+- Delegate complex work to subagents using `call_subagent`.
+- **ALWAYS pass `related_tasks`** when a subagent needs results from previous tasks. Subagents are isolated and cannot see other tasks' outputs without this.
+- Use `@task_id` references in your final response to include large previous outputs — these are **literal text replacements** with the LAST subagent message for that task.
+- Compose a clear final response for the user once all work is done.
+- Relative API addresses like `/api/v1/...` are fully valid and should be used exactly as is.
+""",
+            description="System Prompt for the agent when Plan Mode is OFF (no state tracking)"
+        )
+
+    class UserValves(BaseModel):
+        PLAN_MODE: bool = Field(
+            default=True,
+            description="Enable Plan Mode with visual task state tracking (HTML plan embed, state updates, completion verification). When disabled, the agent delegates to subagents directly without structured planning overhead."
         )
 
     def __init__(self):
         self.type = "manifold"
         self.valves = self.Valves()
+        self.user_valves = self.UserValves()
 
     def pipes(self) -> list[dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
@@ -423,18 +488,29 @@ Available Subagent Models:
         __user__: dict, 
         __task__=None, 
         __tools__=None, 
+        __metadata__: dict = None,
         __event_emitter__: Callable[[Any], Awaitable[None]] = None,
         __event_call__: Callable[[Any], Awaitable[None]] = None,
         __request__=None
     ) -> str:
         self.__current_event_emitter__ = __event_emitter__
         self.__event_call__ = __event_call__
+        self.__user_valves__ = __user__.pop("valves", None) or self.UserValves()
         self.__user__ = Users.get_user_by_id(__user__.get("id"))
         self.__request__ = __request__
         self.__model__ = body.get("model", "")
+        plan_mode = self.__user_valves__.PLAN_MODE
+        
+        # OWUI pops metadata from the body before passing to pipe functions,
+        # but injects it as __metadata__. Use that as primary source.
+        pipe_metadata = __metadata__ or body.get("metadata", {}) or {}
         
         # Identify chat for context persistence
-        chat_id = body.get("chat_id") or body.get("id") or "default"
+        chat_id = pipe_metadata.get("chat_id") or body.get("chat_id") or body.get("id") or "default"
+        
+        # Extract terminal_id from metadata (middleware moves it there)
+        terminal_id = pipe_metadata.get("terminal_id") or body.get("terminal_id")
+        logger.debug(f"[Planner] terminal_id={terminal_id}, metadata keys={list(pipe_metadata.keys())}")
 
         messages = body.get("messages", [])
         if not messages:
@@ -455,15 +531,98 @@ Available Subagent Models:
             desc = meta.get("description", "No description available")
             subagent_descriptions.append(f"- ID: {m} (Name: {model_name})\n  Description: {desc}")
         
-        system_prompt = self.valves.SYSTEM_PROMPT.replace(
-            "{subagent_models}", 
-            "\n".join(subagent_descriptions) if subagent_descriptions else "None specified in config"
-        )
+        # ── Inject virtual native-feature subagents into the list ──
+        # Map of virtual_id -> config dict including restrictive builtinTools to prevent tool leakage
+        virtual_agents = {}
+        
+        # Base dict that disables ALL builtin tool categories
+        _all_builtins_off = {
+            "time": False, "knowledge": False, "chats": False, "memory": False,
+            "web_search": False, "image_generation": False, "code_interpreter": False,
+            "notes": False, "channels": False,
+        }
+        
+        if self.valves.ENABLE_IMAGE_GENERATION_AGENT:
+            virtual_agents["image_gen_agent"] = {
+                "model": self.valves.IMAGE_GENERATION_AGENT_MODEL or model_id,
+                "description": "Built-in image generation and editing subagent. Can generate and edit images from text prompts.",
+                "system_message": (
+                    "You are a specialized image generation subagent. Your role is to generate or edit images based on the user's prompt. "
+                    "Use the generate_image tool for creating new images and edit_image for modifying existing ones. "
+                    "Always return the image URLs or file paths in your final response so the planner can use them."
+                ),
+                "features": {"image_generation": True},
+                "type": "builtin",
+                "builtin_model_override": {"info": {"meta": {"builtinTools": {**_all_builtins_off, "image_generation": True}}}},
+            }
+            subagents_list.append("image_gen_agent")
+            subagent_descriptions.append(
+                "- ID: image_gen_agent (Name: Image Generation Agent)\n  Description: Built-in image generation and editing subagent. Can generate and edit images from text prompts."
+            )
+            
+        if self.valves.ENABLE_WEB_SEARCH_AGENT:
+            virtual_agents["web_search_agent"] = {
+                "model": self.valves.WEB_SEARCH_AGENT_MODEL or model_id,
+                "description": "Built-in web search subagent. Can search the web and fetch URL content.",
+                "system_message": (
+                    "You are a specialized web search and research subagent. Your role is to search the web for information and fetch content from URLs. "
+                    "Use search_web to find relevant results and fetch_url to retrieve full page content. "
+                    "Synthesize and return the relevant information clearly in your response."
+                ),
+                "features": {"web_search": True},
+                "type": "builtin",
+                "builtin_model_override": {"info": {"meta": {"builtinTools": {**_all_builtins_off, "web_search": True, "time": True}}}},
+            }
+            subagents_list.append("web_search_agent")
+            subagent_descriptions.append(
+                "- ID: web_search_agent (Name: Web Search Agent)\n  Description: Built-in web search subagent. Can search the web and fetch URL content."
+            )
+            
+        if self.valves.ENABLE_KNOWLEDGE_AGENT:
+            virtual_agents["knowledge_agent"] = {
+                "model": self.valves.KNOWLEDGE_AGENT_MODEL or model_id,
+                "description": "Built-in knowledge, notes, and chat history retrieval subagent. Can search and read notes, knowledge bases, and past conversations.",
+                "system_message": (
+                    "You are a specialized knowledge retrieval subagent. Your role is to search through notes, knowledge bases, and chat history to find relevant information. "
+                    "Use the available search and retrieval tools to find the information requested. "
+                    "Return the relevant findings clearly and completely in your response."
+                ),
+                "features": {},
+                "type": "builtin",
+                "builtin_model_override": {"info": {"meta": {"builtinTools": {**_all_builtins_off, "knowledge": True, "chats": True, "notes": True, "channels": True}}}},
+            }
+            subagents_list.append("knowledge_agent")
+            subagent_descriptions.append(
+                "- ID: knowledge_agent (Name: Knowledge Agent)\n  Description: Built-in knowledge, notes, and chat history retrieval subagent. Can search and read notes, knowledge bases, and past conversations."
+            )
+            
+        if self.valves.ENABLE_TERMINAL_AGENT and terminal_id:
+            virtual_agents["terminal_agent"] = {
+                "model": self.valves.TERMINAL_AGENT_MODEL or model_id,
+                "description": "Built-in terminal subagent. Can execute commands, read/write files, and interact with the system terminal.",
+                "system_message": (
+                    "You are a specialized terminal subagent. Your role is to execute terminal commands, read and write files, and perform system operations. "
+                    "Use the available terminal tools (run_command, write_file, etc.) to fulfill the request. "
+                    "Always return the command outputs and results clearly in your response."
+                ),
+                "features": {},
+                "type": "terminal",
+                "terminal_id": terminal_id,
+                "builtin_model_override": {"info": {"meta": {"builtinTools": {**_all_builtins_off}}}},
+            }
+            subagents_list.append("terminal_agent")
+            subagent_descriptions.append(
+                "- ID: terminal_agent (Name: Terminal Agent)\n  Description: Built-in terminal subagent. Can execute commands, read/write files, and interact with the system terminal."
+            )
+        
+        base_prompt = self.valves.SYSTEM_PROMPT if plan_mode else self.valves.NO_PLAN_SYSTEM_PROMPT
+        subagent_models_text = "\n".join(subagent_descriptions) if subagent_descriptions else "None specified in config"
+        system_prompt = base_prompt + f"\nAvailable Subagent Models:\n{subagent_models_text}\n"
 
         sys_message = {"role": "system", "content": system_prompt}
         planner_messages = [sys_message] + messages
 
-        metadata = body.get("metadata", {})
+        metadata = pipe_metadata
         tool_ids = metadata.get("tool_ids", [])
         if not tool_ids:
             tool_ids = body.get("tool_ids", [])
@@ -475,14 +634,70 @@ Available Subagent Models:
             "__event_emitter__": __event_emitter__,
             "__event_call__": __event_call__,
         }
+        
+        # ── Planner tools: chat payload + planner model OWUI settings (with dedup) ──
+        planner_settings_tool_ids = []
+        planner_db_info = Models.get_model_by_id(model_id)
+        if planner_db_info:
+            p_meta = planner_db_info.meta.model_dump() if hasattr(planner_db_info.meta, "model_dump") else planner_db_info.meta
+            p_params = planner_db_info.params.model_dump() if hasattr(planner_db_info.params, "model_dump") else planner_db_info.params
+            if isinstance(p_meta, dict):
+                planner_settings_tool_ids.extend(p_meta.get("toolIds", []))
+            if isinstance(p_params, dict):
+                planner_settings_tool_ids.extend(p_params.get("toolIds", []) or p_params.get("tools", []))
+        planner_model_info = app_models.get(model_id, {})
+        if planner_model_info:
+            pi_meta = planner_model_info.get("info", {}).get("meta", {})
+            pi_params = planner_model_info.get("info", {}).get("params", {})
+            planner_settings_tool_ids.extend(pi_meta.get("toolIds", []))
+            planner_settings_tool_ids.extend(pi_params.get("toolIds", []) or pi_params.get("tools", []))
+        
+        # Merge chat payload tools with planner settings tools (dedup)
+        all_planner_tool_ids = list(set([*(tool_ids or []), *planner_settings_tool_ids]))
             
         tools_dict = {}
-        if tool_ids:
-            tools_dict = await get_tools(self.__request__, tool_ids, self.__user__, extra_params)
+        if all_planner_tool_ids:
+            tools_dict = await get_tools(self.__request__, all_planner_tool_ids, self.__user__, extra_params)
 
-        # Preload and cache subagent tools to avoid redundant DB calls on every tool execution
+        # ── Preload and cache subagent tools ──
         subagent_tools_cache = {}
         for sub_model in subagents_list:
+            # Check if this is a virtual native-feature agent
+            if sub_model in virtual_agents:
+                va = virtual_agents[sub_model]
+                va_model = va["model"]
+                va_model_info = app_models.get(va_model, {})
+                s_tools_dict = {}
+                
+                if va["type"] == "terminal":
+                    # Terminal agent: load terminal tools
+                    try:
+                        s_tools_dict = await get_terminal_tools(
+                            self.__request__, va["terminal_id"], self.__user__, extra_params
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to load terminal tools: {e}")
+                elif va["type"] == "builtin":
+                    # Native feature agent: load builtin tools with restrictive model override
+                    # to prevent tool leakage (e.g., web_search_agent getting chat/knowledge tools)
+                    builtin_model = va.get("builtin_model_override", va_model_info)
+                    try:
+                        s_tools_dict = get_builtin_tools(
+                            self.__request__, extra_params, features=va["features"], model=builtin_model
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to load builtin tools for {sub_model}: {e}")
+                
+                s_tools = [{"type": "function", "function": t["spec"]} for t in s_tools_dict.values()] if s_tools_dict else None
+                subagent_tools_cache[sub_model] = {
+                    "dict": s_tools_dict,
+                    "specs": s_tools,
+                    "system_message": va["system_message"],
+                    "actual_model": va_model,
+                }
+                continue
+            
+            # Regular subagent: use ONLY preconfigured tools
             subagent_tool_ids = []
             model_info = app_models.get(sub_model, {})
             model_db_info = Models.get_model_by_id(sub_model)
@@ -505,7 +720,7 @@ Available Subagent Models:
                 if not model_system_message:
                     model_system_message = info_params.get("system", "") or ""
                 
-            p_features = dict(body.get("features", {}))
+            p_features = {}
             if model_db_info:
                 meta = model_db_info.meta.model_dump() if hasattr(model_db_info.meta, "model_dump") else model_db_info.meta
                 params = model_db_info.params.model_dump() if hasattr(model_db_info.params, "model_dump") else model_db_info.params
@@ -517,7 +732,8 @@ Available Subagent Models:
                         for f_id in obj.get("defaultFeatureIds", []):
                             p_features[f_id] = True
                             
-            combined_tool_ids = list(set([*tool_ids, *subagent_tool_ids]))
+            # Subagents use ONLY their own preconfigured tools - NOT chat payload tools
+            combined_tool_ids = list(set(subagent_tool_ids))
             s_tools_dict = {}
             if combined_tool_ids:
                 s_tools_dict = await get_tools(self.__request__, combined_tool_ids, self.__user__, extra_params)
@@ -527,7 +743,7 @@ Available Subagent Models:
                 if builtin_tools:
                     s_tools_dict.update(builtin_tools)
             except Exception as e:
-                logging.error(f"Failed to load built-in tools for subagent {sub_model}: {e}")
+                logger.error(f"Failed to load built-in tools for subagent {sub_model}: {e}")
                 
             s_tools = [{"type": "function", "function": t["spec"]} for t in s_tools_dict.values()] if s_tools_dict else None
             subagent_tools_cache[sub_model] = {
@@ -541,92 +757,96 @@ Available Subagent Models:
         subagent_contexts = {} # Local storage for subagent follow-ups within this session
         total_emitted = ""
 
-        # Emit initial html embed state
-        await self.emit_html_embed(planner_state)
-        
-        # --- Phase 1: Plan Creation ---
-        plan_system_prompt = (
-            f"{system_prompt}\n\n"
-            "You are currently in the PLANNING PHASE. Your ONLY job is to create a detailed, step-by-step plan to fulfill the user's request. "
-            "You MUST keep in mind the capabilities of the subagents and tools available to you when forming the plan. "
-            "Output your plan strictly as a JSON array of objects, where each object has a 'task_id' (string, e.g., 'task_1') and a 'description' (string, short summary of the step). "
-            "Do not output any options, greetings, or other text. Only the JSON array."
-        )
-        plan_messages = [{"role": "system", "content": plan_system_prompt}] + messages
-        
-        # Add structured output if possible
-        plan_body = {**body}
-        plan_body["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "plan",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "tasks": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "task_id": {"type": "string"},
-                                    "description": {"type": "string"}
-                                },
-                                "required": ["task_id", "description"],
-                                "additionalProperties": False
+        if plan_mode:
+            # Emit initial html embed state
+            await self.emit_html_embed(planner_state)
+            
+            # --- Phase 1: Plan Creation ---
+            plan_system_prompt = (
+                f"{system_prompt}\n\n"
+                "You are currently in the PLANNING PHASE. Your ONLY job is to create a detailed, step-by-step plan to fulfill the user's request. "
+                "You MUST keep in mind the capabilities of the subagents and tools available to you when forming the plan. "
+                "Output your plan strictly as a JSON array of objects, where each object has a 'task_id' (string, e.g., 'task_1') and a 'description' (string, short summary of the step). "
+                "Do not output any options, greetings, or other text. Only the JSON array."
+            )
+            plan_messages = [{"role": "system", "content": plan_system_prompt}] + messages
+            
+            # Add structured output if possible
+            plan_body = {**body}
+            plan_body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "plan",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "tasks": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "task_id": {"type": "string"},
+                                        "description": {"type": "string"}
+                                    },
+                                    "required": ["task_id", "description"],
+                                    "additionalProperties": False
+                                }
                             }
-                        }
-                    },
-                    "required": ["tasks"],
-                    "additionalProperties": False
+                        },
+                        "required": ["tasks"],
+                        "additionalProperties": False
+                    }
                 }
             }
-        }
 
-        await self.emit_status("Planning...", False)
-        
-        plan_content_chunks = []
-        try:
-            async for event in self.get_streaming_completion(plan_messages, model_id, body=plan_body, tools=None):
-                if event["type"] == "content":
-                    plan_content_chunks.append(event["text"])
-        except Exception as e:
-            logger.error(f"Error during plan formation: {e}")
+            await self.emit_status("Planning...", False)
             
-        full_plan_text = "".join(plan_content_chunks)
-        
-        # Try to parse the json plan using robust extraction
-        try:
-            plan_json = self._extract_json_array(full_plan_text)
-            if plan_json:
-                for task in plan_json:
-                    tid = task.get("task_id")
-                    desc = task.get("description")
-                    if tid and desc:
-                        planner_state[tid] = {"status": "pending", "description": desc}
-            
-            if not planner_state:
-                raise ValueError("No tasks parsed from plan.")
+            plan_content_chunks = []
+            try:
+                async for event in self.get_streaming_completion(plan_messages, model_id, body=plan_body, tools=None):
+                    if event["type"] == "content":
+                        plan_content_chunks.append(event["text"])
+            except Exception as e:
+                logger.error(f"Error during plan formation: {e}")
                 
-            # Emit the newly populated state
-            await self.emit_html_embed(planner_state)
-        except Exception as e:
-            logger.warning(f"Could not parse planner JSON effectively: {e}. Raw: {full_plan_text}")
-            # Fallback if failed: add a single task
-            planner_state["task_1"] = {"status": "pending", "description": "Process user request"}
-            await self.emit_html_embed(planner_state)
+            full_plan_text = "".join(plan_content_chunks)
+            
+            # Try to parse the json plan using robust extraction
+            try:
+                plan_json = self._extract_json_array(full_plan_text)
+                if plan_json:
+                    for task in plan_json:
+                        tid = task.get("task_id")
+                        desc = task.get("description")
+                        if tid and desc:
+                            planner_state[tid] = {"status": "pending", "description": desc}
+                
+                if not planner_state:
+                    raise ValueError("No tasks parsed from plan.")
+                    
+                # Emit the newly populated state
+                await self.emit_html_embed(planner_state)
+            except Exception as e:
+                logger.warning(f"Could not parse planner JSON effectively: {e}. Raw: {full_plan_text}")
+                # Fallback if failed: add a single task
+                planner_state["task_1"] = {"status": "pending", "description": "Process user request"}
+                await self.emit_html_embed(planner_state)
 
-        # Inform the main agent of the approved plan
-        planner_messages.append({"role": "system", "content": f"Here is the established plan. Do not deviate from it. Execute the steps logically:\n{json.dumps(planner_state)}"})
-        # ------------------------------
+            # Inform the main agent of the approved plan
+            planner_messages.append({"role": "system", "content": f"Here is the established plan. Do not deviate from it. Execute the steps logically:\n{json.dumps(planner_state)}"})
+            # ------------------------------
 
         final_pass_done = False
         
         # Build dynamic tool schemas ONCE after planning to avoid cache busting
         available_tasks = list(planner_state.keys()) if planner_state else ["task_1"]
         
-        tools_spec = [
-            {
+        tools_spec = []
+        
+        # update_state only available in plan mode
+        if plan_mode:
+            tools_spec.append({
                 "type": "function",
                 "function": {
                     "name": "update_state",
@@ -641,61 +861,76 @@ Available Subagent Models:
                         "required": ["task_id", "status", "description"]
                     }
                 }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "call_subagent",
-                    "description": "Call a specialized subagent model to perform a task. Returns the output from the model. Using the same task_id continues the same conversation thread (thread persistence).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "model_id": {"type": "string", "description": "The ID of the model to use", "enum": subagents_list if subagents_list else ["__none__"]},
-                            "prompt": {"type": "string", "description": "Detailed instructions for the subagent. Use '@task_id' (e.g. '@task_1') as text replacement to include results from previous tasks in the prompt text."},
-                            "task_id": {"type": "string", "description": "ID identifying the conversation thread. Use the raw ID (e.g. 'task_1'). Using the same task_id follows up or continues a previous conversation."},
-                            "related_tasks": {
-                                "type": "array",
-                                "items": {"type": "string", "enum": available_tasks},
-                                "description": "Optional list of previously completed Task IDs (e.g. 'task_1') whose results you need contextually available to the subagent."
-                            }
-                        },
-                        "required": ["model_id", "prompt", "task_id"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_task_result",
-                    "description": "Read the pure text result of a completed task verbatim.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "task_id": {"type": "string", "description": "The Task ID (e.g. 'task_1')", "enum": available_tasks}
-                        },
-                        "required": ["task_id"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "review_tasks",
-                    "description": "Spawn an invisible LLM cross-review over massive task results using a custom prompt, saving your own context.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "task_ids": {
-                                "type": "array",
-                                "items": {"type": "string", "enum": available_tasks}
-                            },
-                            "prompt": {"type": "string", "description": "Instructions on what to review or extract from these given task IDs"}
-                        },
-                        "required": ["task_ids", "prompt"]
-                    }
+            })
+        
+        # call_subagent: in plan mode, task_id/related_tasks are constrained to available_tasks enum; in no-plan mode, free-form
+        call_subagent_task_id_schema = {"type": "string", "description": "ID identifying the conversation thread. Use the raw ID (e.g. 'task_1'). Using the same task_id follows up or continues a previous conversation."}
+        related_tasks_items_schema = {"type": "string"}
+        if plan_mode:
+            call_subagent_task_id_schema["enum"] = available_tasks
+            related_tasks_items_schema["enum"] = available_tasks
+        
+        tools_spec.append({
+            "type": "function",
+            "function": {
+                "name": "call_subagent",
+                "description": "Call a specialized subagent model to perform a task. Returns the output from the model. Using the same task_id continues the same conversation thread (thread persistence).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "model_id": {"type": "string", "description": "The ID of the model to use", "enum": subagents_list if subagents_list else ["__none__"]},
+                        "prompt": {"type": "string", "description": "Detailed instructions for the subagent. Use '@task_id' (e.g. '@task_1') as a TEXT REPLACEMENT MACRO — it will be automatically replaced with the LAST complete subagent response text for that task_id."},
+                        "task_id": call_subagent_task_id_schema,
+                        "related_tasks": {
+                            "type": "array",
+                            "items": related_tasks_items_schema,
+                            "description": "Optional list of previously completed Task IDs (e.g. 'task_1') whose results you need contextually available to the subagent."
+                        }
+                    },
+                    "required": ["model_id", "prompt", "task_id"]
                 }
             }
-        ]
+        })
+        
+        # read_task_result and review_tasks: constrained enum in plan mode, free-form in no-plan mode
+        read_task_id_schema = {"type": "string", "description": "The Task ID (e.g. 'task_1')"}
+        review_items_schema = {"type": "string"}
+        if plan_mode:
+            read_task_id_schema["enum"] = available_tasks
+            review_items_schema["enum"] = available_tasks
+        
+        tools_spec.append({
+            "type": "function",
+            "function": {
+                "name": "read_task_result",
+                "description": "Read the pure text result of a completed task verbatim.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": read_task_id_schema
+                    },
+                    "required": ["task_id"]
+                }
+            }
+        })
+        tools_spec.append({
+            "type": "function",
+            "function": {
+                "name": "review_tasks",
+                "description": "Spawn an invisible LLM cross-review over massive task results using a custom prompt, saving your own context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_ids": {
+                            "type": "array",
+                            "items": review_items_schema
+                        },
+                        "prompt": {"type": "string", "description": "Instructions on what to review or extract from these given task IDs"}
+                    },
+                    "required": ["task_ids", "prompt"]
+                }
+            }
+        })
         for tool_name, tool_data in tools_dict.items():
             if "spec" in tool_data:
                 tools_spec.append({"type": "function", "function": tool_data["spec"]})
@@ -876,73 +1111,68 @@ Available Subagent Models:
                     await self.emit_replace(total_emitted)
 
                 if not tool_calls_dict:
-                    # Final verification pass
-                    unresolved_tasks = [tid for tid, info in planner_state.items() if info["status"] not in ["completed"]]
-                    if unresolved_tasks and not final_pass_done:
-                        final_pass_done = True
-                        await self.emit_status("Verifying task states implicitly...", False)
-                        
-                        judge_messages = planner_messages.copy()
-                        judge_messages.append({
-                            "role": "user",
-                            "content": f"SYSTEM: Review the final response. Tasks {', '.join(unresolved_tasks)} are not marked as completed. If they were actually completed in the narrative, use the `update_state` tool to mark them as completed. Do not output text, ONLY tool calls. If more work is needed, do nothing and the planner will continue."
-                        })
-                        
-                        silent_tool_calls = {}
-                        try:
-                            async for sub_event in self.get_streaming_completion(judge_messages, model_id, body=body, tools=tools_spec):
-                                if sub_event["type"] == "tool_calls":
-                                    for tc in sub_event["data"]:
-                                        idx = tc["index"]
-                                        if idx not in silent_tool_calls:
-                                            silent_tool_calls[idx] = {
-                                                "id": tc.get("id"),
-                                                "function": {"name": tc["function"].get("name", ""), "arguments": ""}
-                                            }
-                                        if "name" in tc["function"] and tc["function"]["name"]:
-                                            silent_tool_calls[idx]["function"]["name"] = tc["function"]["name"]
-                                        if "arguments" in tc["function"]:
-                                            silent_tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
-                        except Exception as e:
-                            logger.error(f"Error in silent judge: {e}")
+                    # Final verification pass (plan mode only)
+                    if plan_mode:
+                        unresolved_tasks = [tid for tid, info in planner_state.items() if info["status"] not in ["completed"]]
+                        if unresolved_tasks and not final_pass_done:
+                            final_pass_done = True
+                            await self.emit_status("Verifying task states implicitly...", False)
                             
-                        updated_any = False
-                        if silent_tool_calls:
-                            for tc in silent_tool_calls.values():
-                                if tc["function"]["name"] == "update_state":
-                                    try:
-                                        args = json.loads(tc["function"]["arguments"])
-                                        task_id = args.get("task_id", "")
-                                        status = args.get("status", "pending")
-                                        if task_id in planner_state:
-                                            planner_state[task_id]["status"] = status
-                                            if "description" in args and args["description"]:
-                                                planner_state[task_id]["description"] = args["description"]
-                                            updated_any = True
-                                    except:
-                                        pass
-                                        
-                        if updated_any:
-                            await self.emit_html_embed(planner_state)
-                            await asyncio.sleep(0.1)
-                            await self.emit_replace(total_emitted)
+                            judge_messages = planner_messages.copy()
+                            judge_messages.append({
+                                "role": "user",
+                                "content": f"SYSTEM: Review the final response. Tasks {', '.join(unresolved_tasks)} are not marked as completed. If they were actually completed in the narrative, use the `update_state` tool to mark them as completed. Do not output text, ONLY tool calls. If more work is needed, do nothing and the planner will continue."
+                            })
                             
-                        # If tasks are STILL pending, in progress, or failed, we resume the actual planner
-                        still_incomplete = [tid for tid, info in planner_state.items() if info["status"] not in ["completed"]]
-                        if still_incomplete and updated_any:
-                            # Let it loop one more time if something changed.
-                            continue
-                        elif still_incomplete and not updated_any:
-                             # Judge didn't find anything to update. This is where the loop often hung.
-                             # We'll allow the model to terminate if no further work was suggested.
-                             pass
+                            silent_tool_calls = {}
+                            try:
+                                async for sub_event in self.get_streaming_completion(judge_messages, model_id, body=body, tools=tools_spec):
+                                    if sub_event["type"] == "tool_calls":
+                                        for tc in sub_event["data"]:
+                                            idx = tc["index"]
+                                            if idx not in silent_tool_calls:
+                                                silent_tool_calls[idx] = {
+                                                    "id": tc.get("id"),
+                                                    "function": {"name": tc["function"].get("name", ""), "arguments": ""}
+                                                }
+                                            if "name" in tc["function"] and tc["function"]["name"]:
+                                                silent_tool_calls[idx]["function"]["name"] = tc["function"]["name"]
+                                            if "arguments" in tc["function"]:
+                                                silent_tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
+                            except Exception as e:
+                                logger.error(f"Error in silent judge: {e}")
+                                
+                            updated_any = False
+                            if silent_tool_calls:
+                                for tc in silent_tool_calls.values():
+                                    if tc["function"]["name"] == "update_state":
+                                        try:
+                                            args = json.loads(tc["function"]["arguments"])
+                                            task_id = args.get("task_id", "")
+                                            status = args.get("status", "pending")
+                                            if task_id in planner_state:
+                                                planner_state[task_id]["status"] = status
+                                                if "description" in args and args["description"]:
+                                                    planner_state[task_id]["description"] = args["description"]
+                                                updated_any = True
+                                        except:
+                                            pass
+                                            
+                            if updated_any:
+                                await self.emit_html_embed(planner_state)
+                                await asyncio.sleep(0.1)
+                                await self.emit_replace(total_emitted)
+                                
+                            # If tasks are STILL pending, in progress, or failed, we resume the actual planner
+                            still_incomplete = [tid for tid, info in planner_state.items() if info["status"] not in ["completed"]]
+                            if still_incomplete and updated_any:
+                                # Let it loop one more time if something changed.
+                                continue
+                            elif still_incomplete and not updated_any:
+                                 # Judge didn't find anything to update. This is where the loop often hung.
+                                 # We'll allow the model to terminate if no further work was suggested.
+                                 pass
 
-                    # Final chance to resolve references before returning the final response
-                    resolved_total_emitted = self.resolve_action_references(total_emitted, action_results)
-                    if resolved_total_emitted != total_emitted:
-                        total_emitted = resolved_total_emitted
-                        await self.emit_replace(total_emitted)
-                    
                     break
 
                 # Execute sequential/parallel tools from dict
@@ -971,7 +1201,7 @@ Available Subagent Models:
 
                     tool_result_str = ""
                     
-                    if function_name == "update_state":
+                    if function_name == "update_state" and plan_mode:
                         task_id = args.get("task_id", "")
                         status = args.get("status", "pending")
                         desc = args.get("description", "")
@@ -991,8 +1221,8 @@ Available Subagent Models:
                         sub_prompt = args.get("prompt", "")
                         sub_task_id = args.get("task_id", "")
                         
-                        # Auto mark in_progress
-                        if sub_task_id and sub_task_id in planner_state:
+                        # Auto mark in_progress (plan mode only)
+                        if plan_mode and sub_task_id and sub_task_id in planner_state:
                             planner_state[sub_task_id]["status"] = "in_progress"
                             await self.emit_html_embed(planner_state)
                             await asyncio.sleep(0.1)
@@ -1034,11 +1264,14 @@ Available Subagent Models:
                             
                             sub_final_answer_chunks = []
                             sub_reasoning_chunks = []
+                            sub_called_tools = []
                             
                             while True:
                                 sub_tc_dict = {}
                                 
-                                async for sub_event in self.get_streaming_completion(sub_messages, sub_model, body=body, tools=sub_tools):
+                                # Resolve actual model for virtual agents (virtual IDs -> real model IDs)
+                                actual_sub_model = cached.get("actual_model", sub_model)
+                                async for sub_event in self.get_streaming_completion(sub_messages, actual_sub_model, body=body, tools=sub_tools):
                                     event_type = sub_event["type"]
                                     if event_type == "content":
                                         sub_final_answer_chunks.append(sub_event["text"])
@@ -1139,6 +1372,10 @@ Available Subagent Models:
                                         tc_return = process_tool_result(self.__request__, stc_name, tc_res, target_tool.get("type", ""), False, body.get("metadata",{}), self.__user__)
                                         res_str = tc_return[0] if len(tc_return) > 0 else str(tc_res)
                                         
+                                        # Track tool call: name, truncated params, success
+                                        truncated_args = {k: (str(v)[:80] + "..." if len(str(v)) > 80 else str(v)) for k, v in stc_args_obj.items()}
+                                        sub_called_tools.append({"tool": stc_name, "arguments": truncated_args, "success": True})
+                                        
                                         sub_messages.append({
                                             "role": "tool",
                                             "tool_call_id": call_id,
@@ -1147,6 +1384,7 @@ Available Subagent Models:
                                         })
                                     else:
                                         err_res = f"Error: Tool {stc_name} not found"
+                                        sub_called_tools.append({"tool": stc_name, "arguments": {}, "success": False})
                                         sub_messages.append({
                                             "role": "tool",
                                             "tool_call_id": call_id,
@@ -1154,9 +1392,20 @@ Available Subagent Models:
                                             "content": err_res
                                         })
 
-                            tool_result_str = "".join(sub_final_answer_chunks)
+                            raw_result = "".join(sub_final_answer_chunks)
+                            
+                            # Store ONLY the raw result for @task_id replacement and related_tasks injection
                             if sub_task_id:
-                                action_results[sub_task_id] = tool_result_str
+                                action_results[sub_task_id] = raw_result
+                            
+                            # Build structured response for planner context and display
+                            structured_response = {
+                                "task_id": sub_task_id,
+                                "called_tools": sub_called_tools,
+                                "result": raw_result,
+                                "note": f"Use @{sub_task_id} in prompts or final response to include this result."
+                            }
+                            tool_result_str = json.dumps(structured_response, ensure_ascii=False)
                                 
                             await self.emit_status(f"Planner evaluating...", False)
                                 
@@ -1186,8 +1435,9 @@ Available Subagent Models:
                             review_messages = [{"role": "system", "content": review_sys}, {"role": "user", "content": rt_prompt}]
                             
                             try:
+                                review_model = self.valves.REVIEW_MODEL or model_id
                                 review_chunks = []
-                                async for rx_event in self.get_streaming_completion(review_messages, model_id, body=body, tools=None):
+                                async for rx_event in self.get_streaming_completion(review_messages, review_model, body=body, tools=None):
                                     if rx_event["type"] == "content":
                                         review_chunks.append(rx_event["text"])
                                 tool_result_str = "".join(review_chunks)
