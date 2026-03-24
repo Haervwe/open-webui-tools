@@ -3,7 +3,7 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.1.0
+version: 3.2.0
 required_open_webui_version: 0.8.10
 """
 
@@ -66,6 +66,162 @@ def clean_thinking_tags(message: str) -> str:
     )
     return re.sub(pattern, "", message).strip()
 
+
+# ---------------------------------------------------------------------------
+# JS modal builders (theme-aware via Open WebUI CSS custom properties)
+# ---------------------------------------------------------------------------
+
+def _base_theme_js() -> str:
+    """Returns a JS snippet that reads the current OWUI theme and builds a `col` object."""
+    return """
+  const isDark = document.documentElement.classList.contains('dark');
+  const col = isDark
+    ? { bg: 'var(--color-gray-950)', panel: 'var(--color-gray-900)',
+        border: 'var(--color-gray-700)', text: 'var(--color-white)',
+        sub: 'var(--color-gray-400)', input: 'var(--color-gray-800)',
+        inputBorder: 'var(--color-gray-600)',
+        btn: 'var(--color-gray-800)', btnBorder: 'var(--color-gray-600)', btnText: 'var(--color-gray-200)',
+        btnPrimary: 'var(--color-gray-100)', btnPrimaryText: 'var(--color-gray-900)',
+        overlay: 'rgba(0,0,0,0.7)' }
+    : { bg: 'var(--color-gray-100)', panel: 'var(--color-gray-50)',
+        border: 'var(--color-gray-200)', text: 'var(--color-gray-900)',
+        sub: 'var(--color-gray-500)', input: 'var(--color-white)',
+        inputBorder: 'var(--color-gray-300)',
+        btn: 'var(--color-gray-200)', btnBorder: 'var(--color-gray-300)', btnText: 'var(--color-gray-700)',
+        btnPrimary: 'var(--color-gray-900)', btnPrimaryText: 'var(--color-white)',
+        overlay: 'rgba(0,0,0,0.4)' };"""
+
+
+def _build_ask_user_js(prompt_text: str, placeholder: str = "Type your response...", timeout_s: int = 120) -> str:
+    import json as _json
+    p = _json.dumps(prompt_text)
+    ph = _json.dumps(placeholder)
+    return f"""
+return (function() {{
+  return new Promise((resolve) => {{
+{_base_theme_js()}
+    let _timer;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `position:fixed;inset:0;z-index:999999;background:${{col.overlay}};display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(4px);`;
+    const panel = document.createElement('div');
+    panel.style.cssText = `background:${{col.panel}};border:1px solid ${{col.border}};border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);color:${{col.text}};font-family:ui-sans-serif,system-ui,sans-serif;width:100%;max-width:520px;padding:28px;display:flex;flex-direction:column;gap:20px;`;
+    const titleEl = document.createElement('div');
+    titleEl.textContent = {p};
+    titleEl.style.cssText = `font-size:18px;font-weight:700;color:${{col.text}};line-height:1.3;`;
+    panel.appendChild(titleEl);
+    const input = document.createElement('textarea');
+    input.placeholder = {ph};
+    input.style.cssText = `background:${{col.input}};border:1px solid ${{col.inputBorder}};border-radius:12px;padding:14px;color:${{col.text}};font-size:14px;min-height:90px;resize:none;outline:none;font-family:inherit;width:100%;box-sizing:border-box;`;
+    input.onfocus = () => input.style.borderColor = col.btnPrimary;
+    input.onblur = () => input.style.borderColor = col.inputBorder;
+    panel.appendChild(input);
+    const footer = document.createElement('div');
+    footer.style.cssText = 'display:flex;gap:10px;justify-content:stretch;';
+    const makeBtn = (label, primary) => {{
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = `flex:1;padding:11px 18px;border-radius:9999px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid ${{primary ? 'transparent' : col.btnBorder}};background:${{primary ? col.btnPrimary : col.btn}};color:${{primary ? col.btnPrimaryText : col.btnText}};transition:opacity 0.15s;`;
+      b.onmouseenter = () => b.style.opacity = '0.85';
+      b.onmouseleave = () => b.style.opacity = '1';
+      return b;
+    }};
+    const acceptBtn = makeBtn('Accept', true);
+    const skipBtn = makeBtn('Skip', false);
+    const skipAllBtn = makeBtn('Skip All', false);
+    acceptBtn.onclick = () => {{ clearTimeout(_timer); cleanup(); resolve(JSON.stringify({{action:'accept', value: input.value.trim()}})); }};
+    skipBtn.onclick = () => {{ clearTimeout(_timer); cleanup(); resolve(JSON.stringify({{action:'skip', value: ''}})); }};
+    skipAllBtn.onclick = () => {{ clearTimeout(_timer); cleanup(); resolve(JSON.stringify({{action:'skip_all', value: ''}})); }};
+    footer.appendChild(acceptBtn); footer.appendChild(skipBtn); footer.appendChild(skipAllBtn);
+    panel.appendChild(footer);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    input.focus();
+    input.onkeydown = (e) => {{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter') acceptBtn.click(); if(e.key==='Escape') skipBtn.click(); }};
+    overlay.onclick = (e) => {{ if(e.target===overlay) {{ clearTimeout(_timer); cleanup(); resolve(JSON.stringify({{action:'skip', value: ''}})); }} }};
+    function cleanup() {{ if(overlay.parentNode) overlay.parentNode.removeChild(overlay); }}
+    _timer = setTimeout(() => {{ cleanup(); resolve(JSON.stringify({{action:'skip', value: ''}})); }}, {timeout_s * 1000});
+  }});
+}})()"""
+
+
+def _build_give_options_js(prompt_text: str, choices: list, context: str = "", timeout_s: int = 120) -> str:
+    import json as _json
+    p = _json.dumps(prompt_text)
+    cx = _json.dumps(context)
+    ch = _json.dumps(choices)
+    return f"""
+return (function() {{
+  return new Promise((resolve) => {{
+{_base_theme_js()}
+    let _timer;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `position:fixed;inset:0;z-index:999999;background:${{col.overlay}};display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(4px);`;
+    const panel = document.createElement('div');
+    panel.style.cssText = `background:${{col.panel}};border:1px solid ${{col.border}};border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);color:${{col.text}};font-family:ui-sans-serif,system-ui,sans-serif;width:100%;max-width:480px;padding:28px;display:flex;flex-direction:column;gap:18px;`;
+    const titleEl = document.createElement('div');
+    titleEl.textContent = {p};
+    titleEl.style.cssText = `font-size:18px;font-weight:700;color:${{col.text}};`;
+    panel.appendChild(titleEl);
+    const ctx = {cx};
+    if (ctx) {{ const ctxEl = document.createElement('div'); ctxEl.textContent = ctx; ctxEl.style.cssText = `font-size:13px;color:${{col.sub}};line-height:1.4;`; panel.appendChild(ctxEl); }}
+    const grid = document.createElement('div'); grid.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+    const CHOICES = {ch};
+    CHOICES.forEach(c => {{
+      const b = document.createElement('button');
+      b.textContent = c;
+      b.style.cssText = `padding:12px 18px;border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid ${{col.border}};background:${{col.btn}};color:${{col.text}};text-align:left;transition:opacity 0.15s;`;
+      b.onmouseenter = () => b.style.opacity = '0.8';
+      b.onmouseleave = () => b.style.opacity = '1';
+      b.onclick = () => {{ clearTimeout(_timer); cleanup(); resolve(JSON.stringify({{action:'accept', value: c}})); }};
+      grid.appendChild(b);
+    }});
+    panel.appendChild(grid);
+    const footer = document.createElement('div'); footer.style.cssText = 'display:flex;gap:10px;';
+    const makeBtn = (label) => {{ const b = document.createElement('button'); b.textContent = label; b.style.cssText = `flex:1;padding:10px 16px;border-radius:9999px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid ${{col.btnBorder}};background:${{col.btn}};color:${{col.btnText}};transition:opacity 0.15s;`; b.onmouseenter = () => b.style.opacity='0.8'; b.onmouseleave = () => b.style.opacity='1'; return b; }};
+    const skipBtn = makeBtn('Skip'); const skipAllBtn = makeBtn('Skip All');
+    skipBtn.onclick = () => {{ clearTimeout(_timer); cleanup(); resolve(JSON.stringify({{action:'skip', value: ''}})); }};
+    skipAllBtn.onclick = () => {{ clearTimeout(_timer); cleanup(); resolve(JSON.stringify({{action:'skip_all', value: ''}})); }};
+    footer.appendChild(skipBtn); footer.appendChild(skipAllBtn);
+    panel.appendChild(footer);
+    overlay.appendChild(panel); document.body.appendChild(overlay);
+    overlay.onclick = (e) => {{ if(e.target===overlay) {{ clearTimeout(_timer); cleanup(); resolve(JSON.stringify({{action:'skip', value: ''}})); }} }};
+    function cleanup() {{ if(overlay.parentNode) overlay.parentNode.removeChild(overlay); }}
+    _timer = setTimeout(() => {{ cleanup(); resolve(JSON.stringify({{action:'skip', value: ''}})); }}, {timeout_s * 1000});
+  }});
+}})()"""
+
+
+def _build_continue_cancel_js(context_msg: str, timeout_s: int = 300) -> str:
+    import json as _json
+    msg = _json.dumps(context_msg)
+    return f"""
+return (function() {{
+  return new Promise((resolve) => {{
+{_base_theme_js()}
+    let _timer;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `position:fixed;inset:0;z-index:999999;background:${{col.overlay}};display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(4px);`;
+    const panel = document.createElement('div');
+    panel.style.cssText = `background:${{col.panel}};border:1px solid ${{col.border}};border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);color:${{col.text}};font-family:ui-sans-serif,system-ui,sans-serif;width:100%;max-width:440px;padding:28px;display:flex;flex-direction:column;gap:20px;text-align:center;`;
+    const icon = document.createElement('div'); icon.textContent = '⏱️'; icon.style.cssText = 'font-size:36px;'; panel.appendChild(icon);
+    const titleEl = document.createElement('div'); titleEl.textContent = 'Iteration Limit Reached'; titleEl.style.cssText = `font-size:18px;font-weight:700;color:${{col.text}};`; panel.appendChild(titleEl);
+    const msgEl = document.createElement('div'); msgEl.textContent = {msg}; msgEl.style.cssText = `font-size:14px;color:${{col.sub}};line-height:1.5;`; panel.appendChild(msgEl);
+    const countdown = document.createElement('div'); countdown.style.cssText = `font-size:12px;color:${{col.sub}};`; panel.appendChild(countdown);
+    const footer = document.createElement('div'); footer.style.cssText = 'display:flex;gap:10px;';
+    const makeBtn = (label, primary) => {{ const b = document.createElement('button'); b.textContent = label; b.style.cssText = `flex:1;padding:12px 18px;border-radius:9999px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid ${{primary ? 'transparent' : col.btnBorder}};background:${{primary ? col.btnPrimary : col.btn}};color:${{primary ? col.btnPrimaryText : col.btnText}};transition:opacity 0.15s;`; b.onmouseenter = () => b.style.opacity='0.85'; b.onmouseleave = () => b.style.opacity='1'; return b; }};
+    const continueBtn = makeBtn('Continue', true); const cancelBtn = makeBtn('Cancel', false);
+    continueBtn.onclick = () => {{ clearTimeout(_timer); clearInterval(_cd); cleanup(); resolve(JSON.stringify({{action:'continue'}})); }};
+    cancelBtn.onclick = () => {{ clearTimeout(_timer); clearInterval(_cd); cleanup(); resolve(JSON.stringify({{action:'cancel'}})); }};
+    footer.appendChild(continueBtn); footer.appendChild(cancelBtn);
+    panel.appendChild(footer); overlay.appendChild(panel); document.body.appendChild(overlay);
+    let remaining = {timeout_s};
+    const _cd = setInterval(() => {{ remaining--; countdown.textContent = `Auto-cancels in ${{remaining}}s`; if(remaining <= 0) {{ clearInterval(_cd); }} }}, 1000);
+    _timer = setTimeout(() => {{ clearInterval(_cd); cleanup(); resolve(JSON.stringify({{action:'cancel'}})); }}, {timeout_s * 1000});
+    function cleanup() {{ if(overlay.parentNode) overlay.parentNode.removeChild(overlay); }}
+  }});
+}})()"""
+
+
 class Pipe:
     __current_event_emitter__: Callable[[dict], Awaitable[None]]
     __user__: Any
@@ -121,6 +277,18 @@ class Pipe:
             default="",
             description="Model for the knowledge agent , works Best with a Base Model (not workspace presets) | (leave blank to use the planner model)"
         )
+        ENABLE_CODE_INTERPRETER_AGENT: bool = Field(
+            default=True,
+            description="Enable built-in code interpreter subagent. Executes Python code and returns results. The code_interpreter tool is moved here exclusively."
+        )
+        CODE_INTERPRETER_AGENT_MODEL: str = Field(
+            default="",
+            description="Model for the code interpreter agent, works best with a Base Model (not workspace presets) | (leave blank to use the planner model)"
+        )
+        CODE_INTERPRETER_TEMPERATURE: float = Field(
+            default=0.1,
+            description="Temperature for the code interpreter subagent. Low values (0.0-0.2) produce more deterministic, accurate code."
+        )
         SYSTEM_PROMPT: str = Field(
             default="""You are an advanced agentic Planner. You have the ability to formulate a plan, act on it by delegating tasks to specialized subagents or using tools, and track your progress.
 Your goal is to fulfill the user's request.
@@ -137,11 +305,15 @@ You have access to the following built-in special tools:
 
 You must:
 - BE STRICT WITH STATE STRUCTURE. Follow the plan provided exactly.
+- Dont call subagents for unrelated tasks.
+- **CODING RULE**: For ANY coding, scripting, calculation, or data-processing task, ALWAYS delegate to a `code agent` if not present do it yourself. NEVER use web_search_agent or knowledge_agent to fetch or produce code.
 - Methodically execute the steps, using `call_subagent` for complex analysis, generation, or reasoning steps.
 - As you finish each small step, call `update_state` to mark that specific task as 'completed'.
 - **ALWAYS pass `related_tasks`** when a subagent needs results from previous tasks. Subagents are isolated and cannot see other tasks' outputs without this.
+- **RESULT TRUNCATION**: The `result` field in a subagent tool response may be truncated for context efficiency. The FULL, untruncated output is ALWAYS available via `@task_id` (literal replacement in prompts/final response) or `read_task_result(task_id)`. Use these when you need the complete content.
 - Once the objective is complete, compile the final result. Use `@task_id` references in your final response to include large previous outputs — remember these are **literal text replacements** with the LAST subagent message for that task.
 - Relative API addresses like `/api/v1/...` are fully valid and should be used exactly as is.
+- Final Output is YOUR responsability. Make it look good dont output placeholder text from previous task results instead use the @task_id to refeplace it with the full output of that task.
 """,
             description="System Prompt for the planner agent (used when Plan Mode is ON)"
         )
@@ -162,18 +334,42 @@ You have access to the following built-in special tools:
 
 You must:
 - Delegate complex work to subagents using `call_subagent`.
+- Dont call subagents for unrelated tasks.
+- **CODING RULE**: For ANY coding, scripting, calculation, or data-processing task, ALWAYS delegate to a `code_agent` if not present do it yourself. NEVER use web_search_agent or knowledge_agent to fetch or produce code.
 - **ALWAYS pass `related_tasks`** when a subagent needs results from previous tasks. Subagents are isolated and cannot see other tasks' outputs without this.
+- **RESULT TRUNCATION**: The `result` field in a subagent tool response may be truncated for context efficiency. The FULL, untruncated output is ALWAYS available via `@task_id` (literal replacement in prompts/final response) or `read_task_result(task_id)`. Use these when you need the complete content.
 - Use `@task_id` references in your final response to include large previous outputs — these are **literal text replacements** with the LAST subagent message for that task.
 - Compose a clear final response for the user once all work is done.
 - Relative API addresses like `/api/v1/...` are fully valid and should be used exactly as is.
+- Final Output is YOUR responsability. Make it look good dont output placeholder text from previous task results instead use the @task_id to refeplace it with the full output of that task.
 """,
             description="System Prompt for the agent when Plan Mode is OFF (no state tracking)"
+        )
+        USER_INPUT_TIMEOUT: int = Field(
+            default=120,
+            description="Timeout in seconds for user-input modal responses (ask_user / give_options). After this time the input is auto-skipped."
+        )
+        MAX_PLANNER_ITERATIONS: int = Field(
+            default=25,
+            description="Maximum planner loop iterations before asking the user to continue or cancel. Set to 0 to disable."
+        )
+        MAX_SUBAGENT_ITERATIONS: int = Field(
+            default=25,
+            description="Maximum tool-call iterations per subagent thread before asking the user to continue or cancel. Set to 0 to disable."
         )
 
     class UserValves(BaseModel):
         PLAN_MODE: bool = Field(
             default=True,
             description="Enable Plan Mode with visual task state tracking (HTML plan embed, state updates, completion verification). When disabled, the agent delegates to subagents directly without structured planning overhead."
+        )
+        ENABLE_USER_INPUT_TOOLS: bool = Field(
+            default=True,
+            description="Allow the planner to call ask_user and give_options to request clarification or choices from you during execution. Disable to let the planner run fully autonomously."
+        )
+        YOLO_MODE: bool = Field(
+            default=False,
+            description="YOLO: disable all iteration limits for both the planner and subagents. The planner will run until it naturally finishes with no Continue/Cancel interruptions."
         )
 
     def __init__(self):
@@ -201,66 +397,139 @@ You must:
         )
 
     def _generate_html_embed(self, planner_state: dict) -> str:
+        import hashlib, time as _time
+        embed_id = "pe-" + hashlib.md5(str(_time.monotonic()).encode()).hexdigest()[:8]
+
+        status_colors = {
+            "pending":     "#9ca3af",
+            "in_progress": "#60a5fa",
+            "completed":   "#10b981",
+            "failed":      "#ef4444",
+        }
+        check_icon = {
+            "pending":     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle></svg>',
+            "in_progress": '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>',
+            "completed":   '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>',
+            "failed":      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>',
+        }
+
         tasks_html = ""
         for task_id, task_info in planner_state.items():
             status = task_info.get("status", "pending")
-            desc = task_info.get("description", "")
-            
-            status_colors = {
-                "pending": "rgba(156, 163, 175, 1)",
-                "in_progress": "rgba(59, 130, 246, 1)",
-                "completed": "rgba(16, 185, 129, 1)",
-                "failed": "rgba(239, 68, 68, 1)"
-            }
-            color = status_colors.get(status, "rgba(156, 163, 175, 1)")
-            
-            check_icon = {
-                "pending": '''<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle></svg>''',
-                "in_progress": '''<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>''',
-                "completed": '''<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>''',
-                "failed": '''<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>'''
-            }
-            icon = check_icon.get(status, "")
-            
+            desc   = task_info.get("description", "")
+            color  = status_colors.get(status, status_colors["pending"])
+            icon   = check_icon.get(status, "")
             tasks_html += f'''
-            <div style="margin-bottom: 12px; padding: 16px; background: rgba(0,0,0,0.15); border-left: 4px solid {color}; border-radius: 12px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);">
-                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
-                    <div style="display: flex; align-items: center; gap: 8px; color: {color};">
+            <div class="pe-card" style="margin-bottom:12px;padding:16px;border-left:4px solid {color};border-radius:12px;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
+                    <div style="display:flex;align-items:center;gap:8px;color:{color};">
                         {icon}
-                        <strong style="color: #f8fafc; font-size: 14px; font-weight: 600; letter-spacing: 0.3px;">{task_id}</strong>
+                        <strong class="pe-title" style="font-size:14px;font-weight:600;letter-spacing:0.3px;">{task_id}</strong>
                     </div>
-                    <span style="font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 99px; background: {color.replace(', 1)', ', 0.15)')}; color: {color}; text-transform: uppercase; letter-spacing: 1px;">
+                    <span style="font-size:10px;font-weight:700;padding:4px 10px;border-radius:99px;text-transform:uppercase;letter-spacing:1px;color:{color};background:rgba(128,128,128,0.15);">
                         {status.replace("_", " ")}
                     </span>
                 </div>
-                <div style="color: #cbd5e1; font-size: 13px; line-height: 1.5; font-weight: 400; padding-left: 26px;">
+                <div class="pe-desc" style="font-size:13px;line-height:1.5;font-weight:400;padding-left:26px;">
                     {desc}
                 </div>
-            </div>
-            '''
+            </div>'''
 
         if not tasks_html:
-            tasks_html = '''
-            <div style="padding: 16px; text-align: center; color: rgba(255,255,255,0.4); font-size: 13px; font-style: italic; background: rgba(0,0,0,0.1); border-radius: 12px; border: 1px dashed rgba(255,255,255,0.1);">
-                Planning...
-            </div>
-            '''
+            tasks_html = '<div class="pe-empty" style="padding:16px;text-align:center;font-size:13px;font-style:italic;border-radius:12px;">Planning...</div>'
 
-        html = f'''
-        <div class="planner-embed" style="background: rgba(15, 15, 15, 0.2); backdrop-filter: blur(24px); border: 1px solid rgba(255,255,255,0.06); box-shadow: 0 0 80px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.1); border-radius: 24px; padding: 32px; margin: 32px; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;">
-            <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 12px; margin-bottom: 32px;">
-                <div style="font-size: 36px; filter: drop-shadow(0 0 8px rgba(0,0,0,0.2));">🧠</div>
-                <div>
-                    <h3 style="margin: 0; color: #fff; font-size: 20px; font-weight: 800; letter-spacing: -0.2px;">Planner Subagents</h3>
-                    <p style="margin: 6px 0 0 0; font-size: 13px; color: #94a3b8; font-weight: 500;">Live Execution State</p>
-                </div>
-            </div>
-            <div style="display: flex; flex-direction: column; gap: 4px;">
-                {tasks_html}
-            </div>
-        </div>
-        '''
+        # The embed runs inside a sandboxed srcdoc iframe.
+        # window.parent.document is accessible (allow-same-origin + allow-scripts).
+        # Strategy: read the ACTUAL computed body backgroundColor from the parent page,
+        # parse its RGB values, and derive all embed colors mathematically.
+        # This auto-adapts to ALL OWUI themes (light, dark, oled-dark, her, custom).
+        theme_script = f'''<script>
+(function(){{
+  var ID='{embed_id}';
+  function rd(){{try{{return window.parent.document;}}catch(e){{return document;}}}}
+  function parseRgb(s){{
+    var m=(s||'').match(/rgba?[(]([0-9]+)[, ]+([0-9]+)[, ]+([0-9]+)/);
+
+
+
+    return m?[+m[1],+m[2],+m[3]]:null;
+  }}
+  function clamp(v){{return Math.max(0,Math.min(255,Math.round(v)));}}
+  function adj(c,n){{return[clamp(c[0]+n),clamp(c[1]+n),clamp(c[2]+n)];}}
+  function rgb(c){{return'rgb('+c[0]+','+c[1]+','+c[2]+')';}}
+  function luma(c){{return(0.299*c[0]+0.587*c[1]+0.114*c[2])/255;}}
+  function applyTheme(){{
+    var el=document.getElementById(ID);
+    if(!el)return;
+    var r=rd();
+    // Read the actual body background of the parent page (handles all 4 OWUI themes)
+    var bodyBg=window.parent.getComputedStyle(r.body).backgroundColor;
+    var base=parseRgb(bodyBg);
+    // If body is transparent (rgba(0,0,0,0)), walk to documentElement
+    if(!base||luma(base)===0&&bodyBg.indexOf('rgba')>-1){{
+      bodyBg=window.parent.getComputedStyle(r.documentElement).backgroundColor;
+      base=parseRgb(bodyBg);
+    }}
+    if(!base)base=[17,24,39]; // safe dark fallback
+    var dark=luma(base)<0.5;
+    var step=dark?18:-18;
+    var outerBg =rgb(adj(base, dark?10:-6));
+    var cardBg  =rgb(adj(base, dark?22:-14));
+    var borderC =rgb(adj(base, dark?38:-24));
+    var titleC  =dark?'#f1f5f9':'#0f172a';
+    var subC    =dark?'#94a3b8':'#64748b';
+    var descC   =dark?'#cbd5e1':'#475569';
+    el.style.background=outerBg;
+    el.style.borderColor=borderC;
+    el.style.boxShadow=dark?'0 4px 20px rgba(0,0,0,0.5)':'0 4px 12px rgba(0,0,0,0.1)';
+    var h3=el.querySelector('h3');if(h3)h3.style.color=titleC;
+    var sub=el.querySelector('.pe-subtitle');if(sub)sub.style.color=subC;
+    el.querySelectorAll('.pe-card').forEach(function(c){{c.style.background=cardBg;}});
+    el.querySelectorAll('.pe-title').forEach(function(t){{t.style.color=titleC;}});
+    el.querySelectorAll('.pe-desc').forEach(function(d){{d.style.color=descC;}});
+    el.querySelectorAll('.pe-empty').forEach(function(e){{
+      e.style.color=subC;
+      e.style.borderColor=rgb(adj(base,dark?45:-30));
+    }});
+  }}
+  applyTheme();
+  setTimeout(applyTheme,150);
+  setTimeout(applyTheme,600);
+  try{{
+    var r=rd();
+    var obs=new MutationObserver(applyTheme);
+    obs.observe(r.documentElement,{{attributes:true,attributeFilter:['class','style','data-theme']}});
+    if(r.body)obs.observe(r.body,{{attributes:true,attributeFilter:['class','style']}});
+  }}catch(e){{}}
+}})();
+</script>'''
+
+        html = (
+            '<style>html,body{margin:0;padding:0;background:transparent!important}</style>\n'
+            f'<div id="{embed_id}" style="background:#1e293b;border:1px solid #334155;'
+            'border-radius:20px;padding:28px;margin:6px;'
+            'font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;'
+            'box-shadow:0 4px 20px rgba(0,0,0,0.5);">\n'
+            '  <div style="display:flex;flex-direction:column;align-items:center;'
+            'text-align:center;gap:12px;margin-bottom:24px;">\n'
+            '    <div style="font-size:32px;">🧠</div>\n'
+            '    <div>\n'
+            '      <h3 style="margin:0;color:#f1f5f9;font-size:18px;font-weight:800;'
+            'letter-spacing:-0.2px;">Planner Subagents</h3>\n'
+            '      <p class="pe-subtitle" style="margin:4px 0 0 0;font-size:12px;'
+            'color:#94a3b8;font-weight:500;">Live Execution State</p>\n'
+            '    </div>\n'
+            '  </div>\n'
+            f'  <div style="display:flex;flex-direction:column;gap:4px;">\n    {tasks_html}\n  </div>\n'
+            f'</div>\n{theme_script}'
+        )
         return html
+
+
+
+
+
+
 
     async def emit_html_embed(self, planner_state: dict):
         html = self._generate_html_embed(planner_state)
@@ -445,11 +714,11 @@ You must:
 
     # Removed manual tool instruction injection based on user constraint
 
-    async def get_streaming_completion(self, messages, model_id: str, body: dict, tools: list = None):
+    async def get_streaming_completion(self, messages, model_id: str, body: dict, tools: list = None, temperature_override: float = None):
         form_data = {**body}
         form_data["model"] = model_id
         form_data["messages"] = messages
-        form_data["temperature"] = self.valves.TEMPERATURE
+        form_data["temperature"] = temperature_override if temperature_override is not None else self.valves.TEMPERATURE
         form_data["stream"] = True
         
         if "tools" in form_data:
@@ -500,7 +769,8 @@ You must:
         self.__request__ = __request__
         self.__model__ = body.get("model", "")
         plan_mode = self.__user_valves__.PLAN_MODE
-        
+        self.__skip_all_inputs__ = False  # Shared flag: Skip All mutes all user-input requests for this pipe() call
+
         # OWUI pops metadata from the body before passing to pipe functions,
         # but injects it as __metadata__. Use that as primary source.
         pipe_metadata = __metadata__ or body.get("metadata", {}) or {}
@@ -595,6 +865,35 @@ You must:
             subagent_descriptions.append(
                 "- ID: knowledge_agent (Name: Knowledge Agent)\n  Description: Built-in knowledge, notes, and chat history retrieval subagent. Can search and read notes, knowledge bases, and past conversations."
             )
+
+        if self.valves.ENABLE_CODE_INTERPRETER_AGENT:
+            virtual_agents["code_interpreter_agent"] = {
+                "model": self.valves.CODE_INTERPRETER_AGENT_MODEL or model_id,
+                "description": "Built-in code interpreter subagent. Can generate content in ANY language (HTML, CSS, JS, Python, shell scripts, JSON, etc.) and execute Python in a sandboxed Jupyter environment. Use this for ALL coding, scripting, content generation, and computation tasks.",
+                "system_message": (
+                    "You are a specialized code and content generation subagent. "
+                    "You can generate content in ANY language — HTML, CSS, JavaScript, Python, shell scripts, JSON, YAML, and more. "
+                    "You also have access to a code_interpreter tool that runs Python in a sandboxed Jupyter environment "
+                    "(maintains state across calls) — use it when you need to EXECUTE code, not just generate it.\n"
+                    "Rules:\n"
+                    "- For HTML/CSS/JS or any web content: output the FULL, complete, self-contained content DIRECTLY — "
+                    "do NOT wrap it in Python code that generates it. Return it as-is so the planner can use it immediately.\n"
+                    "- For computation, data processing, or tasks that need execution: use the code_interpreter tool.\n"
+                    "- Output ONLY the final, complete, working content unless the user explicitly asks for explanations.\n"
+                    "- Do NOT add prose, commentary, or markdown outside of code blocks unless asked.\n"
+                    "- Return generated file paths, URLs, or raw content in your response so the planner can use them.\n"
+                    "- If the task requires a file to be created, return its absolute path in your response.\n"
+                    "- For visualizations or plots, save them to a file and return the path."
+                ),
+                "features": {"code_interpreter": True},
+                "type": "builtin",
+                "temperature": self.valves.CODE_INTERPRETER_TEMPERATURE,
+                "builtin_model_override": {"info": {"meta": {"builtinTools": {**_all_builtins_off, "code_interpreter": True}}}},
+            }
+            subagents_list.append("code_interpreter_agent")
+            subagent_descriptions.append(
+                "- ID: code_interpreter_agent (Name: Code Interpreter Agent)\n  Description: Built-in code interpreter subagent. Can generate content in ANY language (HTML, CSS, JS, Python, etc.) and execute Python in a sandbox. Use for ALL coding, content generation, scripting, and computation tasks."
+            )
             
         if self.valves.ENABLE_TERMINAL_AGENT and terminal_id:
             virtual_agents["terminal_agent"] = {
@@ -618,6 +917,12 @@ You must:
         base_prompt = self.valves.SYSTEM_PROMPT if plan_mode else self.valves.NO_PLAN_SYSTEM_PROMPT
         subagent_models_text = "\n".join(subagent_descriptions) if subagent_descriptions else "None specified in config"
         system_prompt = base_prompt + f"\nAvailable Subagent Models:\n{subagent_models_text}\n"
+        if self.__user_valves__.ENABLE_USER_INPUT_TOOLS and self.__event_call__:
+            system_prompt += (
+                "\nUser Interaction Tools (ask_user, give_options) are ACTIVE. "
+                "Use them whenever you need user input or a choice from the user. "
+                "NEVER ask the user a question in plain text — ALWAYS use the appropriate tool instead.\n"
+            )
 
         sys_message = {"role": "system", "content": system_prompt}
         planner_messages = [sys_message] + messages
@@ -694,6 +999,7 @@ You must:
                     "specs": s_tools,
                     "system_message": va["system_message"],
                     "actual_model": va_model,
+                    "temperature_override": va.get("temperature"),
                 }
                 continue
             
@@ -801,7 +1107,6 @@ You must:
             }
 
             await self.emit_status("Planning...", False)
-            
             plan_content_chunks = []
             try:
                 async for event in self.get_streaming_completion(plan_messages, model_id, body=plan_body, tools=None):
@@ -809,10 +1114,11 @@ You must:
                         plan_content_chunks.append(event["text"])
             except Exception as e:
                 logger.error(f"Error during plan formation: {e}")
-                
+
             full_plan_text = "".join(plan_content_chunks)
-            
+
             # Try to parse the json plan using robust extraction
+
             try:
                 plan_json = self._extract_json_array(full_plan_text)
                 if plan_json:
@@ -903,7 +1209,7 @@ You must:
             "type": "function",
             "function": {
                 "name": "read_task_result",
-                "description": "Read the pure text result of a completed task verbatim.",
+                "description": "Read the FULL, untruncated raw text result of a completed task verbatim. Use this when the result shown in the call_subagent response was truncated and you need the complete content.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -935,7 +1241,68 @@ You must:
             if "spec" in tool_data:
                 tools_spec.append({"type": "function", "function": tool_data["spec"]})
 
+        # ask_user and give_options: only added when the user valve is enabled
+        if self.__user_valves__.ENABLE_USER_INPUT_TOOLS and self.__event_call__:
+            tools_spec.append({
+                "type": "function",
+                "function": {
+                    "name": "ask_user",
+                    "description": "Ask the user for free-form text input. Use when you need clarification or additional information from the user.  never send HTML or code here, use it only if necesary, Returns the text, or a skip/skip-all sentinel if the user declines.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt_text": {"type": "string", "description": "The question or request to present to the user"},
+                            "placeholder": {"type": "string", "description": "Optional hint text for the input field"}
+                        },
+                        "required": ["prompt_text"]
+                    }
+                }
+            })
+            tools_spec.append({
+                "type": "function",
+                "function": {
+                    "name": "give_options",
+                    "description": "Present the user with a list of choices and wait for their selection. Returns the chosen option, never send HTML or code here, use it only if necesary, or a skip/skip-all sentinel if the user declines.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt_text": {"type": "string", "description": "The question or prompt to display"},
+                            "choices": {"type": "array", "items": {"type": "string"}, "description": "List of options to present to the user"},
+                            "context": {"type": "string", "description": "Optional background context to show beneath the title"}
+                        },
+                        "required": ["prompt_text", "choices"]
+                    }
+                }
+            })
+
+        planner_iteration = 0
+
         while True:
+            # --- Planner iteration limit check ---
+            planner_iteration += 1
+            yolo = self.__user_valves__.YOLO_MODE
+            if not yolo and self.valves.MAX_PLANNER_ITERATIONS > 0 and planner_iteration > self.valves.MAX_PLANNER_ITERATIONS:
+                if self.__event_call__:
+                    try:
+                        js = _build_continue_cancel_js(
+                            f"The planner has completed {planner_iteration - 1} iterations. Would you like it to continue working?",
+                            timeout_s=300
+                        )
+                        raw = await self.__event_call__({"type": "execute", "data": {"code": js}})
+                        raw_str = raw if isinstance(raw, str) else (raw.get("result") or raw.get("value") or "{}") if raw else "{}"
+                        decision = json.loads(raw_str or '{"action":"cancel"}')
+                        if decision.get("action") == "continue":
+                            planner_iteration = 1  # Reset counter
+                        else:
+                            await self.emit_status("Planner stopped by user after iteration limit.", True)
+                            break
+                    except Exception as e:
+                        logger.error(f"Planner iteration limit modal error: {e}")
+                        break
+                else:
+                    logger.warning("Planner iteration limit reached. No event_call available. Stopping.")
+                    break
+
             try:
                 import time
                 content_chunks = []
@@ -1075,9 +1442,35 @@ You must:
                                 xml_count += 1
                     
                     if extracted_any:
-                        # Clean the XML tags from content/reasoning for a cleaner final_content
-                        # We also clean final_content even if it came from reasoning promotion later to be safe
+                        # Clean the XML tool call tags from final_content
                         final_content = re.sub(r'<tool_call>.*?</tool_call>', '', final_content, flags=re.DOTALL).strip()
+                        
+                        # Also clean XML tool calls from the reasoning that was already flushed into
+                        # total_emitted_base, distinguishing two cases:
+                        #
+                        # Case 1: Reasoning had ONLY XML tool calls (no other real thinking text)
+                        #   → Remove the entire reasoning <details> block (nothing useful to show).
+                        # Case 2: Reasoning had real thinking + XML tool calls mixed in
+                        #   → Keep the <details> block but strip just the <tool_call>…</tool_call> from it.
+                        if not final_content and full_reasoning.strip():
+                            cleaned_reasoning = re.sub(r'<tool_call>.*?</tool_call>', '', full_reasoning, flags=re.DOTALL).strip()
+                            if not cleaned_reasoning:
+                                # Case 1: pure XML in reasoning — drop the whole block
+                                total_emitted_base = re.sub(
+                                    r'\n*<details type="reasoning"[^>]*>.*?</details>\n*',
+                                    '',
+                                    total_emitted_base,
+                                    flags=re.DOTALL
+                                ).rstrip()
+                            else:
+                                # Case 2: real thinking content exists — update the block in-place,
+                                # replacing any <tool_call>…</tool_call> inside it with nothing.
+                                total_emitted_base = re.sub(
+                                    r'(<details type="reasoning"[^>]*>.*?</details>)',
+                                    lambda m: re.sub(r'<tool_call>.*?</tool_call>', '', m.group(1), flags=re.DOTALL),
+                                    total_emitted_base,
+                                    flags=re.DOTALL
+                                )
                 
                 # Promotion logic: only promote if NO content chunks were ever added AND we have reasoning
                 if not content_chunks and not tool_calls_dict and full_reasoning.strip():
@@ -1116,62 +1509,112 @@ You must:
                         unresolved_tasks = [tid for tid, info in planner_state.items() if info["status"] not in ["completed"]]
                         if unresolved_tasks and not final_pass_done:
                             final_pass_done = True
-                            await self.emit_status("Verifying task states implicitly...", False)
+                            await self.emit_status("Verifying task states...", False)
                             
                             judge_messages = planner_messages.copy()
                             judge_messages.append({
                                 "role": "user",
-                                "content": f"SYSTEM: Review the final response. Tasks {', '.join(unresolved_tasks)} are not marked as completed. If they were actually completed in the narrative, use the `update_state` tool to mark them as completed. Do not output text, ONLY tool calls. If more work is needed, do nothing and the planner will continue."
+                                "content": (
+                                    f"SYSTEM: Review the conversation. Tasks {', '.join(unresolved_tasks)} are not marked as completed. "
+                                    "Respond with a JSON object (no extra text) with two fields:\n"
+                                    "1. \"updates\": array of {\"task_id\": string, \"status\": \"completed\"|\"failed\", \"description\": string} "
+                                    "for any tasks that were actually completed or clearly failed in the conversation.\n"
+                                    "2. \"follow_up_prompt\": string — if tasks are genuinely incomplete and need more work, "
+                                    "write a short instruction for the planner to continue. If all tasks are resolved or no further work "
+                                    "is possible, set this to an empty string \"\"."
+                                )
                             })
                             
-                            silent_tool_calls = {}
-                            try:
-                                async for sub_event in self.get_streaming_completion(judge_messages, model_id, body=body, tools=tools_spec):
-                                    if sub_event["type"] == "tool_calls":
-                                        for tc in sub_event["data"]:
-                                            idx = tc["index"]
-                                            if idx not in silent_tool_calls:
-                                                silent_tool_calls[idx] = {
-                                                    "id": tc.get("id"),
-                                                    "function": {"name": tc["function"].get("name", ""), "arguments": ""}
+                            # Structured output schema for the judge
+                            judge_body = {**body}
+                            judge_body["response_format"] = {
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": "judge_verdict",
+                                    "strict": True,
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "updates": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "task_id": {"type": "string"},
+                                                        "status": {"type": "string", "enum": ["completed", "failed"]},
+                                                        "description": {"type": "string"}
+                                                    },
+                                                    "required": ["task_id", "status", "description"],
+                                                    "additionalProperties": False
                                                 }
-                                            if "name" in tc["function"] and tc["function"]["name"]:
-                                                silent_tool_calls[idx]["function"]["name"] = tc["function"]["name"]
-                                            if "arguments" in tc["function"]:
-                                                silent_tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
+                                            },
+                                            "follow_up_prompt": {"type": "string"}
+                                        },
+                                        "required": ["updates", "follow_up_prompt"],
+                                        "additionalProperties": False
+                                    }
+                                }
+                            }
+                            
+                            judge_chunks = []
+                            try:
+                                async for sub_event in self.get_streaming_completion(judge_messages, model_id, body=judge_body, tools=None):
+                                    if sub_event["type"] == "content":
+                                        judge_chunks.append(sub_event["text"])
                             except Exception as e:
-                                logger.error(f"Error in silent judge: {e}")
-                                
+                                logger.error(f"Error in judge verification: {e}")
+                            
+                            # Parse judge response — strip thinking tags first
+                            judge_raw = clean_thinking_tags("".join(judge_chunks))
+                            judge_result = {}
+                            try:
+                                # Find the first { and raw_decode from there
+                                brace_start = judge_raw.find("{")
+                                if brace_start != -1:
+                                    decoder = json.JSONDecoder()
+                                    judge_result, _ = decoder.raw_decode(judge_raw[brace_start:])
+                            except json.JSONDecodeError:
+                                logger.warning(f"Could not parse judge JSON. Raw: {judge_raw[:300]}")
+                            
+                            # Apply state updates from judge
                             updated_any = False
-                            if silent_tool_calls:
-                                for tc in silent_tool_calls.values():
-                                    if tc["function"]["name"] == "update_state":
-                                        try:
-                                            args = json.loads(tc["function"]["arguments"])
-                                            task_id = args.get("task_id", "")
-                                            status = args.get("status", "pending")
-                                            if task_id in planner_state:
-                                                planner_state[task_id]["status"] = status
-                                                if "description" in args and args["description"]:
-                                                    planner_state[task_id]["description"] = args["description"]
-                                                updated_any = True
-                                        except:
-                                            pass
-                                            
+                            for upd in judge_result.get("updates", []):
+                                tid = upd.get("task_id", "")
+                                status = upd.get("status", "")
+                                if tid in planner_state and status in ["completed", "failed"]:
+                                    planner_state[tid]["status"] = status
+                                    if upd.get("description"):
+                                        planner_state[tid]["description"] = upd["description"]
+                                    updated_any = True
+                                    
                             if updated_any:
                                 await self.emit_html_embed(planner_state)
                                 await asyncio.sleep(0.1)
                                 await self.emit_replace(total_emitted)
-                                
-                            # If tasks are STILL pending, in progress, or failed, we resume the actual planner
+                            
+                            # Check what remains incomplete after judge updates
                             still_incomplete = [tid for tid, info in planner_state.items() if info["status"] not in ["completed"]]
-                            if still_incomplete and updated_any:
-                                # Let it loop one more time if something changed.
+                            follow_up = judge_result.get("follow_up_prompt", "").strip()
+                            
+                            if not still_incomplete:
+                                pass  # All resolved — fall through to break
+                            elif follow_up:
+                                # Judge identified remaining work — inject follow-up and let planner retry
+                                planner_messages.append({
+                                    "role": "user",
+                                    "content": f"SYSTEM: The following tasks are still incomplete: {', '.join(still_incomplete)}. {follow_up}"
+                                })
+                                await self.emit_status("Continuing incomplete tasks...", False)
                                 continue
-                            elif still_incomplete and not updated_any:
-                                 # Judge didn't find anything to update. This is where the loop often hung.
-                                 # We'll allow the model to terminate if no further work was suggested.
-                                 pass
+                            else:
+                                # Judge found nothing to update and no follow-up — warn user
+                                incomplete_details = ", ".join(
+                                    f"{tid} ({planner_state[tid].get('description', 'no description')})"
+                                    for tid in still_incomplete
+                                )
+                                warning = f"\n\n⚠️ **Some tasks could not be completed:** {incomplete_details}\n"
+                                await self.emit_message(warning)
+                                total_emitted += warning
 
                     break
 
@@ -1192,8 +1635,21 @@ You must:
 
                     args = self.resolve_dict_references(args, action_results)
 
+                    # Build a compact version of arguments for the <details> tag attributes
+                    # to prevent long choices arrays / prompts from breaking HTML rendering
+                    try:
+                        display_args = json.loads(arguments_str)
+                        for k, v in display_args.items():
+                            if isinstance(v, str) and len(v) > 60:
+                                display_args[k] = v[:57] + "..."
+                            elif isinstance(v, list) and len(v) > 3:
+                                display_args[k] = v[:3] + [f"... +{len(v) - 3} more"]
+                        display_arguments_str = json.dumps(display_args, ensure_ascii=False)
+                    except Exception:
+                        display_arguments_str = arguments_str
+
                     # Emit "Executing..." tag
-                    executing_tag = self._build_tool_call_details(call_id, function_name, arguments_str, done=False)
+                    executing_tag = self._build_tool_call_details(call_id, function_name, display_arguments_str, done=False)
                     if not total_emitted.endswith("\n"):
                         total_emitted += "\n"
                     total_emitted += executing_tag
@@ -1265,13 +1721,38 @@ You must:
                             sub_final_answer_chunks = []
                             sub_reasoning_chunks = []
                             sub_called_tools = []
+                            sub_iteration = 0
                             
                             while True:
                                 sub_tc_dict = {}
-                                
+                                sub_iteration += 1
+                                if not self.__user_valves__.YOLO_MODE and self.valves.MAX_SUBAGENT_ITERATIONS > 0 and sub_iteration > self.valves.MAX_SUBAGENT_ITERATIONS:
+                                    if self.__event_call__:
+                                        try:
+                                            js = _build_continue_cancel_js(
+                                                f"Subagent '{sub_model}' ({sub_task_id}) has completed {sub_iteration - 1} tool-call iterations. Continue?",
+                                                timeout_s=300
+                                            )
+                                            raw = await self.__event_call__({"type": "execute", "data": {"code": js}})
+                                            raw_str = raw if isinstance(raw, str) else (raw.get("result") or raw.get("value") or "{}") if raw else "{}"
+                                            decision = json.loads(raw_str or '{"action":"cancel"}')
+                                            if decision.get("action") == "continue":
+                                                sub_iteration = 1
+                                            else:
+                                                sub_final_answer_chunks.append("[Subagent stopped at iteration limit by user.]")
+                                                break
+                                        except Exception as e:
+                                            logger.error(f"Subagent iteration limit modal error: {e}")
+                                            break
+                                    else:
+                                        sub_final_answer_chunks.append("[Subagent stopped at iteration limit.]")
+                                        break
+
+
                                 # Resolve actual model for virtual agents (virtual IDs -> real model IDs)
                                 actual_sub_model = cached.get("actual_model", sub_model)
-                                async for sub_event in self.get_streaming_completion(sub_messages, actual_sub_model, body=body, tools=sub_tools):
+                                sub_temp_override = cached.get("temperature_override")
+                                async for sub_event in self.get_streaming_completion(sub_messages, actual_sub_model, body=body, tools=sub_tools, temperature_override=sub_temp_override):
                                     event_type = sub_event["type"]
                                     if event_type == "content":
                                         sub_final_answer_chunks.append(sub_event["text"])
@@ -1369,7 +1850,7 @@ You must:
                                     target_tool = sub_tools_dict.get(stc_name)
                                     if target_tool:
                                         tc_res = await target_tool["callable"](**stc_args_obj)
-                                        tc_return = process_tool_result(self.__request__, stc_name, tc_res, target_tool.get("type", ""), False, body.get("metadata",{}), self.__user__)
+                                        tc_return = process_tool_result(self.__request__, stc_name, tc_res, target_tool.get("type", ""), False, pipe_metadata, self.__user__)
                                         res_str = tc_return[0] if len(tc_return) > 0 else str(tc_res)
                                         
                                         # Track tool call: name, truncated params, success
@@ -1398,13 +1879,18 @@ You must:
                             if sub_task_id:
                                 action_results[sub_task_id] = raw_result
                             
-                            # Build structured response for planner context and display
+                            # Build structured response for planner context
+                            # NOTE: result may be truncated here to preserve planner context window.
+                            # The FULL result is always available via @task_id or read_task_result().
+                            was_truncated = len(raw_result) > 2000
+                            result_preview = raw_result if not was_truncated else raw_result[:2000] + f"\n... [TRUNCATED — {len(raw_result) - 2000} chars omitted. Use @{sub_task_id} or read_task_result('{sub_task_id}') to get the FULL untruncated output.]"
                             structured_response = {
                                 "task_id": sub_task_id,
                                 "called_tools": sub_called_tools,
-                                "result": raw_result,
-                                "note": f"Use @{sub_task_id} in prompts or final response to include this result."
+                                "result": result_preview,
                             }
+                            if was_truncated:
+                                structured_response["note"] = f"IMPORTANT: Result was truncated. Use @{sub_task_id} in prompts/final response for FULL literal text replacement, or call read_task_result('{sub_task_id}') to read the complete output."
                             tool_result_str = json.dumps(structured_response, ensure_ascii=False)
                                 
                             await self.emit_status(f"Planner evaluating...", False)
@@ -1413,7 +1899,57 @@ You must:
                             logger.error(f"Subagent error: {e}")
                             tool_result_str = f"Error calling subagent: {e}"
 
+                    elif function_name == "ask_user":
+                        if self.__skip_all_inputs__:
+                            tool_result_str = "User has opted out of all further input requests for this session."
+                        else:
+                            try:
+                                js = _build_ask_user_js(
+                                    args.get("prompt_text", ""),
+                                    args.get("placeholder", "Type your response..."),
+                                    self.valves.USER_INPUT_TIMEOUT,
+                                )
+                                raw = await self.__event_call__({"type": "execute", "data": {"code": js}})
+                                raw_str = raw if isinstance(raw, str) else (raw.get("result") or raw.get("value") or "{}") if raw else "{}"
+                                parsed = json.loads(raw_str or "{}")
+                                action = parsed.get("action", "skip")
+                                if action == "skip_all":
+                                    self.__skip_all_inputs__ = True
+                                    tool_result_str = "User has opted out of all further input requests for this session."
+                                elif action == "accept" and parsed.get("value"):
+                                    tool_result_str = f"User provided: {parsed['value']}"
+                                else:
+                                    tool_result_str = "User skipped this input (no details provided)."
+                            except Exception as e:
+                                tool_result_str = f"ask_user error: {e}"
+
+                    elif function_name == "give_options":
+                        if self.__skip_all_inputs__:
+                            tool_result_str = "User has opted out of all further input requests for this session."
+                        else:
+                            try:
+                                js = _build_give_options_js(
+                                    args.get("prompt_text", ""),
+                                    args.get("choices", []),
+                                    args.get("context", ""),
+                                    self.valves.USER_INPUT_TIMEOUT,
+                                )
+                                raw = await self.__event_call__({"type": "execute", "data": {"code": js}})
+                                raw_str = raw if isinstance(raw, str) else (raw.get("result") or raw.get("value") or "{}") if raw else "{}"
+                                parsed = json.loads(raw_str or "{}")
+                                action = parsed.get("action", "skip")
+                                if action == "skip_all":
+                                    self.__skip_all_inputs__ = True
+                                    tool_result_str = "User has opted out of all further input requests for this session."
+                                elif action == "accept" and parsed.get("value"):
+                                    tool_result_str = f"User selected: {parsed['value']}"
+                                else:
+                                    tool_result_str = "User skipped this selection (no option chosen)."
+                            except Exception as e:
+                                tool_result_str = f"give_options error: {e}"
+
                     elif function_name == "read_task_result":
+
                         rt_id = args.get("task_id", "")
                         if rt_id in action_results:
                             tool_result_str = action_results[rt_id]
@@ -1451,7 +1987,7 @@ You must:
                             filtered_args = {k: v for k, v in args.items() if k in allowed_keys}
                             
                             res = await tool_data["callable"](**filtered_args)
-                            tool_return = process_tool_result(self.__request__, function_name, res, tool_data.get("type", ""), False, body.get("metadata", {}), self.__user__)
+                            tool_return = process_tool_result(self.__request__, function_name, res, tool_data.get("type", ""), False, pipe_metadata, self.__user__)
                             tool_result_str = tool_return[0] if len(tool_return) > 0 else str(res)
                         except Exception as e:
                             tool_result_str = f"Error executing tool {function_name}: {e}"
@@ -1459,14 +1995,14 @@ You must:
                         tool_result_str = f"Error: Function {function_name} is not recognized or available."
 
                     context_result_str = tool_result_str
-                    if len(context_result_str) > 2000:
+                    if len(context_result_str) > 4000 and function_name == "call_subagent":
                         ref_id = args.get("task_id", function_name)
-                        context_result_str = context_result_str[:1800] + f"\n\n...[TRUNCATED. Full output saved. Use 'review_tasks' tool passing 'task_ids': ['{ref_id}'] to review it, or use 'related_tasks' parameter in 'call_subagent' to inject its full text context]..."
+                        context_result_str = context_result_str[:3800] + f"\n\n...[TRUNCATED. Full output saved. Use 'review_tasks' tool passing 'task_ids': ['{ref_id}'] to review it, or use 'related_tasks' parameter in 'call_subagent' to inject its full text context]..."
 
                     # Complete executing tag in the UI stream
                     total_emitted = total_emitted.replace(executing_tag, "")
                     done_tag = self._build_tool_call_details(
-                        call_id, function_name, arguments_str, done=True, result=tool_result_str
+                        call_id, function_name, display_arguments_str, done=True, result=tool_result_str
                     )
                     
                     if not total_emitted.endswith("\n"):

@@ -3,7 +3,7 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.7.0
+version: 2.8.0
 """
 
 import logging
@@ -19,7 +19,7 @@ from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
 from open_webui.models.users import User, Users
 from open_webui.models.models import Models
-from open_webui.utils.tools import get_tools, get_builtin_tools
+from open_webui.utils.tools import get_tools, get_builtin_tools, get_terminal_tools
 from open_webui.utils.middleware import process_tool_result
 from open_webui.utils.chat import (
     generate_chat_completion as generate_raw_chat_completion,
@@ -870,6 +870,7 @@ return (function() {
         self.__model__ = __model__
         self.__request__ = __request__
         self.__metadata__ = __metadata__ or {}
+        terminal_id = self.__metadata__.get("terminal_id") or body.get("terminal_id")
 
         valves = __user__.get("valves", self.UserValves())
         raw_history = body.get("messages", [])
@@ -1010,6 +1011,17 @@ return (function() {
         # Pre-load tools for each participant model
         participant_tools_map = {}
         models_state = getattr(self.__request__.app.state, "MODELS", {})
+        
+        # Load terminal tools once if terminal_id is present
+        terminal_tools = {}
+        if terminal_id:
+            try:
+                terminal_tools = await get_terminal_tools(
+                    self.__request__, terminal_id, self.__user__, extra_params
+                )
+                logger.debug(f"[MultiModelTools] Loaded {len(terminal_tools)} terminal tools")
+            except Exception as e:
+                logger.error(f"[MultiModelTools] Failed to load terminal tools: {e}")
 
         for p in participants:
             p_model_id = p["model"]
@@ -1189,6 +1201,11 @@ return (function() {
                 logger.error(
                     f"[MultiModelTools] Failed to load built-in tools for {p_model_id}: {e}"
                 )
+
+            # Add terminal tools if present
+            if terminal_tools:
+                p_tools_dict.update(terminal_tools)
+                logger.debug(f"[MultiModelTools] Terminal tools added for {p_model_id}")
 
             # Get native function calling flag
             native_fc = self._check_model_native_fc(p_model_id)
