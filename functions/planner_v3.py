@@ -58,13 +58,21 @@ THINKING_TAG_CLEANER_PATTERN = re.compile(
 
 
 def clean_thinking_tags(message: str) -> str:
+    # 1. Remove complete pairs
     pattern = re.compile(
         r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>"
         r"|"
         r"\|begin_of_thought\|.*?\|end_of_thought\|",
         re.DOTALL | re.IGNORECASE,
     )
-    return re.sub(pattern, "", message).strip()
+    message = re.sub(pattern, "", message)
+    
+    # 2. Remove unclosed tags until next tool_call or end of string
+    # This protects tool calls while cleaning up leaked thoughts.
+    message = re.sub(r'<(?:think|thinking|reason|reasoning|thought|Thought)>.*?(?=<tool_call>|$)', '', message, flags=re.DOTALL | re.IGNORECASE)
+    message = re.sub(r'\|begin_of_thought\|.*?(?=<tool_call>|$)', '', message, flags=re.DOTALL | re.IGNORECASE)
+    
+    return message.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -851,19 +859,19 @@ You must:
         if self.valves.ENABLE_KNOWLEDGE_AGENT:
             virtual_agents["knowledge_agent"] = {
                 "model": self.valves.KNOWLEDGE_AGENT_MODEL or model_id,
-                "description": "Built-in knowledge, notes, and chat history retrieval subagent. Can search and read notes, knowledge bases, and past conversations.",
+                "description": "Built-in knowledge, notes, chat history, and user memory retrieval subagent. Can search and read notes, knowledge bases, and past conversations.",
                 "system_message": (
-                    "You are a specialized knowledge retrieval subagent. Your role is to search through notes, knowledge bases, and chat history to find relevant information. "
+                    "You are a specialized knowledge retrieval subagent. Your role is to search through notes, knowledge bases, user memory, and chat history to find relevant information. "
                     "Use the available search and retrieval tools to find the information requested. "
                     "Return the relevant findings clearly and completely in your response."
                 ),
                 "features": {},
                 "type": "builtin",
-                "builtin_model_override": {"info": {"meta": {"builtinTools": {**_all_builtins_off, "knowledge": True, "chats": True, "notes": True, "channels": True}}}},
+                "builtin_model_override": {"info": {"meta": {"builtinTools": {**_all_builtins_off, "memory": True, "knowledge": True, "chats": True, "notes": True, "channels": True}}}},
             }
             subagents_list.append("knowledge_agent")
             subagent_descriptions.append(
-                "- ID: knowledge_agent (Name: Knowledge Agent)\n  Description: Built-in knowledge, notes, and chat history retrieval subagent. Can search and read notes, knowledge bases, and past conversations."
+                "- ID: knowledge_agent (Name: Knowledge Agent)\n  Description: Built-in knowledge, notes, chat history, and user memory retrieval subagent. Can search and read notes, knowledge bases, user memory, and past conversations."
             )
 
         if self.valves.ENABLE_CODE_INTERPRETER_AGENT:
@@ -1417,7 +1425,10 @@ You must:
                                     kwargs = {}
                                     param_matches = re.findall(r'<parameter\s*=\s*"?([^>"]+)"?>(.*?)(?=</parameter>|<parameter\s*=|</function>|$)', tc_data, re.DOTALL)
                                     for p_name, p_val in param_matches:
-                                        kwargs[p_name.strip()] = p_val.strip()
+                                        # Clean thinking from parameter values to prevent UI breakage
+                                        val = clean_thinking_tags(p_val.strip())
+                                        val = THINKING_TAG_CLEANER_PATTERN.sub('', val).strip()
+                                        kwargs[p_name.strip()] = val
                                         
                                     tool_calls_dict[f"xml_{xml_count}"] = {
                                         "id": str(uuid4()),
@@ -1635,18 +1646,8 @@ You must:
 
                     args = self.resolve_dict_references(args, action_results)
 
-                    # Build a compact version of arguments for the <details> tag attributes
-                    # to prevent long choices arrays / prompts from breaking HTML rendering
-                    try:
-                        display_args = json.loads(arguments_str)
-                        for k, v in display_args.items():
-                            if isinstance(v, str) and len(v) > 60:
-                                display_args[k] = v[:57] + "..."
-                            elif isinstance(v, list) and len(v) > 3:
-                                display_args[k] = v[:3] + [f"... +{len(v) - 3} more"]
-                        display_arguments_str = json.dumps(display_args, ensure_ascii=False)
-                    except Exception:
-                        display_arguments_str = arguments_str
+                    # Use full arguments for the planner's UI tool call tags
+                    display_arguments_str = arguments_str
 
                     # Emit "Executing..." tag
                     executing_tag = self._build_tool_call_details(call_id, function_name, display_arguments_str, done=False)
@@ -1800,7 +1801,10 @@ You must:
                                             kwargs = {}
                                             param_matches = re.findall(r'<parameter\s*=\s*"?([^>"]+)"?>(.*?)(?=</parameter>|<parameter\s*=|</function>|$)', tc_data, re.DOTALL)
                                             for p_name, p_val in param_matches:
-                                                kwargs[p_name.strip()] = p_val.strip()
+                                                # Clean thinking from subagent parameter values too
+                                                val = clean_thinking_tags(p_val.strip())
+                                                val = THINKING_TAG_CLEANER_PATTERN.sub('', val).strip()
+                                                kwargs[p_name.strip()] = val
                                                 
                                             sub_tc_dict[idx] = {
                                                 "id": str(uuid4()),
