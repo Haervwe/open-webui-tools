@@ -4,7 +4,8 @@ description: Edit/transform images using ComfyUI workflows (Flux Kontext or Qwen
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.1
+version: 0.2.2
+required_open_webui_version: 0.8.11
 license: MIT
 """
 
@@ -16,7 +17,7 @@ import logging
 import aiohttp
 import io
 
-from typing import Any, Dict, Optional, Callable, Awaitable, List, Literal
+from typing import Any, Dict, Optional, Callable, Awaitable, List, Literal, Tuple, Union
 from urllib.parse import quote
 from pydantic import BaseModel, Field
 from fastapi import UploadFile
@@ -564,7 +565,7 @@ class Tools:
         __user__: Optional[Dict[str, Any]] = None,
         __request__: Optional[Any] = None,
         __messages__: Optional[List[Dict[str, Any]]] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Edit or transform images using AI-powered workflows. Images are automatically extracted from the user's message.
 
@@ -818,8 +819,12 @@ class Tools:
     </div>
 </body>
 </html>"""
-                return HTMLResponse(
-                    content=html_content, headers={"content-disposition": "inline"}
+                return (
+                    HTMLResponse(
+                        content=html_content,
+                        headers={"Content-Disposition": "inline"},
+                    ),
+                    f"Image transformation complete and displayed above. Download link: {image_url}",
                 )
             else:
                 return f"✅ Image transformation complete!\n\n**Download:** [Edited Image]({image_url})\n\n**Direct link:** {image_url}"

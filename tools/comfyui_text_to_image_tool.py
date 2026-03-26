@@ -4,7 +4,8 @@ description: Generate images using ComfyUI Qwen Image workflow. Uses ComfyUI HTT
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.1
+version: 0.2.2
+required_open_webui_version: 0.8.11
 license: MIT
 """
 
@@ -16,7 +17,7 @@ import time
 import uuid
 import aiohttp
 
-from typing import Any, Dict, Optional, Callable, Awaitable, List
+from typing import Any, Dict, Optional, Callable, Awaitable, List, Tuple, Union
 from urllib.parse import quote
 from pydantic import BaseModel, Field
 from fastapi import UploadFile
@@ -338,7 +339,7 @@ class Tools:
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __user__: Optional[Dict[str, Any]] = None,
         __request__: Optional[Any] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Generate an image from a text prompt using ComfyUI Qwen Image workflow.
 
@@ -568,10 +569,13 @@ class Tools:
 </body>
 </html>"""
 
-            return HTMLResponse(
-                content=html_content,
-                media_type="text/html",
-                headers={"content-disposition": "inline"},
+            return (
+                HTMLResponse(
+                    content=html_content,
+                    media_type="text/html",
+                    headers={"content-disposition": "inline"},
+                ),
+                f"Image generated successfully and displayed above. Download link: {image_url}",
             )
 
         except Exception as e:

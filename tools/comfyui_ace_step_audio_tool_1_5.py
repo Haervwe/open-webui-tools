@@ -6,14 +6,15 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.3
+version: 0.5.4
+required_open_webui_version: 0.8.11
 """
 
 import json
 import io
 import re
 import random
-from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union
+from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union, Tuple
 import aiohttp
 import asyncio
 import uuid
@@ -1014,7 +1015,7 @@ class Tools:
         __user__: Dict[str, Any] = {},
         __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Generate music using ACE Step 1.5 with extended parameters.
 
@@ -1242,14 +1243,21 @@ class Tools:
                     palette_seed=palette_seed,
                     colorful=user_valves.colorful_player,
                 )
-                await __event_emitter__(
-                    {"type": "embeds", "data": {"embeds": [final_html]}}
+                track_links = " | ".join(
+                    f"[{t['title']}]({t['url']})" for t in track_list
                 )
-                message = "The audio player has been successfully embedded above. Inform the user that their song is ready to listen to or download in the above UI component."
+                return (
+                    HTMLResponse(
+                        content=final_html,
+                        headers={"Content-Disposition": "inline"},
+                    ),
+                    {"message": message, "tracks": track_list}
+                )
             else:
-                message += " to use the following download links:"
-
-            return {"message": message, "tracks": track_list}
+                track_links = "\n".join(
+                    f"- [{t['title']}]({t['url']})" for t in track_list
+                )
+                return f"Song '{song_title}' generated successfully!\n\nDownload links:\n{track_links}"
 
         except Exception as e:
             if __event_emitter__:

@@ -6,13 +6,15 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 version: 1.1.0
 license: MIT
+required_open_webui_version: 0.8.11
 """
 
 import uuid
-from typing import Optional, Dict, Any, Callable, Awaitable, Literal
+from typing import Optional, Dict, Any, Callable, Awaitable, Literal, Tuple, Union
 from datetime import datetime, timezone, timedelta
 import aiohttp
 from pydantic import BaseModel, Field
+from fastapi.responses import HTMLResponse
 
 
 def _generate_weather_embed(
@@ -613,7 +615,7 @@ class Tools:
         self,
         location: str,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Get the current weather and forecast for a given location.
 
@@ -696,8 +698,21 @@ class Tools:
             f"\nForecast:\n{daily_summary}"
         )
 
-        # Emit the weather widget
-        if self.valves.show_weather_embed and __event_emitter__:
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Weather data loaded!", "done": True},
+                }
+            )
+
+        tool_result_message = (
+            "The weather widget has been successfully embedded above. "
+            "Use the following data to give the user a natural language summary:\n\n"
+            + text_summary
+        )
+
+        if self.valves.show_weather_embed:
             embed_html = _generate_weather_embed(
                 current,
                 hourly_items,
@@ -707,23 +722,12 @@ class Tools:
                 self.valves.units,
                 tz,
             )
-            await __event_emitter__(
-                {
-                    "type": "embeds",
-                    "data": {"embeds": [embed_html]},
-                }
+            return (
+                HTMLResponse(
+                    content=embed_html,
+                    headers={"Content-Disposition": "inline"},
+                ),
+                tool_result_message,
             )
 
-        if __event_emitter__:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {"description": "Weather data loaded!", "done": True},
-                }
-            )
-
-        return (
-            "The weather widget has been successfully embedded above. "
-            "Use the following data to give the user a natural language summary:\n\n"
-            + text_summary
-        )
+        return tool_result_message

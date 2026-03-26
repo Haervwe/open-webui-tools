@@ -6,19 +6,19 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 version: 1.0.0
 license: MIT
-required_open_webui_version: 0.8.10
+required_open_webui_version: 0.8.11
 """
 
 import random
 import re
 import json
 import logging
-from typing import Optional, Dict, Any, Callable, Awaitable, List
+from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple, Union
 from pydantic import BaseModel, Field
 from open_webui.routers.images import image_generations, GenerateImageForm
 from open_webui.models.users import Users
-from open_webui.models.notes import Notes, NoteForm, NoteUpdateForm
 from fastapi import Request
+from fastapi.responses import HTMLResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rpg_tool_set")
@@ -1111,21 +1111,56 @@ return (function() {{
         btn.style.animation = 'rpgChoicePulse 0.6s ease';
         setTimeout(() => {{
           cleanup();
-          resolve(JSON.stringify({{ choice: choice, index: idx }}));
+          resolve(JSON.stringify({{ choice: choice, index: idx, is_custom: false }}));
         }}, 300);
       }};
       choicesWrap.appendChild(btn);
     }});
 
+    // Custom response section
+    const customDivider = document.createElement('div');
+    customDivider.style.cssText = 'display:flex;align-items:center;gap:12px;margin:16px 0 12px;animation:rpgChoiceSlideUp 0.4s cubic-bezier(0.2,0.8,0.3,1) ' + (CHOICES.length * 80 + 300) + 'ms both;';
+    customDivider.innerHTML = '<div style="flex:1;height:1px;background:rgba(255,255,255,0.08);"></div><div style="font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:1.5px;">or</div><div style="flex:1;height:1px;background:rgba(255,255,255,0.08);"></div>';
+    panel.appendChild(customDivider);
+
+    const customWrap = document.createElement('div');
+    customWrap.style.cssText = 'display:flex;gap:8px;animation:rpgChoiceSlideUp 0.4s cubic-bezier(0.2,0.8,0.3,1) ' + (CHOICES.length * 80 + 400) + 'ms both;';
+    const customInput = document.createElement('input');
+    customInput.type = 'text';
+    customInput.placeholder = 'Type your own action...';
+    customInput.style.cssText = 'flex:1;padding:12px 16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.3);color:#f0f0f0;font-size:14px;font-family:inherit;outline:none;transition:border-color 0.2s;';
+    customInput.onfocus = () => {{ customInput.style.borderColor = 'rgba(230,126,34,0.4)'; }};
+    customInput.onblur = () => {{ customInput.style.borderColor = 'rgba(255,255,255,0.1)'; }};
+    const customBtn = document.createElement('button');
+    customBtn.textContent = '\\u27A4';
+    customBtn.style.cssText = 'width:44px;height:44px;border-radius:12px;background:rgba(230,126,34,0.2);border:1px solid rgba(230,126,34,0.3);color:#e67e22;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;flex-shrink:0;';
+    customBtn.onmouseenter = () => {{ customBtn.style.background = 'rgba(230,126,34,0.35)'; customBtn.style.borderColor = 'rgba(230,126,34,0.5)'; }};
+    customBtn.onmouseleave = () => {{ customBtn.style.background = 'rgba(230,126,34,0.2)'; customBtn.style.borderColor = 'rgba(230,126,34,0.3)'; }};
+    function submitCustom() {{
+      const val = customInput.value.trim();
+      if (!val) return;
+      customBtn.style.background = 'rgba(230,126,34,0.5)';
+      setTimeout(() => {{
+        cleanup();
+        resolve(JSON.stringify({{ choice: val, index: -1, is_custom: true }}));
+      }}, 200);
+    }}
+    customBtn.onclick = submitCustom;
+    customInput.onkeydown = (e) => {{ if (e.key === 'Enter') {{ e.stopPropagation(); submitCustom(); }} }};
+    customWrap.appendChild(customInput);
+    customWrap.appendChild(customBtn);
+    panel.appendChild(customWrap);
+
     const keyHandler = (e) => {{
       if (e.key === 'Escape') {{ cleanup(); resolve(null); }}
+      if (document.activeElement === customInput) return;
       // Allow keyboard selection with number keys or letter keys
       const keyIdx = e.key.charCodeAt(0) - 65;
       const numIdx = parseInt(e.key) - 1;
       const idx = (keyIdx >= 0 && keyIdx < CHOICES.length) ? keyIdx : ((numIdx >= 0 && numIdx < CHOICES.length) ? numIdx : -1);
       if (idx >= 0 && idx < CHOICES.length) {{
         cleanup();
-        resolve(JSON.stringify({{ choice: CHOICES[idx], index: idx }}));
+        resolve(JSON.stringify({{ choice: CHOICES[idx], index: idx, is_custom: false }}));
       }}
     }};
     document.addEventListener('keydown', keyHandler);
@@ -1140,11 +1175,12 @@ return (function() {{
 """
 
 
-def generate_choice_embed(prompt_text: str, selected: str, accent: str) -> str:
+def generate_choice_embed(prompt_text: str, selected: str, accent: str, is_custom: bool = False) -> str:
     """Generate a small embed showing the player's choice."""
     safe_prompt = _esc(prompt_text)
     safe_choice = _esc(selected)
     pid = f"rpgc{random.randint(100000, 999999)}"
+    badge = '<span style="font-size:9px;font-weight:700;color:#e67e22;background:rgba(230,126,34,0.15);border:1px solid rgba(230,126,34,0.25);border-radius:4px;padding:1px 6px;margin-left:8px;vertical-align:middle;">CUSTOM</span>' if is_custom else ''
     return f"""
 <div style="display:flex;justify-content:center;width:100%;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
 <div style="position:relative;overflow:hidden;border-radius:14px;max-width:400px;width:100%;
@@ -1154,7 +1190,7 @@ def generate_choice_embed(prompt_text: str, selected: str, accent: str) -> str:
   <div style="position:relative;z-index:2;padding:16px 20px;">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
       <span style="font-size:16px;">&#9876;&#65039;</span>
-      <div style="font-size:8px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:{accent};opacity:0.8;">Player Choice</div>
+      <div style="font-size:8px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:{accent};opacity:0.8;">Player Choice{badge}</div>
     </div>
     <div style="font-size:12px;color:#999;margin-bottom:8px;font-style:italic;">{safe_prompt}</div>
     <div style="padding:10px 14px;border-radius:10px;background:rgba(230,126,34,0.12);
@@ -1362,11 +1398,12 @@ class Tools:
         context: str = "",
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Roll dice for the PLAYER with a 3D animated overlay. The player physically clicks to roll and accepts the result.
         ONLY use this when the player character performs an action that requires a dice check (attacks, saves, skill checks, etc.).
         NEVER use this for NPC or GM rolls — use quick_roll instead.
+        After narrating the roll outcome, if the player needs to decide what to do next, you MUST call present_choices — NEVER write options as text.
 
         :param notation: Dice notation (e.g. "2d20+5", "4d6", "1d100", "3d8-2").
         :param context: What the roll is for — always provide this (e.g. "Strength check to break the door", "Attack roll vs Goblin").
@@ -1436,10 +1473,6 @@ class Tools:
             result = roll_dice_server(notation)
 
         if __event_emitter__:
-            embed_html = generate_roll_embed(result, context)
-            await __event_emitter__(
-                {"type": "embeds", "data": {"embeds": [embed_html]}}
-            )
             await __event_emitter__(
                 {
                     "type": "status",
@@ -1451,9 +1484,21 @@ class Tools:
         if context:
             text = f"**{context}:** {text}"
 
+        tool_result_message = (
+            "[TOOL RESULT — UI RENDERED] A visual dice roll embed is NOW VISIBLE to the player in the chat. "
+            "The player can already see the dice, the rolls, and the total. "
+            "DO NOT list the roll numbers or total again — just narrate what happens as a result. "
+            "NEXT STEP: If the player needs to decide what to do, you MUST call present_choices. NEVER write options as text.\n\n"
+            + text
+        )
+
+        embed_html = generate_roll_embed(result, context)
         return (
-            "The dice roll result has been displayed in the embed above. "
-            "Use the following to narrate the outcome:\n\n" + text
+            HTMLResponse(
+                content=embed_html,
+                headers={"Content-Disposition": "inline"},
+            ),
+            tool_result_message,
         )
 
     async def create_character(
@@ -1462,11 +1507,12 @@ class Tools:
         __user__: dict[str, Any] | None = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Open the interactive character creation form. The player fills in their name, race, class, level, and rolls ability scores.
         Call this at the START of a new campaign or when the player explicitly wants to create/re-create a character.
         Returns a rendered character sheet card and structured text data for you to use throughout the session.
+        IMPORTANT: After this tool returns, you MUST call present_choices for the player's first decision. NEVER write options as text.
         """
         if __event_emitter__:
             await __event_emitter__(
@@ -1532,10 +1578,6 @@ class Tools:
                 logger.error(f"Image generation failed: {e}")
 
         if __event_emitter__:
-            embed_html = generate_character_embed(char_data)
-            await __event_emitter__(
-                {"type": "embeds", "data": {"embeds": [embed_html]}}
-            )
             await __event_emitter__(
                 {
                     "type": "status",
@@ -1544,9 +1586,20 @@ class Tools:
             )
 
         text = format_character_text(char_data)
+        tool_result_message = (
+            "[TOOL RESULT — UI RENDERED] A visual character sheet card is NOW VISIBLE to the player in the chat. "
+            "The player can already see their name, race, class, stats, HP, and AC. "
+            "DO NOT restate the full stat block — briefly acknowledge the character and immediately call present_choices for the next decision.\n\n"
+            + text
+        )
+
+        embed_html = generate_character_embed(char_data)
         return (
-            "The character sheet has been displayed in the embed above. "
-            "Use the following data for the RPG scenario:\n\n" + text
+            HTMLResponse(
+                content=embed_html,
+                headers={"Content-Disposition": "inline"},
+            ),
+            tool_result_message,
         )
 
     async def quick_roll(
@@ -1555,11 +1608,12 @@ class Tools:
         context: str = "",
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Instantly roll dice for NPCs, monsters, and GM-driven events — NO player interaction needed.
         Use this for enemy attack rolls, NPC saves, random encounter tables, damage from traps, etc.
         The result is shown as a visual embed but the player does NOT click anything.
+        After narrating the roll outcome, if the player needs to decide what to do next, you MUST call present_choices — NEVER write options as text.
 
         :param notation: Dice notation (e.g. "1d20+5", "2d6", "1d100").
         :param context: What the roll is for — always provide this (e.g. "Goblin attack roll", "Trap damage", "Wandering monster check").
@@ -1575,10 +1629,6 @@ class Tools:
         result = roll_dice_server(notation)
 
         if __event_emitter__:
-            embed_html = generate_roll_embed(result, context)
-            await __event_emitter__(
-                {"type": "embeds", "data": {"embeds": [embed_html]}}
-            )
             await __event_emitter__(
                 {
                     "type": "status",
@@ -1590,173 +1640,21 @@ class Tools:
         if context:
             text = f"**{context}:** {text}"
 
-        return (
-            "The dice roll result has been displayed in the embed above. "
-            "Use the following to narrate the outcome:\n\n" + text
+        tool_result_message = (
+            "[TOOL RESULT — UI RENDERED] A visual dice roll embed is NOW VISIBLE to the player in the chat. "
+            "The player can already see the dice, the rolls, and the total. "
+            "DO NOT list the roll numbers or total again — just narrate what happens as a result. "
+            "NEXT STEP: If the player needs to decide what to do, you MUST call present_choices. NEVER write options as text.\n\n"
+            + text
         )
 
-    async def save_rpg_session(
-        self,
-        session_name: str,
-        character_data: str,
-        game_notes: str,
-        __user__: dict[str, Any] | None = None,
-        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
-        """
-        Persist the current campaign state so the player can resume later.
-        Call this when the player asks to save, at natural story breakpoints, or before ending a session.
-        Saves character sheet + story progress + inventory + quest log to Open WebUI Notes.
-
-        :param session_name: Campaign/session name (e.g. "Curse of Strahd", "Dragon's Lair"). Keep it consistent across saves.
-        :param character_data: Full character JSON or text — include abilities, HP, level, inventory, conditions.
-        :param game_notes: Current story state — location, active quests, NPCs met, recent events, party inventory.
-        """
-        if not __user__:
-            return "Requires user context to save session."
-
-        session_name = session_name.replace("RPG Session: ", "").strip()
-
-        if __event_emitter__:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"Saving session '{session_name}'...",
-                        "done": False,
-                    },
-                }
-            )
-
-        try:
-            note_form = NoteForm(
-                title=f"RPG Session: {session_name}",
-                data={
-                    "character_data": character_data,
-                    "game_notes": game_notes,
-                    "type": "rpg_session",
-                },
-            )
-
-            existing_notes = Notes.get_notes_by_user_id(__user__["id"])
-            session_note = None
-            for n in existing_notes:
-                if n.title == f"RPG Session: {session_name}":
-                    session_note = n
-                    break
-
-            if session_note:
-                Notes.update_note_by_id(
-                    session_note.id, NoteUpdateForm(data=note_form.data)
-                )
-                result_str = f"Session updated! Full Title: 'RPG Session: {session_name}' (ID: {session_note.id}). Always refer to this session simply as '{session_name}' in future tools."
-            else:
-                new_note = Notes.insert_new_note(__user__["id"], note_form)
-                result_str = f"Session saved! Full Title: 'RPG Session: {session_name}' (ID: {new_note.id}). Always refer to this session simply as '{session_name}' in future tools."
-
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {"description": result_str, "done": True},
-                    }
-                )
-            return result_str
-
-        except Exception as e:
-            logger.error(f"Failed to save RPG session: {e}")
-            return f"Error saving session: {e}"
-
-    async def load_rpg_session(
-        self,
-        session_name: str,
-        __user__: dict[str, Any] | None = None,
-        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
-        """
-        Resume a previously saved campaign. Call this when the player wants to continue an existing adventure.
-        Returns the full character sheet and story state so you can pick up where you left off.
-
-        :param session_name: The campaign name to load (e.g. "Curse of Strahd"). If unsure, call with a best guess — the tool will list available sessions if not found.
-        """
-        if not __user__:
-            return "Requires user context to load session."
-
-        session_name = session_name.replace("RPG Session: ", "").strip()
-
-        if __event_emitter__:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"Loading session '{session_name}'...",
-                        "done": False,
-                    },
-                }
-            )
-
-        try:
-            existing_notes = Notes.get_notes_by_user_id(__user__["id"])
-            for n in existing_notes:
-                if n.title == f"RPG Session: {session_name}":
-                    data = n.data or {}
-                    char_data = data.get("character_data", "No character data found.")
-                    notes = data.get("game_notes", "No game notes found.")
-
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": f"Loaded session '{session_name}'.",
-                                    "done": True,
-                                },
-                            }
-                        )
-
-                    return f"Successfully loaded session '{session_name}'.\n\nCharacter Data:\n{char_data}\n\nGame Notes:\n{notes}"
-
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"Session '{session_name}' not found.",
-                            "done": True,
-                        },
-                    }
-                )
-            available = [
-                n.title.replace("RPG Session: ", "")
-                for n in existing_notes
-                if n.title.startswith("RPG Session:")
-            ]
-            available_str = ", ".join(available) if available else "None"
-            return f"Session '{session_name}' not found. Available sessions: {available_str}"
-
-        except Exception as e:
-            logger.error(f"Failed to load RPG session: {e}")
-            return f"Error loading session: {e}"
-
-    async def update_rpg_session(
-        self,
-        session_name: str,
-        character_data: str,
-        game_notes: str,
-        __user__: dict[str, Any] | None = None,
-        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
-        """
-        Update an existing saved campaign with current state. Use this after significant events:
-        leveling up, acquiring items, completing quests, HP changes, new story developments.
-        Overwrites the previous save for this session name.
-
-        :param session_name: The campaign name (must match the original save name exactly).
-        :param character_data: Updated character JSON/text — include all current stats, inventory, conditions.
-        :param game_notes: Updated story state — current location, quest progress, NPCs, recent events.
-        """
-        return await self.save_rpg_session(
-            session_name, character_data, game_notes, __user__, __event_emitter__
+        embed_html = generate_roll_embed(result, context)
+        return (
+            HTMLResponse(
+                content=embed_html,
+                headers={"Content-Disposition": "inline"},
+            ),
+            tool_result_message,
         )
 
     async def present_choices(
@@ -1766,12 +1664,15 @@ class Tools:
         context: str = "",
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
-        Present the player with interactive clickable choices. Use this to make the RPG feel alive and give the player agency.
-        Perfect for: branching story paths, dialogue options, combat action selection, exploration choices, NPC interactions.
-        Call this INSTEAD of asking the player to type a choice — let them click.
-        Returns the player's selection as text you can use to continue the narrative.
+        Present the player with interactive clickable choices. YOU MUST CALL THIS TOOL every time the player needs to make a decision.
+        NEVER write choices, options, bullet points, numbered lists, or "what do you do?" prompts as text in your message.
+        Writing options as text instead of calling this tool is FORBIDDEN — it breaks the interactive experience.
+        The overlay includes clickable buttons AND a free-text input for custom actions, so the player always has full freedom.
+
+        WHEN TO CALL: After narrating a scene, after combat results, after NPC dialogue, after any event where the player must decide.
+        HOW TO USE: Write your narrative, then stop writing and call this tool. Do NOT add text after the tool call.
 
         :param prompt_text: The question or situation to present (e.g. "The corridor splits into three passages. Which do you take?").
         :param choices: JSON array of choice strings, 2-6 options (e.g. '["Take the left passage", "Take the right passage", "Go back"]').
@@ -1794,6 +1695,7 @@ class Tools:
             return "Error: provide at least 2 choices as a JSON array."
 
         selected = None
+        is_custom = False
 
         if __event_call__:
             try:
@@ -1817,8 +1719,10 @@ class Tools:
                         try:
                             parsed = json.loads(data)
                             selected = parsed.get("choice", data)
+                            is_custom = parsed.get("is_custom", False)
                         except json.JSONDecodeError:
                             selected = data
+                            is_custom = True
             except Exception as e:
                 logger.warning(f"RPG Tool: choice selector failed ({e})")
 
@@ -1826,13 +1730,6 @@ class Tools:
             return "The player did not make a choice (overlay was dismissed)."
 
         if __event_emitter__:
-            # Emit a small embed showing what was chosen
-            palette_seed = random.randint(0, 9999999)
-            c0, c1, c2, c3, c4 = _rpg_palette(palette_seed)
-            embed_html = generate_choice_embed(prompt_text, selected, c0)
-            await __event_emitter__(
-                {"type": "embeds", "data": {"embeds": [embed_html]}}
-            )
             await __event_emitter__(
                 {
                     "type": "status",
@@ -1840,9 +1737,31 @@ class Tools:
                 }
             )
 
+        if is_custom:
+            tool_result_message = (
+                f"[TOOL RESULT — UI RENDERED] The choice overlay was shown and the player typed a CUSTOM action: **{selected}**\n\n"
+                f"A choice embed showing their selection is NOW VISIBLE in the chat. The player has already chosen.\n"
+                f"DO NOT repeat the choices, DO NOT list options, DO NOT ask 'what do you do?' — just narrate what happens next.\n"
+                f"This was not one of the suggested options — the player is being creative. "
+                f"Honor their intent and adapt the narrative. If another decision point comes up, call present_choices again."
+            )
+        else:
+            tool_result_message = (
+                f"[TOOL RESULT — UI RENDERED] The choice overlay was shown and the player selected: **{selected}**\n\n"
+                f"A choice embed showing their selection is NOW VISIBLE in the chat. The player has already chosen.\n"
+                f"DO NOT repeat the choices, DO NOT list options, DO NOT ask 'what do you do?' — just narrate what happens next.\n"
+                f"If another decision point comes up, call present_choices again."
+            )
+
+        palette_seed = random.randint(0, 9999999)
+        c0, c1, c2, c3, c4 = _rpg_palette(palette_seed)
+        embed_html = generate_choice_embed(prompt_text, selected, c0, is_custom)
         return (
-            f"The player chose: **{selected}**\n\n"
-            f"Continue the narrative based on this choice. Be descriptive and immersive."
+            HTMLResponse(
+                content=embed_html,
+                headers={"Content-Disposition": "inline"},
+            ),
+            tool_result_message,
         )
 
     async def confirm_action(
@@ -1852,12 +1771,13 @@ class Tools:
         cancel_label: str = "No, back away",
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Ask the player for a dramatic yes/no confirmation before a risky or consequential action.
         Use this for: opening cursed items, entering dangerous areas, making irreversible deals,
         triggering traps, confronting powerful enemies, accepting quests with consequences.
         Builds tension and gives the player a moment to reconsider.
+        After narrating the outcome, if the player needs to decide what to do next, you MUST call present_choices — NEVER write options as text.
 
         :param prompt_text: The dramatic question (e.g. "The chest radiates dark energy. Do you dare open it?").
         :param confirm_label: Text for the confirm button (e.g. "Open the chest", "Accept the deal").
@@ -1902,13 +1822,6 @@ class Tools:
             return "The player did not respond (overlay was dismissed). Treat as hesitation — describe them pausing uncertainly."
 
         if __event_emitter__:
-            palette_seed = random.randint(0, 9999999)
-            c0, c1, c2, c3, c4 = _rpg_palette(palette_seed)
-            action = confirm_label if confirmed else cancel_label
-            embed_html = generate_confirm_embed(prompt_text, confirmed, action, c0)
-            await __event_emitter__(
-                {"type": "embeds", "data": {"embeds": [embed_html]}}
-            )
             await __event_emitter__(
                 {
                     "type": "status",
@@ -1917,12 +1830,30 @@ class Tools:
             )
 
         if confirmed:
-            return (
-                f"The player chose to proceed: **{confirm_label}**\n\n"
-                f"Narrate the consequences — they committed to this action. Be dramatic and immersive."
+            tool_result_message = (
+                f"[TOOL RESULT — UI RENDERED] The confirmation overlay was shown and the player chose to proceed: **{confirm_label}**\n\n"
+                f"A confirmation embed is NOW VISIBLE in the chat. The player has already decided.\n"
+                f"DO NOT repeat the question or options, DO NOT list choices as text.\n"
+                f"Narrate the consequences — they committed to this action. "
+                f"If another decision point comes up, call present_choices again."
             )
         else:
-            return (
-                f"The player chose to back away: **{cancel_label}**\n\n"
-                f"Narrate their hesitation or retreat. The danger still looms but they avoided it for now."
+            tool_result_message = (
+                f"[TOOL RESULT — UI RENDERED] The confirmation overlay was shown and the player chose to back away: **{cancel_label}**\n\n"
+                f"A confirmation embed is NOW VISIBLE in the chat. The player has already decided.\n"
+                f"DO NOT repeat the question or options, DO NOT list choices as text.\n"
+                f"Narrate their hesitation or retreat. The danger still looms but they avoided it for now. "
+                f"If another decision point comes up, call present_choices again."
             )
+
+        palette_seed = random.randint(0, 9999999)
+        c0, c1, c2, c3, c4 = _rpg_palette(palette_seed)
+        action = confirm_label if confirmed else cancel_label
+        embed_html = generate_confirm_embed(prompt_text, confirmed, action, c0)
+        return (
+            HTMLResponse(
+                content=embed_html,
+                headers={"Content-Disposition": "inline"},
+            ),
+            tool_result_message,
+        )

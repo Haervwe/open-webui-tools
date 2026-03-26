@@ -4,7 +4,8 @@ description: Tool to generate speech using VibeVoice workflows via ComfyUI API. 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.1
+version: 1.1.2
+required_open_webui_version: 0.8.11
 """
 
 import os
@@ -13,7 +14,7 @@ import uuid
 import asyncio
 import aiohttp
 
-from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union
+from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union, Tuple
 from pydantic import BaseModel, Field
 from open_webui.models.users import Users
 from fastapi.responses import HTMLResponse
@@ -814,7 +815,7 @@ class Tools:
         __user__: Dict[str, Any] = {},
         __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Generate natural, expressive speech from text using voice cloning.
 
@@ -960,8 +961,12 @@ class Tools:
                 html_content = generate_audio_player_embed(
                     audio_url, text, speaker_info, "Single Speaker"
                 )
-                return HTMLResponse(
-                    content=html_content, headers={"content-disposition": "inline"}
+                return (
+                    HTMLResponse(
+                        content=html_content,
+                        headers={"Content-Disposition": "inline"},
+                    ),
+                    f"Speech audio generated successfully and embedded above. Download link: {audio_url}",
                 )
             else:
                 return f"Audio generated successfully!\n\nDownload: {audio_url}"
@@ -983,7 +988,7 @@ class Tools:
         __user__: Dict[str, Any] = {},
         __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
                 Generate dynamic multi-speaker conversations with distinct cloned voices.
 
@@ -1138,8 +1143,12 @@ class Tools:
                 html_content = generate_audio_player_embed(
                     audio_url, text, speaker_info, "Multi-Speaker"
                 )
-                return HTMLResponse(
-                    content=html_content, headers={"content-disposition": "inline"}
+                return (
+                    HTMLResponse(
+                        content=html_content,
+                        headers={"Content-Disposition": "inline"},
+                    ),
+                    f"Multi-speaker speech audio generated successfully and embedded above. Download link: {audio_url}",
                 )
             else:
                 return f"Audio generated successfully!\n\nDownload: {audio_url}"

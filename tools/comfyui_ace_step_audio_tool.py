@@ -4,12 +4,13 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.1
+version: 1.1.2
+required_open_webui_version: 0.8.11
 """
 
 import json
 import random
-from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union
+from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union, Tuple
 import aiohttp
 import asyncio
 import uuid
@@ -793,7 +794,7 @@ class Tools:
         __user__: Dict[str, Any] = {},
         __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
                 Tool used to generate music with AI local backend
                 Tags (prompt)
@@ -995,14 +996,15 @@ class Tools:
                         html_player = generate_audio_player_embed(
                             local_audio_url, song_title, tags, lyrics
                         )
-                        response = HTMLResponse(
-                            content=html_player,
-                            headers={"content-disposition": "inline"},
+                        return (
+                            HTMLResponse(
+                                content=html_player,
+                                headers={"Content-Disposition": "inline"},
+                            ),
+                            f"Song '{song_title}' generated successfully! The audio player is embedded above. Download link: {local_audio_url}",
                         )
                     else:
-                        response = f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({local_audio_url})\n\n**Direct link:** {local_audio_url}"
-
-                    return response
+                        return f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({local_audio_url})\n\n**Direct link:** {local_audio_url}"
                 else:
                     # Fallback to ComfyUI direct link if download fails
                     subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
@@ -1023,14 +1025,15 @@ class Tools:
                         html_player = generate_audio_player_embed(
                             comfyui_url, song_title, tags, lyrics
                         )
-                        response = HTMLResponse(
-                            content=html_player,
-                            headers={"content-disposition": "inline"},
+                        return (
+                            HTMLResponse(
+                                content=html_player,
+                                headers={"Content-Disposition": "inline"},
+                            ),
+                            f"Song '{song_title}' generated successfully! The audio player is embedded above. Download link: {comfyui_url}",
                         )
                     else:
-                        response = f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({comfyui_url})\n\n**Direct link:** {comfyui_url}"
-
-                    return response
+                        return f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({comfyui_url})\n\n**Direct link:** {comfyui_url}"
             else:
                 outputs_json = json.dumps(job_data.get("outputs", {}), indent=2)
                 if __event_emitter__:
