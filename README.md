@@ -30,7 +30,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 
 ### 🔄 **Function Pipes**
 
-- **Planner Agent v2** - Advanced autonomous agent with specialized models, interactive guidance, and comprehensive execution management
+- **Planner Agent v3** - Advanced autonomous agent with agentic planning, multi-agent delegation, and real-time visual execution tracking
 - **arXiv Research MCTS** - Advanced research with Monte Carlo Tree Search
 - **Multi Model Conversations v2** - Multi-agent discussions with interactive UI, tool support, and improved reasoning handling
 - **Resume Analyzer** - Professional resume analysis
@@ -112,7 +112,7 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 13. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
 14. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
 15. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-16. [Planner Agent v2](#planner-agent-v2)
+16. [Planner Agent v3](#planner-agent-v3)
 17. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
 18. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
 19. [Resume Analyzer Pipe](#resume-analyzer-pipe)
@@ -943,99 +943,74 @@ Generate high-quality videos from text prompts or a single image using Google Ve
 
 ---
 
-### Planner Agent v2
+### Planner Agent v3
 
-**Advanced autonomous agent with specialized model support, interactive user guidance, and comprehensive execution management.**
+**Advanced autonomous agent with agentic planning, multi-agent delegation, and real-time visual execution tracking.**
 
-This powerful agent autonomously generates and executes multi-step plans to achieve complex goals. It's a generalist agent capable of handling any text-based task, making it ideal for complex requests that would typically require multiple prompts and manual intervention.
+The Planner Agent v3 is a state-of-the-art autonomous system designed for Open WebUI. It transforms complex user requests into structured, executable plans, delegating specialized tasks to a fleet of subagents while providing interactive feedback and visual progress updates.
 
 ### 🚀 Key Features
 
-* **🧠 Intelligent Planning:** Automatically breaks down goals into actionable steps with dependency mapping
-* **🎨 Specialized Models:** Dedicated models for writing (WRITER_MODEL), coding (CODER_MODEL), and tool usage (ACTION_MODEL) with automatic routing
-* **🔍 Quality Control:** Real-time output analysis with quality scoring (0.0-1.0) and iterative improvement
-* **🎭 Interactive Error Handling:** When actions fail or produce low-quality outputs, the system pauses and prompts you with options: retry with custom guidance/instructions, retry as-is, approve current output despite warnings, or abort the entire plan execution
-* **📊 Live Progress:** Real-time Mermaid diagrams with color-coded status indicators
-* **🧩 Template System:** Final synthesis using `{{action_id}}` placeholders for seamless content assembly
-* **🔧 Native Tool Integration:** Automatically discovers and uses all available Open WebUI tools
-* **⚡ Advanced Features:** Lightweight context mode, concurrent execution, cross-action references (`@action_id`), and comprehensive validation
-* **🔮 MCP(OpenAPI servers) Support:** Model Context Protocol integration coming soon for extended tool capabilities
+* **🧠 Agentic Planning:** Automatically decomposes high-level goals into a dependency-aware task tree.
+* **📂 Thread-Persistent Subagents:** Delegates tasks to specialized models while maintaining conversation history for follow-ups and complex iterations.
+* **🌐 Built-in Virtual Agents:**
+    - **Web Search Agent**: Real-time research and information synthesis.
+    - **Image Gen Agent**: High-quality image generation and AI-powered editing.
+    - **Knowledge Agent**: Instant retrieval from your documents, notes, and user memory.
+    - **Code Interpreter Agent**: Sandboxed Python execution and multi-language content generation.
+    - **Terminal Agent**: Direct system terminal access for file manipulation and environment management.
+* **📊 Live Execution State:** A beautiful, real-time HTML interface (brain icon) showing current task status (Pending, In-Progress, Completed, Failed).
+* **🎭 Interactive User Guidance:** Special tools like `ask_user` and `give_options` allow the agent to pause and request clarification or choices through native UI modals.
+* **🔗 Result Injection (@task_id):** Seamlessly inject large subagent outputs into any prompt or final response using simple text macros.
+* **🔍 Cross-Task Review:** Spawn "Reviewer" subagents to evaluate and synthesize data across multiple completed tasks.
 
-### ⚙️ Configuration
+### ⚙️ Configuration (Valves)
 
-**Core Models:**
+> [!IMPORTANT]
+> **Model ID & Feature Configuration**
+> - **Base Models**: Found in **Admin Panel > Settings > Models**. These are the raw model IDs (e.g., `qwen2.5:7b`, `gpt-4o`).
+>     - **Essential for**: `PLANNER_MODEL` (Mandatory).
+>     - **Fallback Support**: `REVIEW_MODEL`, `TERMINAL_AGENT_MODEL`, and all **Virtual Agent Models** will fallback to the `PLANNER_MODEL` if left blank. However, if specified, they **must** be Base Models (not workspace presets).
+> - **Workspace Models (Presets)**: Found in **Workspace > Models**. These are custom presets with specific personas and settings.
+>     - **Used for**: `SUBAGENT_MODELS`. This is where you configure specific **Knowledge Base access**, custom tool features, and specialized system prompts for your subagents.
 
-- `MODEL`: Main planning LLM
-- `ACTION_MODEL`: Tool-based actions and general tasks  
-- `WRITER_MODEL`: Creative writing and documentation
-- `CODER_MODEL`: Code generation and development
+#### 🔄 Tool Inheritance & Virtual Agents
+The Planner V3 features a smart tool inheritance logic:
+- **Delegation Mode**: If a Virtual Agent (e.g., `web_search_agent`) is **enabled** in the Planner Valves, the planner will delegate tasks to that specialized subagent using its own configuration.
+- **Inherent Mode**: If a Virtual Agent is **disabled**, the Planner itself "inherits" those capabilities (if the Planner's Base Model/Admin tool settings allow it) and performs the task directly without delegation.
 
-**Temperature Controls:**
+**Core Valves:**
+- `PLANNER_MODEL`: The "brain" driving the planning and delegation logic.
+- `SUBAGENT_MODELS`: A comma-separated list of model IDs available for delegation.
+- `OPEN_WEBUI_URL`: Required for subagents (like Code Interpreter or Terminal) to access hosted files in the Open WebUI backend (e.g., via `curl`) when operating in non-local environments.
+- `TASK_RESULT_LIMIT`: Maximum character length for subagent results before they are middle-truncated (if truncation is enabled).
 
-- `PLANNING_TEMPERATURE` (0.8): Planning creativity
-- `ACTION_TEMPERATURE` (0.7): Tool execution precision
-- `WRITER_TEMPERATURE` (0.9): Creative writing freedom
-- `CODER_TEMPERATURE` (0.3): Code generation accuracy
-- `ANALYSIS_TEMPERATURE` (0.4): Output analysis precision
+**User-Level Controls (User Valves):**
+- `PLAN_MODE`: Whether to use the structured planning phase with visual task tracking. When disabled, the agent delegates directly to subagents without creating a formal plan.
+- `ENABLE_PLAN_APPROVAL`: When enabled, the planner pauses after generating a plan and waits for user approval/feedback before starting execution.
+- `TASK_RESULT_TRUNCATION`: Toggle whether subagent outputs should be truncated in the chat to save context and UI space. (Full results always available via `@task_id` or `read_task_result`).
+- `YOLO_MODE`: Disables all iteration limits and confirmation prompts for fully autonomous, long-running agentic workflows.
+- `ENABLE_USER_INPUT_TOOLS`: Enable/Disable the interactive `ask_user` and `give_options` modals.
 
-**Execution Settings:**
+### 💡 Visual Walkthrough
 
-- `MAX_RETRIES` (3): Retry attempts per action
-- `CONCURRENT_ACTIONS` (1): Parallel processing limit
-- `ACTION_TIMEOUT` (300): Individual action timeout
-- `SHOW_ACTION_SUMMARIES` (true): Detailed execution summaries
-- `AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT` (false): AI-enhanced requirements
+![Planner V3 Demo](img/planner_v3_final_result_screencast.gif)
+*Screencast of Planner V3 in action: Automated planning, subagent execution, and final multi-media synthesis.*
 
-### 💡 Usage Examples
+![Live Execution](img/planner_v3_live_execution.png)
+*Real-time monitoring of subagent tasks and planning progress.*
 
+![Configuration Valves](img/planner_v3_configuration_valves.png)
+*Extensive configuration options to tailor the agentic behavior.*
 
-**Multi-Media Content:**
+![Interactive Give Options](img/planner_v3_interactive_give_options.png)
+*Autonomous agents requesting user choice through interactive UI modals.*
 
-```
-search the latest AI news and create a song based on that, with that , search for stock images to use a “album cover” and create a mockup of the spotify in a plain html file with vanilla js layout using those assets embeded for interactivity
-```
+![Detailed Thought Trace](img/planner_v3_detailed_thought_trace.png)
+*Deep visibility into the agent's reasoning process and tool interactions.*
 
-![Planner Agent Example](img/planner_2.png)
-*Example of Planner Agent in action Using Gemini 2.5 flash and local music generation*
-
-
-**Creative Writing:**
-
-```
-create an epic sci fi Adult novel based on the current trends on academia news and social media about AI and other trending topics, with at least 10 chapters, well crafter world with rich characters , save each chapter in a folter named as the novel in obsidian with an illustration
-```
-
-![Planner Agent Example](img/planner_3.png)
-*Example of Planner Agent in action Using Gemini 2.5 flash and local image generation, local saving to obsidian and websearch*
-
-
-**Interactive Error Recovery:**
-The Planner Agent features intelligent error handling that engages with users when actions fail or produce suboptimal results. When issues occur, the system pauses execution and presents you with interactive options:
-
-- **Retry with Guidance:** Provide custom instructions to help the agent understand what went wrong and how to improve
-- **Retry As-Is:** Attempt the action again without modifications
-- **Approve Output:** Accept warning-level outputs despite quality concerns
-- **Abort Execution:** Stop the entire plan if the issue is critical
-
-```
-Example scenario: If an action fails to generate proper code or retrieve expected data, 
-you'll be prompted to either provide specific guidance ("try using a different approach") 
-or decide whether to continue with the current output.
-```
-
-![Planner Agent Example](img/planner_error.png)
-*Interactive error recovery dialog showing user options when an action encounters issues during plan execution*
-
-
-
-**Technical Development:**
-
-```
-Create a fully-featured Conway's Game of Life SPA with responsive UI, game controls, and pattern presets using vanilla HTML/CSS/JS
-```
-
-![Planner Agent Example](img/planner.png)
-*Example of Planner Agent in action Using local Hermes 8b (previous verision of the script)*
+![Task Completion and Media Player](img/planner_v3_task_completion_media_player.png)
+*Final output synthesis leveraging specialized subagents (e.g., Music Generation & HTML Layout).*
 
 ---
 

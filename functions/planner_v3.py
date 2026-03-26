@@ -1058,11 +1058,42 @@ class ToolRegistry:
         plan_mode = user_valves.PLAN_MODE
         truncation = user_valves.TASK_RESULT_TRUNCATION
         user_input_enabled = user_valves.ENABLE_USER_INPUT_TOOLS
+        # 1. Virtual Subagents: Always included if enabled in valves
+        virtual_model_ids = []
+        if getattr(self.valves, "ENABLE_IMAGE_GENERATION_AGENT", True):
+            virtual_model_ids.append("image_gen_agent")
+        if getattr(self.valves, "ENABLE_WEB_SEARCH_AGENT", True):
+            virtual_model_ids.append("web_search_agent")
+        if getattr(self.valves, "ENABLE_KNOWLEDGE_AGENT", True):
+            virtual_model_ids.append("knowledge_agent")
+        if getattr(self.valves, "ENABLE_CODE_INTERPRETER_AGENT", True):
+            virtual_model_ids.append("code_interpreter_agent")
+
+        # Terminal agent requires BOTH enablement and a terminal session
+        if getattr(
+            self.valves, "ENABLE_TERMINAL_AGENT", True
+        ) and self.pipe_metadata.get("terminal_id"):
+            virtual_model_ids.append("terminal_agent")
+
+        # 2. Extra Subagents: from SUBAGENT_MODELS list
         subagents_list = (
             self.valves.SUBAGENT_MODELS.split(",")
             if self.valves.SUBAGENT_MODELS
             else []
         )
+
+        # Merge, unique, preserve order
+        final_subagents = []
+        for vid in virtual_model_ids:
+            if vid not in final_subagents:
+                final_subagents.append(vid)
+        for sid in subagents_list:
+            sid = sid.strip()
+            if sid and sid not in final_subagents:
+                final_subagents.append(sid)
+
+        subagents_list = final_subagents
+
         tools_spec = []
 
         # schemas for IDs (no longer using enum to allow dynamic task creation)
@@ -1426,6 +1457,29 @@ class ToolRegistry:
 
 class PromptBuilder:
     @staticmethod
+    def build_subagent_check_prompt(task_id: str, model_id: str, response_text: str) -> str:
+        return f"""You are a quality control judge for an AI subagent ({model_id}) fulfilling a specific task ({task_id}).
+Your goal is to verify if the subagent's FINAL response is complete, accurate, and correctly references all generated assets.
+
+### CRITERIA:
+1. **Task Completion**: Does the response actually answer the user's prompt or fulfill the assigned task?
+2. **Asset Referencing**: If the subagent generated images, files, or used search tools, are the URLs, paths, or source links explicitly provided in the response? (Crucial for the main planner to see them).
+3. **Clarity**: Is the response well-formatted and easy for the main planner to synthesize?
+
+### RESPONSE TO VERIFY:
+---
+{response_text}
+---
+
+### INSTRUCTIONS:
+- You MUST return a JSON object with two fields: "action" and "feedback".
+- If the response is EXCELLENT, set "action" to "approve" and "feedback" to "Lacks nothing.".
+- If the response is LACKING, set "action" to "redo" and provide a detailed instruction in "feedback".
+- The feedback for redo MUST be explicit: "REDO: [Reasons]. Please provide your FULL final response again, including all required links and fixes."
+- Be strict but fair. Do not ask for prose if the task was technical.
+"""
+
+    @staticmethod
     def build_system_prompt(
         valves: Any,
         user_valves: Any,
@@ -1494,10 +1548,12 @@ class PromptBuilder:
             tools_doc = (
                 "1. `update_state(task_id: str, status: str, description: str)`: Add a new task to the plan or modify an existing one. Use this to:\n"
                 "   - **Add Tasks**: If you discover new subgoals during execution.\n"
-                "   - **Rollback**: Move a task back to 'pending' or 'in_progress' if a retry is needed or if a subagent failed but can be corrected.\n"
-                "   - **Manual Completion**: Mark a task as 'completed' or 'failed' ONLY when the task did NOT involve calling a subagent (as `call_subagent` handles state automatically).\n"
+                "   - **Rollback or Retry**: Move a task back to 'pending' or 'in_progress' if a retry is needed or if a subagent failed but can be corrected.\n"
+                "   - **Manual Completion**: Mark a task as 'completed' or 'failed' ONLY when the task did NOT involve calling a subagent. `call_subagent` already handles state transitions automatically.\n"
+                "   - **Avoid Redundancy**: Do NOT call `update_state` to set 'in_progress' or 'completed' for tasks you are delegating via `call_subagent`; observe the 'status' field in the tool response instead.\n"
                 "   - **Constraints**: Always provide a `description` when adding a new `task_id`. For updates, the `description` is optional.\n"
                 "2. `call_subagent(model_id: str, prompt: str, task_id: str, related_tasks: list[str])`: Use this to delegate a subtask to a specialized model.\n"
+                "   - **Task Status Lifecycle**: Starting a `call_subagent` will automatically set the task to 'in_progress' ONLY if it is currently 'pending' or 'failed'. Success automatically marks the task as 'completed'. Check the `status` field in the response.\n"
                 "   - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent. To **continue or follow up** on a previous interaction, you MUST use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.\n"
                 "   - **@task_id Text Replacement**: When you write `@task_id` (e.g., `@task_1`) in a **prompt** or your **final response**, it will be **automatically replaced** with the LAST complete subagent response text for that task_id.\n"
                 "   - **Raw Task ID (no @)**: Use the plain ID (`task_1`) in tool parameters. NEVER prefix with @ in parameter fields.\n"
@@ -1753,6 +1809,83 @@ class SubagentManager:
         self.base_url = base_url
         self.model_knowledge = model_knowledge
 
+    async def _verify_subagent_response(
+        self,
+        task_id: str,
+        model_id: str,
+        response_text: str,
+        valves,
+        user_obj,
+        body,
+    ) -> tuple[bool, str]:
+        """
+        Uses a judge model to verify if the subagent's response is complete and correctly references assets.
+        Returns: (is_approved, redo_instruction)
+        """
+        await self.ui.emit_status(f"Verifying {task_id}...")
+        judge_model = valves.SUBAGENT_CHECK_MODEL or valves.PLANNER_MODEL
+        check_prompt = PromptBuilder.build_subagent_check_prompt(
+            task_id, model_id, response_text
+        )
+
+        check_body = {
+            **body,
+            "model": judge_model,
+            "messages": [{"role": "system", "content": check_prompt}],
+            "stream": False,
+            "tools": None,
+            "tool_choice": None,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "verification",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["approve", "redo"]},
+                            "feedback": {"type": "string"},
+                        },
+                        "required": ["action", "feedback"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        }
+
+        # Call the judge model (non-streaming for simplicity of parsing)
+        judge_response_chunks = []
+        try:
+            async for event in Utils.get_streaming_completion(
+                self.metadata.get("__request__"), check_body, user_obj
+            ):
+                if event["type"] == "content":
+                    judge_response_chunks.append(event["text"])
+                elif event["type"] == "error":
+                    logger.error(f"Subagent verification error: {event['text']}")
+                    return True, ""  # Fail open on judge error
+        except Exception as e:
+            logger.error(f"Subagent verification exception: {e}")
+            return True, ""
+
+        raw_judge_text = "".join(judge_response_chunks).strip()
+        try:
+            # We use extract_json_array's logic prefix but handle it as a dict for this specific case
+            # or just simple json.loads if it's strict
+            data = json.loads(raw_judge_text)
+            action = data.get("action", "approve").lower()
+            feedback = data.get("feedback", "")
+
+            if action == "approve":
+                return True, ""
+            return False, feedback
+        except Exception as e:
+            logger.warning(f"Failed to parse judge JSON: {e}. Raw: {raw_judge_text}")
+            # Fallback to simple string check if JSON parsing fails for some reason
+            if "REDO:" in raw_judge_text.upper():
+                return False, raw_judge_text
+            return True, ""
+
     async def call_subagent(
         self,
         model_id: str,
@@ -1902,6 +2035,29 @@ class SubagentManager:
 
             if not sub_tc_dict:
                 # Loop Terminal - Final Answer found
+                
+                # Subagent Judge Verification (v3 parity extension)
+                if valves.ENABLE_SUBAGENT_CHECK:
+                    current_answer = "".join(sub_final_answer_chunks).strip()
+                    if current_answer:
+                        is_approved, redo_instruction = await self._verify_subagent_response(
+                            task_id,
+                            model_id,
+                            current_answer,
+                            valves,
+                            context["user_obj"],
+                            body,
+                        )
+                        if not is_approved:
+                            history.append({"role": "user", "content": redo_instruction})
+                            await self.ui.emit_status(
+                                f"Refining {model_id} response for {task_id}..."
+                            )
+                            # Reset chunks to avoid double output if the model doesn't repeat everything
+                            # but the prompt asks for FULL response, so we should clear them.
+                            sub_final_answer_chunks = []
+                            continue
+
                 # Reasoning Promotion (v3 parity): Only if NO content AND NO tool calls
                 if not "".join(sub_final_answer_chunks).strip() and turn_result.get(
                     "reasoning"
@@ -2020,6 +2176,7 @@ class SubagentManager:
         )
         structured_response = {
             "task_id": task_id,
+            "status": "completed",
             "called_tools": sub_called_tools,
             "result": result_preview,
         }
@@ -2568,8 +2725,9 @@ class PlannerEngine:
                         reasoning_start_time = time.monotonic()
                     reasoning_chunks.append(piece)
                     reasoning_buffer += piece
-                    # Clean tool calls from reasoning display while preserving thinking text (v4 enhancement)
+                    # Clean tool calls and stray tags from reasoning display
                     display = Utils.hide_tool_calls(reasoning_buffer)
+                    display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
                     display = "\n".join(
                         f"> {l}" if not l.startswith(">") else l
                         for l in display.splitlines()
@@ -2583,7 +2741,6 @@ class PlannerEngine:
 
             elif etype in ["content", "tool_calls"]:
                 if reasoning_buffer:
-                    # Seal the reasoning block
                     # Seal the reasoning block with tool calls stripped
                     dur = (
                         round(time.monotonic() - reasoning_start_time)
@@ -2591,15 +2748,17 @@ class PlannerEngine:
                         else 1
                     )
                     display = Utils.hide_tool_calls(reasoning_buffer)
-                    display = "\n".join(
-                        f"> {l}" if not l.startswith(">") else l
-                        for l in display.splitlines()
-                    )
-                    total_emitted_base += (
-                        f'\n\n<details type="reasoning" done="true" duration="{dur}">\n<summary>Thought for {dur} seconds</summary>\n'
-                        + display
-                        + "\n</details>\n\n"
-                    )
+                    display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
+                    if display.strip():
+                        display = "\n".join(
+                            f"> {l}" if not l.startswith(">") else l
+                            for l in display.splitlines()
+                        )
+                        total_emitted_base += (
+                            f'\n\n<details type="reasoning" done="true" duration="{dur}">\n<summary>Thought for {dur} seconds</summary>\n'
+                            + display
+                            + "\n</details>\n\n"
+                        )
                     reasoning_buffer = ""
                     await self.ui.emit_replace(
                         total_emitted_base + "".join(content_chunks)
@@ -2646,14 +2805,17 @@ class PlannerEngine:
                 else 1
             )
             display = Utils.hide_tool_calls(reasoning_buffer)
-            display = "\n".join(
-                f"> {l}" if not l.startswith(">") else l for l in display.splitlines()
-            )
-            total_emitted_base += (
-                f'\n\n<details type="reasoning" done="true" duration="{dur}">\n<summary>Thought for {dur} seconds</summary>\n'
-                + display
-                + "\n</details>\n\n"
-            )
+            display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
+            if display.strip():
+                display = "\n".join(
+                    f"> {l}" if not l.startswith(">") else l
+                    for l in display.splitlines()
+                )
+                total_emitted_base += (
+                    f'\n\n<details type="reasoning" done="true" duration="{dur}">\n<summary>Thought for {dur} seconds</summary>\n'
+                    + display
+                    + "\n</details>\n\n"
+                )
 
         content, reasoning = "".join(content_chunks), "".join(reasoning_chunks)
 
@@ -2663,33 +2825,6 @@ class PlannerEngine:
 
         # Merge native and XML tool calls
         tc_dict = {**tc_dict, **tc_dict_content, **tc_dict_reasoning}
-
-        # --- Reasoning Cleanup (v3 parity) ---
-        # If we extracted XML tool calls from reasoning, we MUST clean the already-emitted
-        # total_emitted_base to avoid raw XML leaking in the reasoning details block.
-        if tc_dict_reasoning:
-            # Case 1: Reasoning had ONLY XML tool calls (no other real thinking text)
-            #   → Remove the entire reasoning <details> block.
-            if not reasoning.strip():
-                total_emitted_base = re.sub(
-                    r'\n*<details type="reasoning"[^>]*>.*?</details>\n*',
-                    "",
-                    total_emitted_base,
-                    flags=re.DOTALL,
-                ).rstrip()
-            else:
-                # Case 2: mixed content — strip just the <tool_call> tags from the block
-                total_emitted_base = re.sub(
-                    r'(<details type="reasoning"[^>]*>.*?</details>)',
-                    lambda m: re.sub(
-                        r"<tool_call>.*?(?:</tool_call>|$)",
-                        "",
-                        m.group(1),
-                        flags=re.DOTALL,
-                    ),
-                    total_emitted_base,
-                    flags=re.DOTALL,
-                )
 
         return {
             "content": content,
@@ -2755,8 +2890,12 @@ class PlannerEngine:
 
                 elif func_name == "call_subagent":
                     if user_valves.PLAN_MODE:
-                        self.state.update_task(resolved_args["task_id"], "in_progress")
-                        await self.ui.emit_html_embed(self.state.tasks)
+                        current_status = self.state.tasks.get(
+                            resolved_args["task_id"], TaskStateModel(status="pending")
+                        ).status
+                        if current_status in ["pending", "failed"]:
+                            self.state.update_task(resolved_args["task_id"], "in_progress")
+                            await self.ui.emit_html_embed(self.state.tasks)
 
                     res_dict = await self.subagents.call_subagent(
                         resolved_args["model_id"],
@@ -3179,6 +3318,14 @@ class Pipe:
         CODE_INTERPRETER_TEMPERATURE: float = Field(
             default=0.1,
             description="Temperature for the code interpreter subagent. Low values (0.0-0.2) produce more deterministic, accurate code.",
+        )
+        ENABLE_SUBAGENT_CHECK: bool = Field(
+            default=False,
+            description="Enable a judge model to verify subagent responses for task completion and correct asset referencing BEFORE returning to the planner.",
+        )
+        SUBAGENT_CHECK_MODEL: str = Field(
+            default="",
+            description="Model used for subagent verification (leave blank to use the planner model)",
         )
         SYSTEM_PROMPT: str = Field(
             default="""You are an advanced agentic Planner. You have the ability to formulate a plan, act on it by delegating tasks to specialized subagents or using tools, and track your progress.
