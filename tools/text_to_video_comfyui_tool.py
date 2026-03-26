@@ -625,7 +625,7 @@ class Tools:
                 return HTMLResponse(
                     content=html_player,
                     headers={"content-disposition": "inline"},
-                )
+                ), f"🎬 Video generated successfully. Link: {final_url}"
             return f"🎬 Video generated successfully. Link: {final_url}"
 
         except Exception as e:
