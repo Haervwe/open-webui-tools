@@ -3,8 +3,8 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.3.0
-required_open_webui_version: 0.8.11
+version: 3.4.0
+required_open_webui_version: 0.8.12
 """
 
 import ast
