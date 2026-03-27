@@ -3,7 +3,7 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.8.0
+version: 2.9.0
 """
 
 import logging
@@ -287,6 +287,59 @@ class Pipe:
             "manager_model": manager_model,
             "participants": participants,
         }
+
+    def _adapt_history(self, conversation_history: list, alias: str) -> list:
+        """
+        Adapts the conversation history for a specific participant (alias).
+        - Maps other participants' responses to the 'user' role.
+        - Preserves own responses as 'assistant'.
+        - Ensures strictly alternating user/assistant turns by merging consecutive roles.
+        """
+        adapted_history = []
+        alias_norm = self._normalize_alias(alias)
+        
+        for msg in conversation_history:
+            speaker = msg.get("_speaker")
+            speaker_norm = self._normalize_alias(speaker) if speaker else None
+            
+            role = msg.get("role")
+            content = msg.get("content", "")
+            
+            # Determine effective role and content for this participant
+            if speaker_norm:
+                if speaker_norm != alias_norm:
+                    # Other participant's response -> present as user message
+                    role = "user"
+                    content = f"{speaker} says: {content}"
+                else:
+                    # This participant's own past response -> assistant role
+                    role = "assistant"
+                    # Include private tool interaction chain if any
+                    tool_msgs = msg.get("_tool_messages", [])
+                    for tm in tool_msgs:
+                        # Add tool messages as-is (they provide naturally alternating turns)
+                        tm_cleaned = {k: v for k, v in tm.items() if not k.startswith("_")}
+                        adapted_history.append(tm_cleaned)
+            
+            # STRICT TURN ALTERNATION: Merge consecutive messages of the same role
+            # (Excluding 'tool' messages which can be consecutive and expect specific pairing)
+            if (
+                adapted_history 
+                and adapted_history[-1]["role"] == role 
+                and role not in ["tool"]
+                and not adapted_history[-1].get("tool_calls")
+            ):
+                # Merge content with previous message of the same role
+                prev_content = adapted_history[-1].get("content") or ""
+                if prev_content:
+                    adapted_history[-1]["content"] = prev_content + f"\n\n{content}"
+                else:
+                    adapted_history[-1]["content"] = content
+                continue
+            
+            adapted_history.append({"role": role, "content": content})
+            
+        return adapted_history
 
     def _normalize_alias(self, alias: str) -> str:
         cleaned = re.sub(r"[^a-zA-Z0-9]+", " ", (alias or "").lower()).strip()
@@ -921,10 +974,17 @@ return (function() {
             return "Error: No message history found."
 
         if __task__ and __task__ != TASKS.DEFAULT:
-            model = valves.Participant1Model or self.__model__
+            # For tasks like title generation or summarization, use the first participant's context
+            first_participant = participants[0] if participants else {"model": self.__model__, "alias": "Assistant"}
+            target_model = first_participant.get("model", self.__model__)
+            target_alias = first_participant.get("alias", "Assistant")
+            
+            # Adapt history for the target model to ensure strictly alternating turns
+            adapted_task_history = self._adapt_history(conversation_history, target_alias)
+            
             response = await generate_chat_completions(
                 self.__request__,
-                {"model": model, "messages": conversation_history, "stream": False},
+                {"model": target_model, "messages": adapted_task_history, "stream": False},
                 user=self.__user__,
             )
             return f"{name}: {response['choices'][0]['message']['content']}"
@@ -1412,40 +1472,10 @@ return (function() {
 
                     system_prompt = "\n\n".join(system_parts)
 
-                    # Build messages with role-based separation:
-                    # - Other participants' responses → user role with speaker label
-                    # - This participant's own past responses → assistant role
-                    #   (including private tool call messages if any)
-                    adapted_history = []
-                    for msg in conversation_history:
-                        speaker = msg.get("_speaker")
-                        if speaker and speaker != alias:
-                            # Other participant's response → present as user message
-                            # (tool calls are private — only show final text)
-                            adapted_history.append(
-                                {
-                                    "role": "user",
-                                    "content": f"{speaker} says: {msg['content']}",
-                                }
-                            )
-                        elif speaker and speaker == alias:
-                            # This participant's own past response → assistant role
-                            # Include private tool interaction chain if any
-                            tool_msgs = msg.get("_tool_messages", [])
-                            for tm in tool_msgs:
-                                adapted_history.append(
-                                    {k: v for k, v in tm.items() if not k.startswith("_")}
-                                )
-                            adapted_history.append(
-                                {"role": "assistant", "content": msg["content"]}
-                            )
-                        else:
-                            # Original user/system messages → keep as-is
-                            adapted_history.append(msg)
-
+                    # Build messages with role-based separation and strict turn alternation:
                     messages = [
                         {"role": "system", "content": system_prompt}
-                    ] + adapted_history
+                    ] + self._adapt_history(conversation_history, alias)
 
                     await self.emit_status(
                         "info", f"Getting response from: {alias} ({model})...", False
