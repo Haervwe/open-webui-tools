@@ -8,14 +8,20 @@ required_open_webui_version: 0.8.11
 """
 
 import ast
-import logging
+import hashlib
 import json
+import logging
+import os
 import re
 import time
+import uuid
 import html as html_module
 from uuid import uuid4
-from typing import Callable, Awaitable, Any, Optional
+from typing import Callable, Awaitable, Any, Optional, Union, Generator, AsyncGenerator
 from pydantic import BaseModel, Field
+from fastapi import Request, UploadFile
+from starlette.datastructures import Headers
+import io
 
 from open_webui.utils.chat import (
     generate_chat_completion as generate_raw_chat_completion,
@@ -24,6 +30,9 @@ from open_webui.utils.tools import get_tools, get_builtin_tools, get_terminal_to
 from open_webui.utils.middleware import process_tool_result
 from open_webui.models.models import Models
 from open_webui.models.users import Users
+from open_webui.models.files import Files
+from open_webui.models.chats import Chats
+from open_webui.routers.files import upload_file_handler
 
 
 from typing import Dict
@@ -49,6 +58,27 @@ class TaskStateModel(BaseModel):
 # For subagent_history, keep as dict for now (complex key)
 
 ToolCallDict = Dict[str, ToolCallEntryModel]
+
+
+# --- New Agent Models ---
+class AgentDefinition(BaseModel):
+    id: str
+    name: str
+    description: str
+    system_message: str
+    features: Dict[str, bool] = Field(default_factory=dict)
+    type: str = "builtin"  # "builtin" or "terminal"
+    temperature: Optional[float] = None
+    model_id: Optional[str] = None
+    builtin_model_override: Optional[Dict[str, Any]] = None
+
+
+class SubagentTaskResponse(BaseModel):
+    task_id: str
+    status: str = "completed"
+    called_tools: list[dict] = Field(default_factory=list)
+    result: str
+    note: Optional[str] = None
 
 
 name = "Planner"
@@ -77,6 +107,54 @@ logger = setup_logger()
 
 
 class Utils:
+
+    # Regex patterns for cleaning agent XML/thinking tags
+    THINK_OPEN_PATTERN = re.compile(
+        r"<(think|thinking|reason|reasoning|thought|Thought)>|\|begin_of_thought\|",
+        re.IGNORECASE,
+    )
+    THINK_CLOSE_PATTERN = re.compile(
+        r"</(think|thinking|reason|reasoning|thought|Thought)>|\|end_of_thought\|",
+        re.IGNORECASE,
+    )
+    THINKING_TAG_CLEANER_PATTERN = re.compile(
+        r"</?(?:think|thinking|reason|reasoning|thought|Thought)>|\|begin_of_thought\||\|end_of_thought\|",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def distill_history_for_llm(messages: list) -> list:
+        """
+        Cleans and normalizes message history for LLM consumption.
+        - Flattens list-based content (OpenAI/WebUI format) to string.
+        - Strips all UI-only artifacts (<details> tags for reasoning, tools, status).
+        """
+        distilled = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content")
+
+            # 1. Flatten content if it's a list (Open WebUI / OpenAI structured format)
+            if isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                content = "\n".join(text_parts)
+
+            if not isinstance(content, str):
+                content = str(content) if content is not None else ""
+
+            # 2. Strip ALL UI artifacts (reasoning, tool_calls, status, state)
+            # We use a broad regex to catch all <details> blocks as they are UI-specific.
+            content = re.sub(
+                r"<details.*?>.*?</details>", "", content, flags=re.DOTALL
+            ).strip()
+
+            if content:
+                distilled.append({"role": role, "content": content})
+        return distilled
+
     @staticmethod
     def extract_xml_tool_calls(text: str) -> tuple[ToolCallDict, str]:
         """
@@ -84,8 +162,6 @@ class Utils:
         Returns:
             tuple[ToolCallDict, str]: (tool_calls_dict, cleaned_text)
         """
-        import uuid
-
         tool_calls_dict: ToolCallDict = {}
         xml_count = 0
         cleaned_text = text
@@ -145,19 +221,7 @@ class Utils:
             ).strip()
         return tool_calls_dict, cleaned_text
 
-    # Regex patterns for cleaning agent XML/thinking tags
-    THINK_OPEN_PATTERN = re.compile(
-        r"<(think|thinking|reason|reasoning|thought|Thought)>|\|begin_of_thought\|",
-        re.IGNORECASE,
-    )
-    THINK_CLOSE_PATTERN = re.compile(
-        r"</(think|thinking|reason|reasoning|thought|Thought)>|\|end_of_thought\|",
-        re.IGNORECASE,
-    )
-    THINKING_TAG_CLEANER_PATTERN = re.compile(
-        r"</?(?:think|thinking|reason|reasoning|thought|Thought)>|\|begin_of_thought\||\|end_of_thought\|",
-        re.IGNORECASE,
-    )
+
 
     @staticmethod
     def clean_thinking(text: str) -> str:
@@ -486,6 +550,17 @@ class Utils:
             logger.warning(f"JSON array extraction failed path 2: {e}")
 
         return []
+
+    @staticmethod
+    def parse_tool_arguments(args_str: str) -> dict[str, Any]:
+        """Parses tool arguments string into a dictionary, with fallbacks."""
+        try:
+            return json.loads(args_str or "{}")
+        except:
+            try:
+                return ast.literal_eval(args_str)
+            except:
+                return {}
 
 
 # ---------------------------------------------------------------------------
@@ -859,9 +934,9 @@ class UIRenderer:
         await self.emitter({"type": "embeds", "data": {"embeds": [html]}})
 
     def _generate_html_embed(self, planner_state: dict[str, Any]) -> str:
-        import hashlib, time as _time
 
-        embed_id = "pe-" + hashlib.md5(str(_time.monotonic()).encode()).hexdigest()[:8]
+
+        embed_id = "pe-" + hashlib.md5(str(time.monotonic()).encode()).hexdigest()[:8]
 
         status_colors = {
             "pending": "#9ca3af",
@@ -1204,6 +1279,10 @@ class ToolRegistry:
                                 "type": "string",
                                 "description": "Instructions on what to review or extract from these given task IDs",
                             },
+                            "review_id": {
+                                "type": "string",
+                                "description": "Optional virtual ID to reference this review in subsequent tasks (e.g. 'review_1'). Macros @review_1 will be available.",
+                            },
                         },
                         "required": ["task_ids", "prompt"],
                     },
@@ -1302,11 +1381,9 @@ class ToolRegistry:
     async def get_subagent_tools(
         self,
         model_id: str,
-        subagents_list: list[str],
-        virtual_agents: dict[str, Any],
+        virtual_agents: dict[str, AgentDefinition],
         app_models: dict[str, Any],
         extra_params: dict[str, Any],
-        default_model_id: str = None,
     ) -> dict[str, Any]:
         """Fetches tools for subagents, ensuring builtin tools (image gen, search, etc.) are loaded for virtual agents."""
         if model_id in self.subagent_tools_cache:
@@ -1315,31 +1392,26 @@ class ToolRegistry:
         # 1. Virtual Agents Handling
         if model_id in virtual_agents:
             va = virtual_agents[model_id]
-            # ID resolution: priority to va['model'], then default_model_id (Planner Model)
-            va_model_id = va.get("model", default_model_id)
+            va_model_id = va.model_id
 
             # Object resolution: Dict-first, then DB-fallback (parity with v3 better robustness)
             va_runtime_info = app_models.get(va_model_id)
             va_db_info = Models.get_model_by_id(va_model_id)
 
-            # For get_builtin_tools, we need an object-like structure.
-            # If we have a DB object, its model_dump() is a good base.
             va_model_obj = va_runtime_info or va_db_info
 
             s_tools_dict = {}
-            if va["type"] == "terminal":
+            if va.type == "terminal":
                 try:
-                    terminal_id = self.pipe_metadata.get("terminal_id") or va.get(
-                        "terminal_id"
-                    )
+                    terminal_id = self.pipe_metadata.get("terminal_id")
                     s_tools_dict = await get_terminal_tools(
                         self.request, terminal_id, self.user, extra_params
                     )
                 except Exception as e:
                     logger.error(f"Failed to load terminal tools for {model_id}: {e}")
-            elif va["type"] == "builtin":
+            elif va.type == "builtin":
                 # Important: merge the va override with the actual model info to ensure id/name exist
-                builtin_model = va.get("builtin_model_override", {})
+                builtin_model = va.builtin_model_override or {}
                 if not builtin_model and va_model_obj:
                     builtin_model = va_model_obj
                 elif builtin_model and va_model_obj:
@@ -1354,7 +1426,7 @@ class ToolRegistry:
                     s_tools_dict = get_builtin_tools(
                         self.request,
                         extra_params,
-                        features=va.get("features", {}),
+                        features=va.features,
                         model=builtin_model,
                     )
                     logger.info(
@@ -1374,9 +1446,9 @@ class ToolRegistry:
             result = {
                 "dict": s_tools_dict,
                 "specs": s_tools,
-                "system_message": va["system_message"],
+                "system_message": va.system_message,
                 "actual_model": va_model_id,
-                "temperature_override": va.get("temperature"),
+                "temperature_override": va.temperature,
             }
             self.subagent_tools_cache[model_id] = result
             return result
@@ -1457,12 +1529,22 @@ class ToolRegistry:
 
 class PromptBuilder:
     @staticmethod
-    def build_subagent_check_prompt(task_id: str, model_id: str, response_text: str) -> str:
+    def build_subagent_check_prompt(
+        task_id: str,
+        model_id: str,
+        response_text: str,
+        task_description: str = "",
+        planner_input: str = "",
+    ) -> str:
         return f"""You are a quality control judge for an AI subagent ({model_id}) fulfilling a specific task ({task_id}).
 Your goal is to verify if the subagent's FINAL response is complete, accurate, and correctly references all generated assets.
 
+### CONTEXT:
+- **Planner's Goal/Input for Subagent**: {planner_input}
+- **Task Description**: {task_description}
+
 ### CRITERIA:
-1. **Task Completion**: Does the response actually answer the user's prompt or fulfill the assigned task?
+1. **Task Completion**: Does the response actually answer the planner's prompt or fulfill the assigned task?
 2. **Asset Referencing**: If the subagent generated images, files, or used search tools, are the URLs, paths, or source links explicitly provided in the response? (Crucial for the main planner to see them).
 3. **Clarity**: Is the response well-formatted and easy for the main planner to synthesize?
 
@@ -1486,6 +1568,7 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
         tools_spec: list,
         metadata: dict = None,
         mode: str = "execute",
+        messages: list = None,
     ) -> str:
         """Construct the full system prompt with tools and mandatory rules dynamically."""
         full_prompt = valves.SYSTEM_PROMPT
@@ -1499,6 +1582,14 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
         metadata = metadata or {}
         pipe_meta = metadata.get("__metadata__", {})
         terminal_id = pipe_meta.get("terminal_id")
+
+        # Follow-up Detection (v3.3 pattern)
+        # We consider it a follow-up if there are more than 1 user messages in the history.
+        is_follow_up = False
+        if messages:
+            user_msg_count = sum(1 for m in messages if m.get("role") == "user")
+            if user_msg_count > 1:
+                is_follow_up = True
 
         # UI Parity: Always doc virtual agents if enabled in valves, regardless of model features
         if getattr(valves, "ENABLE_IMAGE_GENERATION_AGENT", True):
@@ -1590,16 +1681,20 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
             mandatory_rules += "\n- **RESULT TRUNCATION**: The `result` field in responses may be truncated. The FULL output is available via `@task_id` or `read_task_result(task_id)`."
 
         # 1. Build dynamic blocks
-        full_prompt += f"\n\n### BUILT-IN TOOLS:\n{tools_doc}"
-        full_prompt += f"\n\n{mandatory_rules}"
+        if mode == "execute":
+            full_prompt += f"\n\n### BUILT-IN TOOLS:\n{tools_doc}"
+            full_prompt += f"\n\n{mandatory_rules}"
 
         # 2. Add Mode-Specific Guidelines
         if mode == "plan":
             full_prompt += """
 \n### PLANNING PHASE - ACTIVE
-Your ONLY objective is to analyze the user request and create a detailed planning JSON object.
-- Output: Return STRICTLY a JSON object containing a "tasks" array of objects ([{"task_id": "task_1", "description": "..."}, ...]).
-- Constraint: No prose, greetings, or explanations. Only the raw JSON object.
+Analyze the request and decompose it into a series of logical, executable tasks using the available subagents.
+- **Goal**: Create a step-by-step roadmap to fulfill the user's core objective.
+- **Output Schema**: Return STRICTLY a JSON object: `{"tasks": [{"task_id": "task_1", "description": "..."}, ...]}`.
+- **Task Granularity**: Each task should be an atomic, actionable step (e.g., "Use web_search_agent to find X", "Analyze the results of task_1 to do Y", "Use code_interpreter_agent to build Z").
+- **Subagent Selection**: Describe tasks in terms of the available subagent capabilities if no subagent has the proper capabilities assume the orchestrator has it.
+- **Constraint**: Return ONLY the raw JSON object. NO prose, NO explanations, NO greetings.
 """
         elif mode == "execute":
             full_prompt += """
@@ -1610,7 +1705,6 @@ Your objective is to fulfill the request by executing the established plan.
 - Synthesis: After ALL tasks are finished, provide a clean final response leveraging @task_id macros.
 """
 
-        # 3. User Interaction (DON'T DELETE)
         if user_input_enabled:
             full_prompt += (
                 "\n### USER INTERACTION:\n"
@@ -1619,7 +1713,18 @@ Your objective is to fulfill the request by executing the established plan.
                 "NEVER ask the user a question in plain text — ALWAYS use the appropriate tool instead."
             )
 
-        # 4. Available Subagents
+        # 4. Context Synchronization (Follow-up logic)
+        if is_follow_up:
+            full_prompt += """
+\n### CONTEXT SYNCHRONIZATION
+This turn is a continuation of an active conversation. 
+Your internal task state (PlannerState) has been restored from the previous turn's state file. 
+Analyze the cleaned history to synchronize with the current project status, generated assets, and established logic. 
+Do not repeat research or generations already present in the history.
+Use @task_id references to build upon previous work.
+"""
+
+        # 5. Available Subagents
         full_prompt += f"\n\n### AVAILABLE SUBAGENTS:\n{subagent_descriptions}\n"
 
         return full_prompt
@@ -1631,17 +1736,19 @@ Your objective is to fulfill the request by executing the established plan.
 
 
 class SubagentManager:
-    VIRTUAL_AGENTS = {
-        "image_gen_agent": {
-            "description": "Built-in image generation and editing subagent. Can generate and edit images from text prompts.",
-            "system_message": (
+    VIRTUAL_AGENTS: Dict[str, AgentDefinition] = {
+        "image_gen_agent": AgentDefinition(
+            id="image_gen_agent",
+            name="Image Generation Agent",
+            description="Built-in image generation and editing subagent. Can generate and edit images from text prompts.",
+            system_message=(
                 "You are a specialized image generation subagent. Your role is to generate or edit images based on the user's prompt. "
                 "Use the generate_image tool for creating new images and edit_image for modifying existing ones. "
                 "Always return the image URLs or file paths in your final response so the planner can use them."
             ),
-            "features": {"image_generation": True},
-            "type": "builtin",
-            "builtin_model_override": {
+            features={"image_generation": True},
+            type="builtin",
+            builtin_model_override={
                 "info": {
                     "meta": {
                         "builtinTools": {
@@ -1658,17 +1765,19 @@ class SubagentManager:
                     }
                 }
             },
-        },
-        "web_search_agent": {
-            "description": "Built-in web search subagent. Can search the web and fetch URL content.",
-            "system_message": (
+        ),
+        "web_search_agent": AgentDefinition(
+            id="web_search_agent",
+            name="Web Search Agent",
+            description="Built-in web search subagent. Can search the web and fetch URL content.",
+            system_message=(
                 "You are a specialized web search and research subagent. Your role is to search the web for information and fetch content from URLs. "
                 "Use search_web to find relevant results and fetch_url to retrieve full page content. "
                 "Synthesize and return the relevant information clearly in your response."
             ),
-            "features": {"web_search": True},
-            "type": "builtin",
-            "builtin_model_override": {
+            features={"web_search": True},
+            type="builtin",
+            builtin_model_override={
                 "info": {
                     "meta": {
                         "builtinTools": {
@@ -1685,23 +1794,25 @@ class SubagentManager:
                     }
                 }
             },
-        },
-        "knowledge_agent": {
-            "description": "Built-in knowledge, notes, chat history, and user memory retrieval subagent.",
-            "system_message": (
+        ),
+        "knowledge_agent": AgentDefinition(
+            id="knowledge_agent",
+            name="Knowledge Agent",
+            description="Built-in knowledge, notes, chat history, and user memory retrieval subagent.",
+            system_message=(
                 "You are a specialized knowledge retrieval subagent. Your role is to search through notes, knowledge bases, user memory, and chat history. "
                 "Use the available search and retrieval tools to find the information requested. "
                 "Return the relevant findings clearly and completely in your response."
             ),
-            "features": {
+            features={
                 "knowledge": True,
                 "chats": True,
                 "memory": True,
                 "notes": True,
                 "channels": True,
             },
-            "type": "builtin",
-            "builtin_model_override": {
+            type="builtin",
+            builtin_model_override={
                 "info": {
                     "meta": {
                         "builtinTools": {
@@ -1718,10 +1829,12 @@ class SubagentManager:
                     }
                 }
             },
-        },
-        "code_interpreter_agent": {
-            "description": "Built-in code interpreter subagent. Can generate content in ANY language and execute Python. Executes Python code and returns results. The code_interpreter tool is moved here exclusively.",
-            "system_message": (
+        ),
+        "code_interpreter_agent": AgentDefinition(
+            id="code_interpreter_agent",
+            name="Code Interpreter Agent",
+            description="Built-in code interpreter subagent. Can generate content in ANY language and execute Python. Executes Python code and returns results. The code_interpreter tool is moved here exclusively.",
+            system_message=(
                 "You are a specialized code and content generation subagent. "
                 "You can generate content in ANY language — HTML, CSS, JavaScript, Python, shell scripts, JSON, YAML, and more.\n"
                 "### FILE HANDLING:\n"
@@ -1738,10 +1851,10 @@ class SubagentManager:
                 "- If the task requires a file to be created, return its absolute path in your response.\n"
                 "- For visualizations or plots, save them to a file and return the path."
             ),
-            "features": {"code_interpreter": True},
-            "type": "builtin",
-            "temperature": 0.1,
-            "builtin_model_override": {
+            features={"code_interpreter": True},
+            type="builtin",
+            temperature=0.1,
+            builtin_model_override={
                 "info": {
                     "meta": {
                         "builtinTools": {
@@ -1758,14 +1871,16 @@ class SubagentManager:
                     }
                 }
             },
-        },
-        "terminal_agent": {
-            "description": "Built-in terminal subagent. Can execute commands, read/write files, and interact with the system terminal.",
-            "system_message": (
+        ),
+        "terminal_agent": AgentDefinition(
+            id="terminal_agent",
+            name="Terminal Agent",
+            description="Built-in terminal subagent. Can execute commands, read/write files, and interact with the system terminal.",
+            system_message=(
                 "You are a specialized terminal subagent. Your role is to execute terminal commands, read and write files, and perform system operations.\n"
                 "### FILE HANDLING:\n"
                 "- If the user provides a 'file:///' URI, this is the absolute local path on the backend server. Use it directly in your commands.\n"
-                "- If you see a relative link like '/api/v1/files/uuid', and you need to access it via curl/wget, prepend the base URL: '{OPEN_WEBUI_URL}/api/v1/files/uuid'.\n"
+                "- If you see a relative link like '/api/v1/files/uuid', and you need to access it via <curl/wget>, prepend the base URL: '{OPEN_WEBUI_URL}/api/v1/files/uuid'.\n"
                 "- If you see a relative link like '/files/uuid', and you need to access it, try to find it in the current working directory or subdirectories.\n"
                 "### BEST PRACTICES:\n"
                 "- Use 'ls -F' to distinguish directories from files.\n"
@@ -1773,9 +1888,9 @@ class SubagentManager:
                 "- If a command produces too much output, use 'grep' or 'head' to filter it.\n"
                 "- Always state your reasoning before running a command."
             ),
-            "features": {},
-            "type": "terminal",
-            "builtin_model_override": {
+            features={},
+            type="terminal",
+            builtin_model_override={
                 "info": {
                     "meta": {
                         "builtinTools": {
@@ -1792,7 +1907,7 @@ class SubagentManager:
                     }
                 }
             },
-        },
+        ),
     }
 
     def __init__(
@@ -1800,14 +1915,24 @@ class SubagentManager:
         ui: UIRenderer,
         state: PlannerState,
         metadata: dict[str, Any],
+        valves: Any,
         base_url: str = "",
         model_knowledge: Optional[list[dict]] = None,
     ):
         self.ui = ui
         self.state = state
         self.metadata = metadata
+        self.valves = valves
         self.base_url = base_url
         self.model_knowledge = model_knowledge
+
+        # Resolve virtual agents with fallback model (v3 parity better robustness)
+        self.virtual_agents = {
+            vid: va.model_copy(
+                update={"model_id": va.model_id or valves.PLANNER_MODEL}
+            )
+            for vid, va in self.VIRTUAL_AGENTS.items()
+        }
 
     async def _verify_subagent_response(
         self,
@@ -1817,6 +1942,8 @@ class SubagentManager:
         valves,
         user_obj,
         body,
+        task_description: str = "",
+        planner_input: str = "",
     ) -> tuple[bool, str]:
         """
         Uses a judge model to verify if the subagent's response is complete and correctly references assets.
@@ -1825,7 +1952,7 @@ class SubagentManager:
         await self.ui.emit_status(f"Verifying {task_id}...")
         judge_model = valves.SUBAGENT_CHECK_MODEL or valves.PLANNER_MODEL
         check_prompt = PromptBuilder.build_subagent_check_prompt(
-            task_id, model_id, response_text
+            task_id, model_id, response_text, task_description, planner_input
         )
 
         check_body = {
@@ -1854,37 +1981,58 @@ class SubagentManager:
         }
 
         # Call the judge model (non-streaming for simplicity of parsing)
-        judge_response_chunks = []
-        try:
-            async for event in Utils.get_streaming_completion(
-                self.metadata.get("__request__"), check_body, user_obj
-            ):
-                if event["type"] == "content":
-                    judge_response_chunks.append(event["text"])
-                elif event["type"] == "error":
-                    logger.error(f"Subagent verification error: {event['text']}")
-                    return True, ""  # Fail open on judge error
-        except Exception as e:
-            logger.error(f"Subagent verification exception: {e}")
-            return True, ""
+        max_retries = 1
+        current_retry = 0
 
-        raw_judge_text = "".join(judge_response_chunks).strip()
-        try:
-            # We use extract_json_array's logic prefix but handle it as a dict for this specific case
-            # or just simple json.loads if it's strict
-            data = json.loads(raw_judge_text)
-            action = data.get("action", "approve").lower()
-            feedback = data.get("feedback", "")
-
-            if action == "approve":
+        while current_retry <= max_retries:
+            judge_response_chunks = []
+            try:
+                async for event in Utils.get_streaming_completion(
+                    self.metadata.get("__request__"), check_body, user_obj
+                ):
+                    if event["type"] == "content":
+                        judge_response_chunks.append(event["text"])
+                    elif event["type"] == "error":
+                        logger.error(f"Subagent verification error: {event['text']}")
+                        return True, ""  # Fail open on judge error
+            except Exception as e:
+                logger.error(f"Subagent verification exception: {e}")
                 return True, ""
-            return False, feedback
-        except Exception as e:
-            logger.warning(f"Failed to parse judge JSON: {e}. Raw: {raw_judge_text}")
-            # Fallback to simple string check if JSON parsing fails for some reason
-            if "REDO:" in raw_judge_text.upper():
-                return False, raw_judge_text
-            return True, ""
+
+            raw_judge_text = "".join(judge_response_chunks).strip()
+            try:
+                # We use extract_json_array's logic prefix but handle it as a dict for this specific case
+                # or just simple json.loads if it's strict
+                data = json.loads(raw_judge_text)
+                action = data.get("action", "approve").lower()
+                feedback = data.get("feedback", "")
+
+                if action == "approve":
+                    return True, ""
+                return False, feedback
+            except Exception as e:
+                if current_retry < max_retries:
+                    logger.warning(
+                        f"Failed to parse judge JSON: {e}. Retrying... Raw: {raw_judge_text}"
+                    )
+                    # Corrective prompt
+                    check_body["messages"].append(
+                        {"role": "assistant", "content": raw_judge_text}
+                    )
+                    check_body["messages"].append(
+                        {
+                            "role": "user",
+                            "content": "SYSTEM: Your previous response was not a valid JSON object. Please return ONLY the JSON object following the schema strictly.",
+                        }
+                    )
+                    current_retry += 1
+                    continue
+                else:
+                    logger.warning(f"Failed to parse judge JSON after retries: {e}. Raw: {raw_judge_text}")
+                    # Fallback to simple string check if JSON parsing fails for some reason
+                    if "REDO:" in raw_judge_text.upper():
+                        return False, raw_judge_text
+                    return True, ""
 
     async def call_subagent(
         self,
@@ -1894,7 +2042,7 @@ class SubagentManager:
         related_tasks: list[str],
         chat_id: str,
         valves,
-        body: dict[str, Any],
+        body: dict,
         user_valves,
         extra_params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -1912,7 +2060,7 @@ class SubagentManager:
 
         # 2. Execute Loop
         result = await self._execute_subagent_loop(
-            context, task_id, model_id, chat_id, valves, body, user_valves
+            context, task_id, model_id, chat_id, valves, body, user_valves, planner_input=prompt
         )
 
         return result
@@ -1925,7 +2073,7 @@ class SubagentManager:
         related_tasks: list[str],
         chat_id: str,
         valves,
-        body: dict[str, Any],
+        body: dict,
     ) -> dict[str, Any]:
         """Resolves model info, tools, and constructs the system prompt and initial history."""
         user_obj = self.metadata.get("__user_obj__")
@@ -1941,11 +2089,9 @@ class SubagentManager:
         app_models = getattr(self.metadata.get("__request__").app.state, "MODELS", {})
         sub_info = await registry.get_subagent_tools(
             model_id,
-            [],
-            self.VIRTUAL_AGENTS,
+            self.virtual_agents,
             app_models,
             self.metadata,
-            default_model_id=valves.PLANNER_MODEL,
         )
 
         actual_model = sub_info.get("actual_model", model_id)
@@ -2004,8 +2150,9 @@ class SubagentManager:
         model_id: str,
         chat_id: str,
         valves,
-        body: dict[str, Any],
+        body: dict,
         user_valves,
+        planner_input: str = "",
     ) -> dict[str, Any]:
         """Main tool-calling loop for the subagent."""
         sub_final_answer_chunks = []
@@ -2040,6 +2187,7 @@ class SubagentManager:
                 if valves.ENABLE_SUBAGENT_CHECK:
                     current_answer = "".join(sub_final_answer_chunks).strip()
                     if current_answer:
+                        task_desc = self.state.tasks.get(task_id, TaskStateModel(status="pending")).description
                         is_approved, redo_instruction = await self._verify_subagent_response(
                             task_id,
                             model_id,
@@ -2047,6 +2195,8 @@ class SubagentManager:
                             valves,
                             context["user_obj"],
                             body,
+                            task_description=task_desc,
+                            planner_input=planner_input,
                         )
                         if not is_approved:
                             history.append({"role": "user", "content": redo_instruction})
@@ -2090,80 +2240,25 @@ class SubagentManager:
                 stc_args_str = stc["function"]["arguments"]
                 call_id = stc.get("id")
 
-                try:
-                    stc_args_obj = json.loads(stc_args_str or "{}")
-                except:
-                    try:
-                        stc_args_obj = ast.literal_eval(stc_args_str)
-                    except:
-                        stc_args_obj = {}
+                stc_args_obj = Utils.parse_tool_arguments(stc_args_str)
 
                 target_tool = context["tools_dict"].get(stc_name)
                 if target_tool:
-                    try:
-                        # UI Parity: Emit status and tool call details for subagent (v3 parity)
-                        await self.ui.emit_status(
-                            f"[Subagent: {model_id}] Executing {stc_name}..."
-                        )
-                        tc_tag = self.ui.build_tool_call_details(
-                            call_id, stc_name, stc_args_str, done=False
-                        )
-
-                        tc_res = await target_tool["callable"](**stc_args_obj)
-                        tc_return = process_tool_result(
-                            self.metadata.get("__request__"),
-                            stc_name,
-                            tc_res,
-                            target_tool.get("type", ""),
-                            False,
-                            self.metadata.get("__metadata__"),
-                            context["user_obj"],
-                        )
-                        res_str = tc_return[0] if len(tc_return) > 0 else str(tc_res)
-
-                        truncated_args = {
-                            k: (str(v)[:80] + "..." if len(str(v)) > 80 else str(v))
-                            for k, v in stc_args_obj.items()
-                        }
-                        sub_called_tools.append(
-                            {
-                                "tool": stc_name,
-                                "arguments": truncated_args,
-                                "success": True,
-                            }
-                        )
-                        history.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "name": stc_name,
-                                "content": str(res_str),
-                            }
-                        )
-                    except Exception as e:
-                        sub_called_tools.append(
-                            {"tool": stc_name, "arguments": {}, "success": False}
-                        )
-                        history.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "name": stc_name,
-                                "content": f"Error: {e}",
-                            }
-                        )
+                    await self._execute_subagent_tool_call(
+                        stc_name,
+                        stc_args_str,
+                        stc_args_obj,
+                        call_id,
+                        context,
+                        history,
+                        sub_called_tools,
+                        model_id,
+                    )
                 else:
-                    sub_called_tools.append(
-                        {"tool": stc_name, "arguments": {}, "success": False}
-                    )
-                    history.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "name": stc_name,
-                            "content": f"Error: Tool {stc_name} not found.",
-                        }
-                    )
+                    if await self._handle_missing_tool(
+                        stc_name, stc_args_str, call_id, context, history, sub_called_tools, model_id
+                    ):
+                        break
 
         final_result = "\n".join(sub_final_answer_chunks).strip()
         self.state.store_result(task_id, final_result)
@@ -2332,9 +2427,289 @@ class SubagentManager:
             "error": error_occurred,
         }
 
+    # --- Subagent Helpers ---
+
+    async def _execute_subagent_tool_call(
+        self,
+        name: str,
+        args_str: str,
+        args_obj: dict,
+        call_id: str,
+        context: dict,
+        history: list,
+        sub_called_tools: list,
+        model_id: str,
+    ) -> None:
+        """Executes a single subagent tool call and updates history/states."""
+        target_tool = context["tools_dict"].get(name)
+        try:
+            # UI Parity: Emit status and tool call details
+            await self.ui.emit_status(f"[Subagent: {model_id}] Executing {name}...")
+            # We don't strictly need tc_tag here as in planner, 
+            # but we follow v3's internal logging/status pattern.
+
+            tc_res = await target_tool["callable"](**args_obj)
+            tc_return = process_tool_result(
+                self.metadata.get("__request__"),
+                name,
+                tc_res,
+                target_tool.get("type", ""),
+                False,
+                self.metadata.get("__metadata__"),
+                context["user_obj"],
+            )
+            res_str = tc_return[0] if len(tc_return) > 0 else str(tc_res)
+
+            truncated_args = {
+                k: (str(v)[:80] + "..." if len(str(v)) > 80 else str(v))
+                for k, v in args_obj.items()
+            }
+            sub_called_tools.append(
+                {"tool": name, "arguments": truncated_args, "success": True}
+            )
+            history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": name,
+                    "content": str(res_str),
+                }
+            )
+        except Exception as e:
+            logger.error(f"[Subagent: {model_id}] Error executing {name}: {e}")
+            await self.ui.emit_status(f"[Subagent: {model_id}] Error executing {name}: {e}")
+            sub_called_tools.append({"tool": name, "arguments": {}, "success": False})
+            history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": name,
+                    "content": f"Error: {e}",
+                }
+            )
+
+        
+    async def _handle_missing_tool( 
+        self,
+        name: str,
+        args_str: str,
+        call_id: str,
+        context: dict,
+        history: list,
+        sub_called_tools: list,
+        model_id: str,
+    ) -> bool: # Returns True if it should break the loop due to repeated failures
+        error_msg = f"Tool {name} not found."
+        available_tools = list(context["tools_dict"].keys())
+        if available_tools:
+            error_msg += f" Available tools for this subagent: {', '.join(available_tools)}."
+
+        logger.warning(f"[Subagent: {model_id}] {error_msg} Arguments: {args_str}")
+        await self.ui.emit_status(f"[Subagent: {model_id}] Attempted unknown tool: {name}")
+
+        sub_called_tools.append({"tool": name, "arguments": {}, "success": False})
+
+        # Safety break logic
+        consecutive_failures = 0
+        for h in reversed(history):
+            if h.get("role") == "tool" and "not found" in h.get("content", ""):
+                if h.get("name") == name:
+                    consecutive_failures += 1
+                else: break
+            else: break
+
+        if consecutive_failures >= 3:
+            history.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": f"Error: {error_msg} Repeated failures detected. Please stop or try a different approach.",
+            })
+            await self.ui.emit_status(f"[Subagent: {model_id}] Stopping due to repeated tool failures: {name}")
+            return True
+
+        history.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": name,
+            "content": f"Error: {error_msg}",
+        })
+        return False
+
 
 # Planner Engine (Main Logic)
 # ---------------------------------------------------------------------------
+
+
+class InternalToolExecutor:
+    """Encapsulates the logic for built-in planner tools."""
+
+    def __init__(self, engine: "PlannerEngine"):
+        self.engine = engine
+        self.state = engine.state
+        self.ui = engine.ui
+        self.subagents = engine.subagents
+        self.metadata = engine.metadata
+
+    async def update_state(self, args: dict, user_valves: Any) -> str:
+        self.state.update_task(
+            args["task_id"],
+            args["status"],
+            args.get("description"),
+        )
+        if user_valves.PLAN_MODE:
+            await self.ui.emit_html_embed(self.state.tasks)
+        return f"State updated for {args['task_id']}"
+
+    async def call_subagent(
+        self, args: dict, chat_id: str, valves: Any, body: dict, user_valves: Any
+    ) -> str:
+        if user_valves.PLAN_MODE:
+            current_status = self.state.tasks.get(
+                args["task_id"], TaskStateModel(status="pending")
+            ).status
+            if current_status in ["pending", "failed"]:
+                self.state.update_task(args["task_id"], "in_progress")
+                await self.ui.emit_html_embed(self.state.tasks)
+
+        res_dict = await self.subagents.call_subagent(
+            args["model_id"],
+            args["prompt"],
+            args["task_id"],
+            args.get("related_tasks", []),
+            chat_id,
+            valves,
+            body,
+            user_valves,
+            self.metadata,
+        )
+        self.state.update_task(args["task_id"], "completed")
+        if user_valves.PLAN_MODE:
+            await self.ui.emit_html_embed(self.state.tasks)
+        return res_dict["result"]
+
+    async def ask_user(self, args: dict, valves: Any) -> str:
+        js = self.ui.build_ask_user_js(
+            args.get("prompt_text"),
+            args.get("placeholder", "Type here..."),
+            valves.USER_INPUT_TIMEOUT,
+        )
+        raw = await self.metadata["__event_call__"](
+            {"type": "execute", "data": {"code": js}}
+        )
+        if (
+            isinstance(raw, dict)
+            and "result" not in raw
+            and "value" not in raw
+            and "action" in raw
+        ):
+            res_json = raw
+        else:
+            raw_str = (
+                raw
+                if isinstance(raw, str)
+                else ((raw.get("result") or raw.get("value") or "{}") if raw else "{}")
+            )
+            try:
+                res_json = (
+                    json.loads(raw_str)
+                    if isinstance(raw_str, str) and raw_str.startswith("{")
+                    else {"action": "accept", "value": raw_str}
+                )
+            except:
+                res_json = {"action": "accept", "value": str(raw_str)}
+        return (
+            f"User: {res_json.get('value')}"
+            if res_json.get("action") == "accept"
+            else "User skipped."
+        )
+
+    async def give_options(self, args: dict, valves: Any) -> str:
+        allow_custom = args.get("allow_custom", True)
+        js = self.ui.build_give_options_js(
+            args.get("prompt_text"),
+            args.get("choices", []),
+            args.get("context", ""),
+            valves.USER_INPUT_TIMEOUT,
+            allow_custom=allow_custom,
+        )
+        raw = await self.metadata["__event_call__"](
+            {"type": "execute", "data": {"code": js}}
+        )
+        if (
+            isinstance(raw, dict)
+            and "result" not in raw
+            and "value" not in raw
+            and "action" in raw
+        ):
+            res_json = raw
+        else:
+            raw_str = (
+                raw
+                if isinstance(raw, str)
+                else ((raw.get("result") or raw.get("value") or "{}") if raw else "{}")
+            )
+            try:
+                res_json = (
+                    json.loads(raw_str)
+                    if isinstance(raw_str, str) and raw_str.startswith("{")
+                    else {"action": "accept", "value": raw_str}
+                )
+            except:
+                res_json = {"action": "accept", "value": str(raw_str)}
+        return (
+            f"User selected: {res_json.get('value')}"
+            if res_json.get("action") == "accept"
+            else "User skipped."
+        )
+
+    def read_task_result(self, args: dict) -> str:
+        rid = args.get("task_id", "").lstrip("@")
+        return self.state.results.get(rid, f"Task {rid} not found.")
+
+    async def review_tasks(self, args: dict, valves: Any, body: dict, user_obj: Any) -> str:
+        rt_ids, rt_prompt = args.get("task_ids", []), args.get("prompt", "")
+        if not rt_ids or not rt_prompt:
+            return "Error: must specify task_ids and prompt."
+
+        await self.ui.emit_status("Reviewing tasks cross-reference...")
+        review_sys = "You are a specialized review subagent. Synthesize the following task results logically."
+        for rx in rt_ids:
+            clean_rx = rx.lstrip("@")
+            if clean_rx in self.state.results:
+                review_sys += f"\n\n--- RESULTS FROM TASK {rx} ---\n{self.state.results[clean_rx]}\n--- END OF {rx} ---\n"
+
+        review_body = {
+            **body,
+            "model": valves.REVIEW_MODEL or valves.PLANNER_MODEL,
+            "messages": [
+                {"role": "system", "content": review_sys},
+                {"role": "user", "content": rt_prompt},
+            ],
+            "metadata": self.metadata.get("__metadata__", {}),
+        }
+        res_chunks = []
+        async for ev in Utils.get_streaming_completion(
+            self.metadata.get("__request__"), review_body, user_obj
+        ):
+            if ev["type"] == "content":
+                res_chunks.append(ev["text"])
+
+        final_review = "".join(res_chunks)
+
+        # Virtual ID Support (v3 parity extension)
+        review_id = args.get("review_id")
+        if not review_id:
+            # Generate a generic ID based on existing reviews
+            review_count = sum(
+                1 for k in self.state.results.keys() if k.startswith("review_")
+            )
+            review_id = f"review_{review_count + 1}"
+
+        clean_rid = review_id.lstrip("@")
+        self.state.results[clean_rid] = final_review
+
+        return f"[Review {clean_rid}]:\n{final_review}"
 
 
 class PlannerEngine:
@@ -2353,11 +2728,15 @@ class PlannerEngine:
         self.registry = registry
         self.metadata = metadata
         self.model_knowledge = model_knowledge
+        self.tools = InternalToolExecutor(self)
 
-    async def run(self, chat_id: str, valves: Any, user_valves: Any, body: dict):
+    async def run(self, chat_id: str, valves: Any, user_valves: Any, body: dict, files: list = None) -> Union[str, Generator, AsyncGenerator]:
         """Main entry point for the planner engine. Orchestrates planning, execution, and verification."""
-        self.state.tasks.clear()
-        self.state.results.clear()
+        
+        # 0. State Recovery (v3.3)
+        # We attempt to restore previous turn's state BEFORE clearing.
+        await self._recover_state_from_files(body, chat_id, files)
+        
         user_obj = self.metadata.get("__user_obj__")
 
         # 1. Phase 1: Planning
@@ -2368,8 +2747,215 @@ class PlannerEngine:
         final_answer = await self._phase_execution_loop(
             chat_id, valves, user_valves, user_obj, body
         )
+        
+        # 3. State Persistence (v3.3)
+        # Save state to file and attach to response
+        await self._save_state_to_file(chat_id)
 
         return final_answer
+
+    async def _recover_state_from_files(self, body: dict, chat_id: str, current_files: list = None) -> None:
+        """
+        Scans attached files (current and history) for the latest state file.
+        Prioritizes the absolute latest JSON state file found.
+        """
+        state_file = None
+        
+        # 1. First, check files attached directly to this message
+        if current_files:
+            for f in reversed(current_files):
+                name = f.get("name", f.get("filename", ""))
+                if "planner_state" in name and name.endswith(".json"):
+                    state_file = f
+                    break
+        
+        # 2. If not found in current message, look back through history (explicit DB query)
+        if not state_file:
+            chat_id = self.metadata.get("__chat_id__")
+            if chat_id:
+                logger.info(f"Performing deep history scan for chat {chat_id} via database...")
+                chat_obj = Chats.get_chat_by_id(chat_id)
+                if chat_obj and hasattr(chat_obj, "chat"):
+                    messages_map = chat_obj.chat.get("history", {}).get("messages", {})
+                    # Standard Open WebUI history traversal
+                    current_id = chat_obj.chat.get("history", {}).get("currentId")
+                    
+                    visited = set()
+                    while current_id and current_id not in visited:
+                        visited.add(current_id)
+                        msg = messages_map.get(current_id)
+                        if not msg:
+                            break
+                        
+                        msg_files = msg.get("files")
+                        if msg_files:
+                            for f in reversed(msg_files):
+                                name = f.get("name", f.get("filename", ""))
+                                if "planner_state" in name and name.endswith(".json"):
+                                    state_file = f
+                                    logger.info(f"Successfully recovered state from DB history: {name}")
+                                    break
+                        
+                        if state_file:
+                            break
+                        current_id = msg.get("parentId")
+            
+            # Fallback to body messages if DB query failed or chat_id missing
+            if not state_file:
+                messages = body.get("messages", [])
+                for message in reversed(messages):
+                    msg_files = message.get("files")
+                    if msg_files:
+                        for f in reversed(msg_files):
+                            name = f.get("name", f.get("filename", ""))
+                            if "planner_state" in name and name.endswith(".json"):
+                                state_file = f
+                                break
+                    if state_file:
+                        break
+
+        if not state_file:
+            logger.info("No planner state file found in current turn, database, or history.")
+            return
+
+        try:
+            file_id = state_file.get("file_id") or state_file.get("id")
+            if not file_id:
+                logger.warning(f"State file found but missing ID: {state_file}")
+                return
+            
+            # Use global Files model (Open WebUI)
+            # Defensive check: if Files is somehow None or not available, log it
+            if Files is None:
+                logger.error("Global 'Files' model table is None - cannot recover state.")
+                return
+                
+            file_obj = Files.get_file_by_id(file_id)
+            if not file_obj:
+                logger.warning(f"State file with ID {file_id} not found in database.")
+                return
+            
+            file_path = getattr(file_obj, 'path', None)
+            if not file_path and hasattr(file_obj, 'meta'):
+                file_path = file_obj.meta.get('path')
+            
+            if file_path and os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f_in:
+                    data = json.load(f_in)
+                    
+                # Restore tasks
+                if "tasks" in data:
+                    self.state.tasks.clear()
+                    for tid, tdata in data["tasks"].items():
+                        self.state.update_task(tid, tdata.get("status", "pending"), tdata.get("description", ""))
+                
+                # Restore results
+                if "results" in data:
+                    self.state.results.clear()
+                    self.state.results.update(data["results"])
+                
+                # Restore subagent history
+                if "subagent_history" in data:
+                    self.state.subagent_history.clear()
+                    for key_str, history in data["subagent_history"].items():
+                        try:
+                            # Reconstruct tuple key (chat_id, sub_task_id, model_id)
+                            parts = key_str.split("::")
+                            if len(parts) == 3:
+                                tuple_key = tuple(parts)
+                                self.state.subagent_history[tuple_key] = history
+                        except Exception as parse_err:
+                            logger.error(f"Failed to parse subagent history key {key_str}: {parse_err}")
+                    logger.info(f"Restored {len(self.state.subagent_history)} sub-conversation threads.")
+                
+                status_msg = f"Recovered state from {state_file.get('name', 'latest file')}"
+                logger.info(status_msg)
+                await self.ui.emit_status(status_msg)
+            else:
+                logger.error(f"State file path not found or inaccessible: {file_path}")
+        except Exception as e:
+            logger.error(f"Critical error during state recovery: {e}")
+
+    async def _save_state_to_file(self, chat_id: str):
+        """Serializes current state and emits as a file attachment via upload_file_handler."""
+        emitter = self.metadata.get("__event_emitter__")
+        request = self.metadata.get("__request__")
+        user = self.metadata.get("__user_obj__")
+        
+        if not emitter or not request or not user:
+            return
+
+        try:
+            # Convert tuple keys (chat_id, sub_task_id, model_id) to strings for JSON
+            serialized_history = {}
+            for tuple_key, history in self.state.subagent_history.items():
+                if isinstance(tuple_key, (list, tuple)) and len(tuple_key) == 3:
+                    key_str = "::".join(map(str, tuple_key))
+                    serialized_history[key_str] = history
+
+            state_data = {
+                "tasks": {tid: {"status": t.status, "description": t.description} for tid, t in self.state.tasks.items()},
+                "results": self.state.results,
+                "subagent_history": serialized_history
+            }
+            
+            filename = f"planner_state_{chat_id}.json"
+            content = json.dumps(state_data, ensure_ascii=False).encode('utf-8')
+            
+            # Use in-memory file with proper headers to set content_type
+            file_upload = UploadFile(
+                file=io.BytesIO(content), 
+                filename=filename,
+                headers=Headers({"content-type": "application/json"})
+            )
+            
+            # Call sync as in working examples and confirmed in source
+            file_item = upload_file_handler(
+                request=request, 
+                file=file_upload, 
+                metadata={}, 
+                process=False, 
+                user=user
+            )
+            
+            if file_item:
+                file_id = getattr(file_item, "id", None)
+                if file_id:
+                    file_info = {
+                        "file_id": str(file_id),
+                        "name": filename
+                    }
+                    
+                    # 1. Update the internal list for this turn
+                    internal_files = self.metadata.get("__files__")
+                    if isinstance(internal_files, list):
+                        internal_files.append(file_info)
+
+                    # 2. Synchronize directly with the database for multi-turn persistence
+                    target_chat_id = self.metadata.get("__chat_id__") or chat_id
+                    target_msg_id = self.metadata.get("__message_id__")
+                    
+                    if target_chat_id and target_msg_id:
+                        try:
+                            # Direct DB update (same method used in Doodle Paint)
+                            Chats.add_message_files_by_id_and_message_id(
+                                target_chat_id, 
+                                target_msg_id, 
+                                [file_info]
+                            )
+                            logger.info(f"Successfully persisted state file to chat {target_chat_id} message {target_msg_id}")
+                        except Exception as db_err:
+                            logger.error(f"Failed to synchronize state file with database: {db_err}")
+
+                    # 3. Emit event for immediate UI feedback
+                    await emitter({
+                        "type": "files",
+                        "data": {
+                            "files": [file_info]
+                        }
+                    })
+        except Exception as e:
+            logger.error(f"Failed to save state to file: {e}")
 
     async def _phase_planning(self, valves, user_valves, user_obj, body):
         """Generates the initial task list based on the user prompt."""
@@ -2377,21 +2963,27 @@ class PlannerEngine:
         if user_valves.PLAN_MODE:
             await self.ui.emit_html_embed(self.state.tasks)
 
+        # Prepare context
+        distilled_history = Utils.distill_history_for_llm(body.get("messages", []))
         plan_sys = PromptBuilder.build_system_prompt(
             valves,
             user_valves,
-            self.registry.get_tools_spec(user_obj, user_valves),
+            [],
             metadata=self.metadata,
             mode="plan",
+            messages=distilled_history,
         )
-        messages = [{"role": "system", "content": plan_sys}] + body.get("messages", [])
+        messages = [{"role": "system", "content": plan_sys}] + distilled_history
+
+        json_retries = 0
+        max_json_retries = 1
 
         while True:
             plan_body = {
                 **body,
                 "model": valves.PLANNER_MODEL,
                 "messages": messages,
-                "tools": None,  # Fix tool leakage for Claude
+                "tools": None,
                 "tool_choice": None,
                 "response_format": {
                     "type": "json_schema",
@@ -2440,7 +3032,8 @@ class PlannerEngine:
                     logger.error(err)
                     break
 
-            plan_json = Utils.extract_json_array("".join(plan_chunks))
+            raw_plan_text = "".join(plan_chunks)
+            plan_json = Utils.extract_json_array(raw_plan_text)
             self.state.tasks.clear()
             for task in plan_json:
                 tid, desc = task.get("task_id"), task.get("description")
@@ -2448,8 +3041,22 @@ class PlannerEngine:
                     self.state.update_task(tid, "pending", desc)
 
             if not self.state.tasks:
-                logger.warning("No tasks parsed from plan. Using fallback.")
-                self.state.update_task("task_1", "pending", "Process user request")
+                if json_retries < max_json_retries:
+                    logger.warning(
+                        f"No tasks parsed from plan. Retrying... Raw: {raw_plan_text}"
+                    )
+                    messages.append({"role": "assistant", "content": raw_plan_text})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "SYSTEM: No valid tasks were found in your response. Please provide the plan strictly as a JSON object with a 'tasks' array.",
+                        }
+                    )
+                    json_retries += 1
+                    continue
+                else:
+                    logger.warning("No tasks parsed from plan after retries. Using fallback.")
+                    self.state.update_task("task_1", "pending", "Process user request")
 
             await self.ui.emit_status(
                 f"Plan formed with {len(self.state.tasks)} tasks."
@@ -2506,6 +3113,7 @@ class PlannerEngine:
                                 "content": f"SYSTEM: User provided feedback on the proposed plan: {feedback}. Please provide an updated plan JSON array.",
                             }
                         )
+                        json_retries = 0  # Reset retry counter for new feedback
                         continue
                 except Exception as e:
                     logger.error(f"Plan approval error: {e}")
@@ -2520,6 +3128,7 @@ class PlannerEngine:
         total_emitted = ""
 
         # Prepare context
+        distilled_history = Utils.distill_history_for_llm(body.get("messages", []))
         exec_sys = PromptBuilder.build_system_prompt(
             valves,
             user_valves,
@@ -2528,10 +3137,9 @@ class PlannerEngine:
             ),
             metadata=self.metadata,
             mode="execute",
+            messages=distilled_history,
         )
-        exec_history = [{"role": "system", "content": exec_sys}] + body.get(
-            "messages", []
-        )
+        exec_history = [{"role": "system", "content": exec_sys}] + distilled_history
         tasks_serializable = {
             tid: t.model_dump(mode="json") if hasattr(t, "model_dump") else t.dict()
             for tid, t in self.state.tasks.items()
@@ -2579,7 +3187,8 @@ class PlannerEngine:
                 # Revert to turn_start_base to delete the thinking block from UI (v3 parity)
                 total_emitted = turn_start_base + content
                 await self.ui.emit_replace(total_emitted)
-            elif content:
+            elif content or tc_dict or turn_result.get("reasoning"):
+                # Ensure total_emitted is updated even if content is empty (v3 parity fix for reasoning stripping)
                 total_emitted = turn_emitted
 
             if not tc_dict:
@@ -2677,6 +3286,7 @@ class PlannerEngine:
                 await self.ui.emit_status("Planner stopped by user.", True)
             except Exception as e:
                 logger.error(f"Iteration limit modal error: {e}")
+                return False
         return False
 
     async def _execute_planner_turn(
@@ -2857,15 +3467,7 @@ class PlannerEngine:
                 tc.get("id", str(uuid4())),
             )
 
-            try:
-                args = json.loads(args_str or "{}")
-            except:
-                try:
-                    import ast
-
-                    args = ast.literal_eval(args_str)
-                except:
-                    args = {}
+            args = Utils.parse_tool_arguments(args_str)
 
             resolved_args = Utils.resolve_dict_references(args, self.state.results)
 
@@ -2878,158 +3480,69 @@ class PlannerEngine:
 
             tool_res = ""
             try:
-                if func_name == "update_state":
-                    self.state.update_task(
-                        resolved_args["task_id"],
-                        resolved_args["status"],
-                        resolved_args.get("description"),
-                    )
-                    if user_valves.PLAN_MODE:
-                        await self.ui.emit_html_embed(self.state.tasks)
-                    tool_res = f"State updated for {resolved_args['task_id']}"
-
-                elif func_name == "call_subagent":
-                    if user_valves.PLAN_MODE:
-                        current_status = self.state.tasks.get(
-                            resolved_args["task_id"], TaskStateModel(status="pending")
-                        ).status
-                        if current_status in ["pending", "failed"]:
-                            self.state.update_task(resolved_args["task_id"], "in_progress")
-                            await self.ui.emit_html_embed(self.state.tasks)
-
-                    res_dict = await self.subagents.call_subagent(
-                        resolved_args["model_id"],
-                        resolved_args["prompt"],
-                        resolved_args["task_id"],
-                        resolved_args.get("related_tasks", []),
-                        chat_id,
-                        valves,
-                        body,
-                        user_valves,
-                        self.metadata,
-                    )
-                    self.state.update_task(resolved_args["task_id"], "completed")
-                    if user_valves.PLAN_MODE:
-                        await self.ui.emit_html_embed(self.state.tasks)
-                    tool_res = res_dict["result"]
-
-                elif func_name == "ask_user":
-                    js = self.ui.build_ask_user_js(
-                        resolved_args.get("prompt_text"),
-                        resolved_args.get("placeholder", "Type here..."),
-                        valves.USER_INPUT_TIMEOUT,
-                    )
-                    raw = await self.metadata["__event_call__"](
-                        {"type": "execute", "data": {"code": js}}
-                    )
-                    if (
-                        isinstance(raw, dict)
-                        and "result" not in raw
-                        and "value" not in raw
-                        and "action" in raw
-                    ):
-                        res_json = raw
-                    else:
-                        raw_str = (
-                            raw
-                            if isinstance(raw, str)
-                            else (
-                                (raw.get("result") or raw.get("value") or "{}")
-                                if raw
-                                else "{}"
-                            )
+                match func_name:
+                    case "update_state":
+                        tool_res = await self.tools.update_state(resolved_args, user_valves)
+                    case "call_subagent":
+                        tool_res = await self.tools.call_subagent(
+                            resolved_args, chat_id, valves, body, user_valves
                         )
-                        try:
-                            res_json = (
-                                json.loads(raw_str)
-                                if isinstance(raw_str, str) and raw_str.startswith("{")
-                                else {"action": "accept", "value": raw_str}
-                            )
-                        except:
-                            res_json = {"action": "accept", "value": str(raw_str)}
-                    tool_res = (
-                        f"User: {res_json.get('value')}"
-                        if res_json.get("action") == "accept"
-                        else "User skipped."
-                    )
-
-                elif func_name == "give_options":
-                    allow_custom = resolved_args.get("allow_custom", True)
-                    js = self.ui.build_give_options_js(
-                        resolved_args.get("prompt_text"),
-                        resolved_args.get("choices", []),
-                        resolved_args.get("context", ""),
-                        valves.USER_INPUT_TIMEOUT,
-                        allow_custom=allow_custom,
-                    )
-                    raw = await self.metadata["__event_call__"](
-                        {"type": "execute", "data": {"code": js}}
-                    )
-                    if (
-                        isinstance(raw, dict)
-                        and "result" not in raw
-                        and "value" not in raw
-                        and "action" in raw
-                    ):
-                        res_json = raw
-                    else:
-                        raw_str = (
-                            raw
-                            if isinstance(raw, str)
-                            else (
-                                (raw.get("result") or raw.get("value") or "{}")
-                                if raw
-                                else "{}"
-                            )
+                    case "ask_user":
+                        tool_res = await self.tools.ask_user(resolved_args, valves)
+                    case "give_options":
+                        tool_res = await self.tools.give_options(resolved_args, valves)
+                    case "read_task_result":
+                        tool_res = self.tools.read_task_result(resolved_args)
+                    case "review_tasks":
+                        tool_res = await self.tools.review_tasks(
+                            resolved_args, valves, body, user_obj
                         )
-                        try:
-                            res_json = (
-                                json.loads(raw_str)
-                                if isinstance(raw_str, str) and raw_str.startswith("{")
-                                else {"action": "accept", "value": raw_str}
-                            )
-                        except:
-                            res_json = {"action": "accept", "value": str(raw_str)}
-                    tool_res = (
-                        f"User selected: {res_json.get('value')}"
-                        if res_json.get("action") == "accept"
-                        else "User skipped."
-                    )
+                    case name if name in external_tools_dict:
+                        tool_data = external_tools_dict[name]
+                        allowed_keys = (
+                            tool_data.get("spec", {})
+                            .get("parameters", {})
+                            .get("properties", {})
+                            .keys()
+                        )
+                        filtered_args = {
+                            k: v for k, v in resolved_args.items() if k in allowed_keys
+                        }
+                        res = await tool_data["callable"](**filtered_args)
+                        tc_return = process_tool_result(
+                            self.metadata.get("__request__"),
+                            name,
+                            res,
+                            tool_data.get("type", ""),
+                            False,
+                            self.metadata.get("__metadata__"),
+                            user_obj,
+                        )
+                        tool_res = tc_return[0] if len(tc_return) > 0 else str(res)
+                    case _:
+                        # Tool not found: Log, and provide better feedback to LLM
+                        error_msg = f"Tool {func_name} not found."
 
-                elif func_name == "read_task_result":
-                    rid = resolved_args.get("task_id", "").lstrip("@")
-                    tool_res = self.state.results.get(rid, f"Task {rid} not found.")
+                        available_tools = ["call_subagent", "review_tasks"]
+                        if user_valves.PLAN_MODE:
+                            available_tools.append("update_state")
+                        if user_valves.TASK_RESULT_TRUNCATION:
+                            available_tools.append("read_task_result")
+                        if user_valves.ENABLE_USER_INPUT_TOOLS:
+                            available_tools.extend(["ask_user", "give_options"])
 
-                elif func_name == "review_tasks":
-                    tool_res = await self._tool_review_tasks(
-                        resolved_args, valves, body, user_obj
-                    )
+                        available_tools.extend(list(external_tools_dict.keys()))
+                        error_msg += (
+                            f" Available tools for the current planner session: "
+                            f"{', '.join(available_tools)}."
+                        )
 
-                elif func_name in external_tools_dict:
-                    tool_data = external_tools_dict[func_name]
-                    allowed_keys = (
-                        tool_data.get("spec", {})
-                        .get("parameters", {})
-                        .get("properties", {})
-                        .keys()
-                    )
-                    filtered_args = {
-                        k: v for k, v in resolved_args.items() if k in allowed_keys
-                    }
-                    res = await tool_data["callable"](**filtered_args)
-                    tc_return = process_tool_result(
-                        self.metadata.get("__request__"),
-                        func_name,
-                        res,
-                        tool_data.get("type", ""),
-                        False,
-                        self.metadata.get("__metadata__"),
-                        user_obj,
-                    )
-                    tool_res = tc_return[0] if len(tc_return) > 0 else str(res)
-                else:
-                    tool_res = f"Error: Tool {func_name} not found."
+                        logger.warning(f"[Planner] {error_msg}")
+                        await self.ui.emit_status(f"Attempted unknown tool: {func_name}")
+                        tool_res = f"Error: {error_msg}"
             except Exception as e:
+                logger.error(f"[Planner] Error executing {func_name}: {e}")
+                await self.ui.emit_status(f"Error executing {func_name}")
                 tool_res = f"Error: {e}"
 
             exec_history.append(
@@ -3053,37 +3566,6 @@ class PlannerEngine:
 
         return total_emitted
 
-    async def _tool_review_tasks(
-        self, args: dict, valves: Any, body: dict, user_obj: Any
-    ) -> str:
-        """Helper for the review_tasks tool."""
-        rt_ids, rt_prompt = args.get("task_ids", []), args.get("prompt", "")
-        if not rt_ids or not rt_prompt:
-            return "Error: must specify task_ids and prompt."
-
-        await self.ui.emit_status("Reviewing tasks cross-reference...")
-        review_sys = "You are a specialized review subagent. Synthesize the following task results logically."
-        for rx in rt_ids:
-            clean_rx = rx.lstrip("@")
-            if clean_rx in self.state.results:
-                review_sys += f"\n\n--- RESULTS FROM TASK {rx} ---\n{self.state.results[clean_rx]}\n--- END OF {rx} ---\n"
-
-        review_body = {
-            **body,
-            "model": valves.REVIEW_MODEL or valves.PLANNER_MODEL,
-            "messages": [
-                {"role": "system", "content": review_sys},
-                {"role": "user", "content": rt_prompt},
-            ],
-            "metadata": self.metadata.get("__metadata__", {}),
-        }
-        res_chunks = []
-        async for ev in Utils.get_streaming_completion(
-            self.metadata.get("__request__"), review_body, user_obj
-        ):
-            if ev["type"] == "content":
-                res_chunks.append(ev["text"])
-        return "".join(res_chunks)
 
     async def _phase_verification(
         self,
@@ -3156,71 +3638,89 @@ class PlannerEngine:
             "metadata": self.metadata.get("__metadata__", {}),
         }
 
-        judge_chunks = []
-        reasoning_chunks = []
-        reasoning_start_time = time.monotonic()
+        max_judge_retries = 1
+        current_judge_retry = 0
 
-        async for ev in Utils.get_streaming_completion(
-            self.metadata.get("__request__"), judge_body, user_obj
-        ):
-            etype = ev["type"]
-            if etype == "reasoning":
-                reasoning_chunks.append(ev.get("text", ""))
-            elif etype == "content":
-                judge_chunks.append(ev["text"])
+        while current_judge_retry <= max_judge_retries:
+            judge_chunks = []
+            reasoning_chunks = []
+            reasoning_start_time = time.monotonic()
 
-        try:
-            # Clean thinking tags from judge output before JSON parsing
-            raw = Utils.clean_thinking("".join(judge_chunks))
-            reasoning = "".join(reasoning_chunks)
+            async for ev in Utils.get_streaming_completion(
+                self.metadata.get("__request__"), judge_body, user_obj
+            ):
+                etype = ev["type"]
+                if etype == "reasoning":
+                    reasoning_chunks.append(ev.get("text", ""))
+                elif etype == "content":
+                    judge_chunks.append(ev["text"])
 
-            brace_start = raw.find("{")
-            if brace_start != -1:
-                judge_res = json.loads(raw[brace_start:])
-                updated = False
-                for upd in judge_res.get("updates", []):
-                    tid, status = upd.get("task_id"), upd.get("status")
-                    if tid in self.state.tasks and status in ["completed", "failed"]:
-                        self.state.update_task(tid, status, upd.get("description"))
-                        updated = True
+            try:
+                # Clean thinking tags from judge output before JSON parsing
+                raw = Utils.clean_thinking("".join(judge_chunks))
+                reasoning = "".join(reasoning_chunks)
 
-                if updated:
-                    await self.ui.emit_html_embed(self.state.tasks)
+                brace_start = raw.find("{")
+                if brace_start != -1:
+                    judge_res = json.loads(raw[brace_start:])
+                    updated = False
+                    for upd in judge_res.get("updates", []):
+                        tid, status = upd.get("task_id"), upd.get("status")
+                        if tid in self.state.tasks and status in ["completed", "failed"]:
+                            self.state.update_task(tid, status, upd.get("description"))
+                            updated = True
 
-                follow_up = judge_res.get("follow_up_prompt", "").strip()
-                still_incomplete = [
-                    tid
-                    for tid, info in self.state.tasks.items()
-                    if info.status not in ["completed", "failed"]
-                ]
+                    if updated:
+                        await self.ui.emit_html_embed(self.state.tasks)
 
-                if still_incomplete and follow_up:
-                    exec_history.append(
+                    follow_up = judge_res.get("follow_up_prompt", "").strip()
+                    still_incomplete = [
+                        tid
+                        for tid, info in self.state.tasks.items()
+                        if info.status not in ["completed", "failed"]
+                    ]
+
+                    if still_incomplete and follow_up:
+                        exec_history.append(
+                            {
+                                "role": "user",
+                                "content": f"SYSTEM: The following tasks are still incomplete: {', '.join(still_incomplete)}. {follow_up}",
+                            }
+                        )
+
+                        # If judge proposed a follow-up, show its reasoning as a "Thought" block (v3/v4 hybrid)
+                        if reasoning.strip():
+                            dur = round(time.monotonic() - reasoning_start_time)
+                            display = "\n".join(
+                                f"> {l}" if not l.startswith(">") else l
+                                for l in reasoning.splitlines()
+                            )
+                            total_emitted += (
+                                f'\n\n<details type="reasoning" done="true" duration="{dur}">\n<summary>Judge Verification Feedback</summary>\n'
+                                + display
+                                + "\n</details>\n\n"
+                            )
+
+                        await self.ui.emit_status("Continuing based on judge feedback...")
+                        return True, total_emitted
+                    break
+                else:
+                    raise ValueError(f"No JSON brace found in judge response: {raw}")
+            except Exception as e:
+                if current_judge_retry < max_judge_retries:
+                    logger.warning(f"Judge verification parsing failed: {e}. Retrying...")
+                    judge_body["messages"].append({"role": "assistant", "content": "".join(judge_chunks)})
+                    judge_body["messages"].append(
                         {
                             "role": "user",
-                            "content": f"SYSTEM: The following tasks are still incomplete: {', '.join(still_incomplete)}. {follow_up}",
+                            "content": "SYSTEM: Your verdict was not a valid JSON. Please return strictly a JSON object following the schema.",
                         }
                     )
-
-                    # If judge proposed a follow-up, show its reasoning as a "Thought" block (v3/v4 hybrid)
-                    if reasoning.strip():
-                        dur = round(time.monotonic() - reasoning_start_time)
-                        display = "\n".join(
-                            f"> {l}" if not l.startswith(">") else l
-                            for l in reasoning.splitlines()
-                        )
-                        total_emitted += (
-                            f'\n\n<details type="reasoning" done="true" duration="{dur}">\n<summary>Judge Verification Feedback</summary>\n'
-                            + display
-                            + "\n</details>\n\n"
-                        )
-
-                    await self.ui.emit_status("Continuing based on judge feedback...")
-                    return True, total_emitted
-            else:
-                logger.warning(f"No JSON found in judge response: {raw}")
-        except Exception as e:
-            logger.warning(f"Judge failed: {e}")
+                    current_judge_retry += 1
+                    continue
+                else:
+                    logger.warning(f"Judge verification failed after retries: {e}")
+                    break
 
         if (
             exec_history
@@ -3260,6 +3760,19 @@ class Pipe:
         REVIEW_MODEL: str = Field(
             default="",
             description="Model used for review_tasks , works Best with a Base Model (not workspace presets) | (leave blank to use the planner model)",
+        )
+        ENABLE_SUBAGENT_CHECK: bool = Field(
+            default=False,
+            description="Enable a judge model to verify subagent responses for task completion and correct asset referencing BEFORE returning to the planner.",
+        )
+        SUBAGENT_CHECK_MODEL: str = Field(
+            default="",
+            description="Model used for subagent verification (leave blank to use the planner model)",
+        )
+        SYSTEM_PROMPT: str = Field(
+            default="""You are an advanced agentic Planner. You have the ability to formulate a plan, act on it by delegating tasks to specialized subagents or using tools, and track your progress.
+Your goal is to fulfill the user's request.""",
+            description="System Prompt for the planner agent",
         )
         USER_INPUT_TIMEOUT: int = Field(
             default=120,
@@ -3319,19 +3832,6 @@ class Pipe:
             default=0.1,
             description="Temperature for the code interpreter subagent. Low values (0.0-0.2) produce more deterministic, accurate code.",
         )
-        ENABLE_SUBAGENT_CHECK: bool = Field(
-            default=False,
-            description="Enable a judge model to verify subagent responses for task completion and correct asset referencing BEFORE returning to the planner.",
-        )
-        SUBAGENT_CHECK_MODEL: str = Field(
-            default="",
-            description="Model used for subagent verification (leave blank to use the planner model)",
-        )
-        SYSTEM_PROMPT: str = Field(
-            default="""You are an advanced agentic Planner. You have the ability to formulate a plan, act on it by delegating tasks to specialized subagents or using tools, and track your progress.
-Your goal is to fulfill the user's request.""",
-            description="System Prompt for the planner agent",
-        )
 
     class UserValves(BaseModel):
         PLAN_MODE: bool = Field(
@@ -3367,26 +3867,41 @@ Your goal is to fulfill the user's request.""",
         self,
         body: dict,
         __user__: dict,
-        __request__: Any = None,
+        __request__: Request = None,
         __metadata__: dict = None,
         __event_emitter__: Callable[[dict], Awaitable[None]] = None,
         __event_call__: Callable[[dict], Awaitable[None]] = None,
-    ) -> str:
+        __files__: list = None,
+        __chat_id__: str = None,
+        __message_id__: str = None,
+        **kwargs,
+    ) -> Union[str, Generator, AsyncGenerator]:
+        """
+        Main pipe entry point for Open WebUI.
+        """
+        # Ensure metadata is present even if not passed
+        __metadata__ = __metadata__ or body.get("metadata", {})
+        
         self.user_valves = (
             __user__.pop("valves", None)
             if isinstance(__user__, dict)
             else getattr(__user__, "valves", None)
         ) or self.UserValves()
         ui = UIRenderer(__event_emitter__, __event_call__)
+        # Ensure __files__ is a list to handle new attachments during the turn
+        if __files__ is None:
+            __files__ = []
 
         # Consistent with v3 fallback logic
         pipe_metadata = __metadata__ or body.get("metadata", {}) or {}
         chat_id = (
-            pipe_metadata.get("chat_id")
+            __chat_id__
+            or pipe_metadata.get("chat_id")
             or body.get("chat_id")
             or body.get("id")
             or "default"
         )
+        message_id = __message_id__ or pipe_metadata.get("message_id")
 
         # Resolve full user object (v3 parity)
         user_obj = Users.get_user_by_id(__user__.get("id"))
@@ -3399,13 +3914,14 @@ Your goal is to fulfill the user's request.""",
             "__event_emitter__": __event_emitter__,
             "__event_call__": __event_call__,
             "__user_obj__": user_obj,
+            "__files__": __files__,
+            "__chat_id__": chat_id,
+            "__message_id__": message_id,
         }
 
         # Resolve base URL (Valve -> Env -> Request)
         base_url = self.valves.OPEN_WEBUI_URL
         if not base_url:
-            import os
-
             base_url = os.environ.get("WEBUI_URL", "")
         if not base_url and __request__:
             base_url = str(__request__.base_url).rstrip("/")
@@ -3431,10 +3947,15 @@ Your goal is to fulfill the user's request.""",
         )
         state = PlannerState()
         subagents = SubagentManager(
-            ui, state, metadata, base_url=base_url, model_knowledge=model_knowledge
+            ui,
+            state,
+            metadata,
+            self.valves,
+            base_url=base_url,
+            model_knowledge=model_knowledge,
         )
         engine = PlannerEngine(
             ui, state, subagents, registry, metadata, model_knowledge=model_knowledge
         )
 
-        return await engine.run(chat_id, self.valves, self.user_valves, body)
+        return await engine.run(chat_id, self.valves, self.user_valves, body, __files__)
