@@ -522,6 +522,16 @@ AI-powered web search using Perplexica with streaming responses, intelligent cit
 ![Perplexica Pipe Example](img/Perplexica_pipe.png)
 *Example of Perplexica pipe search results with citations in Open WebUI*
 
+### Parallel Execution (New)
+
+Planner Agent v3 now supports parallel execution of tool calls and subagent calls via `asyncio.gather`. This significantly improves performance when multiple independent tasks can be performed simultaneously.
+
+- **`PARALLEL_TOOL_EXECUTION`**: When enabled, the planner executes all identified tool calls (including subagent calls) in parallel.
+- **`PARALLEL_SUBAGENT_EXECUTION`**: When enabled, subagents execute their internal tool calls (search, code interpreter, etc.) in parallel.
+
+> [!WARNING]
+> Parallel execution may lead to race conditions if tools have stateful dependencies within the same turn (e.g., one tool depends on a file created by another tool in the same turn). Use with caution for complex, inter-dependent workflows. Most standard search and generation tasks are independent and safe for parallelism.
+
 ---
 
 ### ComfyUI Image-to-Image Tool (Qwen Image Edit 2509)

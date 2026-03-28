@@ -3,11 +3,12 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.4.0
+version: 3.5.0
 required_open_webui_version: 0.8.12
 """
 
 import ast
+import asyncio
 import hashlib
 import json
 import logging
@@ -17,7 +18,7 @@ import time
 import uuid
 import html as html_module
 from uuid import uuid4
-from typing import Callable, Awaitable, Any, Optional, Union, Generator, AsyncGenerator
+from typing import Callable, Awaitable, Any, Optional, Union, Generator, AsyncGenerator, Dict
 from pydantic import BaseModel, Field
 from fastapi import Request, UploadFile
 from starlette.datastructures import Headers
@@ -34,8 +35,35 @@ from open_webui.models.files import Files
 from open_webui.models.chats import Chats
 from open_webui.routers.files import upload_file_handler
 
+# --- ComfyUI Parallelism Patch (v14) ---
+# Monkeypatch ComfyUI router functions to use unique client IDs per call,
+# resolving WebSocket deadlocks when multiple subagents generate images for the same user.
+try:
+    import open_webui.routers.images as images_router
 
-from typing import Dict
+    def _apply_comfy_patch():
+        for func_name in ["comfyui_create_image", "comfyui_edit_image"]:
+            orig_func = getattr(images_router, func_name, None)
+            if orig_func and not hasattr(orig_func, "_patched"):
+
+                async def patched_func(*args, **kwargs):
+                    # client_id is the 3rd positional argument (model, payload, client_id, ...)
+                    new_args = list(args)
+                    if len(new_args) >= 3:
+                        new_args[2] = f"{new_args[2]}_{uuid.uuid4().hex[:8]}"
+                    elif "client_id" in kwargs:
+                        kwargs["client_id"] = (
+                            f"{kwargs['client_id']}_{uuid.uuid4().hex[:8]}"
+                        )
+                    return await orig_func(*new_args, **kwargs)
+
+                patched_func._patched = True
+                setattr(images_router, func_name, patched_func)
+
+    _apply_comfy_patch()
+except Exception as e:
+    logging.error(f"Failed to apply ComfyUI parallelism patch: {e}")
+
 
 
 # --- Pydantic Models ---
@@ -79,6 +107,26 @@ class SubagentTaskResponse(BaseModel):
     called_tools: list[dict] = Field(default_factory=list)
     result: str
     note: Optional[str] = None
+
+
+# --- New Helper Classes ---
+class LockedEmitter:
+    """Thread-safe proxy for the event emitter to prevent concurrent DB writes in Open WebUI event handlers."""
+    def __init__(self, emitter: Optional[Callable[[dict], Awaitable[None]]]):
+        self.emitter = emitter
+        self.lock = asyncio.Lock()
+
+    async def __call__(self, event: dict) -> None:
+        if not self.emitter:
+            return
+        async with self.lock:
+            await self.emitter(event)
+
+
+class UIState(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+    total_emitted: str
+    lock: asyncio.Lock = Field(default_factory=asyncio.Lock)
 
 
 name = "Planner"
@@ -127,12 +175,26 @@ class Utils:
         """
         Cleans and normalizes message history for LLM consumption.
         - Flattens list-based content (OpenAI/WebUI format) to string.
-        - Strips all UI-only artifacts (<details> tags for reasoning, tools, status).
+        - Strips UI-only artifacts (<details> tags for reasoning, status).
+        - Preserves semantic tool results from <details type="tool_calls">.
         """
         distilled = []
         for msg in messages:
             role = msg.get("role")
             content = msg.get("content")
+
+            # Preserve tool-role messages verbatim — they contain tool results, not UI markup
+            if role == "tool":
+                if content:
+                    distilled.append(
+                        {
+                            "role": "tool",
+                            "content": content,
+                            "tool_call_id": msg.get("tool_call_id", ""),
+                            "name": msg.get("name", ""),
+                        }
+                    )
+                continue
 
             # 1. Flatten content if it's a list (Open WebUI / OpenAI structured format)
             if isinstance(content, list):
@@ -145,14 +207,58 @@ class Utils:
             if not isinstance(content, str):
                 content = str(content) if content is not None else ""
 
-            # 2. Strip ALL UI artifacts (reasoning, tool_calls, status, state)
-            # We use a broad regex to catch all <details> blocks as they are UI-specific.
+            # 2. Strip ONLY reasoning/thinking/status blocks — these are pure UI decoration
             content = re.sub(
-                r"<details.*?>.*?</details>", "", content, flags=re.DOTALL
+                r'<details\s+type="(?:reasoning|status|state)".*?>.*?</details>',
+                "",
+                content,
+                flags=re.DOTALL,
+            ).strip()
+
+            # 3. For tool_calls blocks: strip the HTML wrapper but preserve the semantic content
+            def replace_tool_details(match):
+                block = match.group(0)
+                # v3.5: If this is the inline "Execution Plan", strip it completely from history
+                if 'id="plan"' in block:
+                    return ""
+
+                name_m = re.search(r'name="([^"]+)"', block)
+                result_m = re.search(r'result="([^"]*)"', block)
+                if name_m and result_m:
+                    r_text = html_module.unescape(result_m.group(1))
+                    try:
+                        # result is double-encoded JSON in the attribute
+                        r_data = json.loads(r_text)
+                        if isinstance(r_data, str):
+                            r_text = (
+                                r_data[:200] + "..." if len(r_data) > 200 else r_data
+                            )
+                        else:
+                            r_text = (
+                                str(r_data)[:200] + "..."
+                                if len(str(r_data)) > 200
+                                else str(r_data)
+                            )
+                    except Exception:
+                        pass
+                    return f"[Tool: {name_m.group(1)} → {r_text}]"
+                return ""
+
+            content = re.sub(
+                r'<details\s+type="tool_calls".*?>.*?</details>',
+                replace_tool_details,
+                content,
+                flags=re.DOTALL,
             ).strip()
 
             if content:
                 distilled.append({"role": role, "content": content})
+            elif msg.get("tool_calls"):
+                # Always preserve assistant turns with tool_calls even if content is empty
+                distilled.append(
+                    {"role": role, "content": "", "tool_calls": msg.get("tool_calls")}
+                )
+
         return distilled
 
     @staticmethod
@@ -327,6 +433,28 @@ class Utils:
         return events, buffer, done
 
     @staticmethod
+    def clean_ui_artifacts(text: str) -> str:
+        """
+        Strips UI-specific HTML components (like <details>, <iframe, <thinking>) 
+        that may have been added by Open WebUI's result processing.
+        Preserves model reasoning if it's not wrapped in UI-only tags.
+        """
+        if not text or not isinstance(text, str):
+            return text
+        
+        # 1. Strip reasoning/status details — these are pure UI decoration
+        text = re.sub(
+            r'<details\s+type="(?:reasoning|status|state)".*?>.*?</details>',
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+        # 2. Strip thinking/thought tags - redundant with clean_thinking but safe here
+        text = re.sub(r"<(?:thinking|thought)>.*?</(?:thinking|thought)>", "", text, flags=re.DOTALL)
+        
+        return text.strip()
+
+    @staticmethod
     def _extract_stream_events(event_payload: dict[str, Any]) -> Any:
         """
         Extracts stream events from an event payload dict.
@@ -439,15 +567,16 @@ class Utils:
 
         # Split by <details> tags to avoid replacing inside them
         parts = re.split(r"(<details.*?</details>)", text, flags=re.DOTALL)
-        pattern = r"@([a-zA-Z0-9_-]+)"
 
+        # Use a safe regex to find @task_id only if NOT preceded by word characters or dots (like in an email)
         for i in range(len(parts)):
-            # Only process parts that are NOT <details> blocks
             if not parts[i].startswith("<details"):
-                matches = re.findall(pattern, parts[i])
-                for match in matches:
-                    if match in results:
-                        parts[i] = parts[i].replace(f"@{match}", results[match])
+                for tid, result in results.items():
+                    # Safer regex: must not follow a word character or dot, followed by the exact ID and a word boundary
+                    pattern = rf"(?<![\w.-])@{re.escape(tid)}\b"
+                    # Escape backslashes in the replacement string for re.sub
+                    safe_result = result.replace('\\', '\\\\')
+                    parts[i] = re.sub(pattern, safe_result, parts[i])
 
         return "".join(parts)
 
@@ -471,9 +600,11 @@ class Utils:
             if "@" not in data:
                 return data
             for tid, result in results.items():
-                ref = f"@{tid}"
-                if ref in data:
-                    data = data.replace(ref, result)
+                # Safer regex: must not follow a word character or dot, followed by the exact ID and a word boundary
+                pattern = rf"(?<![\w.-])@{re.escape(tid)}\b"
+                # Escape backslashes in the replacement string for re.sub
+                safe_result = result.replace('\\', '\\\\')
+                data = re.sub(pattern, safe_result, data)
             return data
         elif isinstance(data, list):
             return [
@@ -929,9 +1060,23 @@ class UIRenderer:
             f"<summary>Executing...</summary>\n</details>\n"
         )
 
-    async def emit_html_embed(self, planner_state: dict[str, Any]) -> None:
-        html = self._generate_html_embed(planner_state)
-        await self.emitter({"type": "embeds", "data": {"embeds": [html]}})
+    def get_html_status_block(self, planner_state: dict[str, Any]) -> str:
+        """Generates the inline HTML block for the execution plan (v3.5 integrated style)."""
+        html_content = self._generate_html_embed(planner_state)
+
+        # Wrap in details type="tool_calls" with embeds attribute to trigger integrated UI
+        # Result attribute contains a placeholder string serialized for the frontend
+        embeds_json = json.dumps([html_content], ensure_ascii=False)
+        embeds_escaped = html_module.escape(embeds_json)
+
+        return (
+            f'<details type="tool_calls" done="true" id="plan" '
+            f'name="Execution Plan" '
+            f'arguments="&quot;&quot;" '
+            f'result="&quot;Plan updated.&quot;" '
+            f'embeds="{embeds_escaped}">\n'
+            f"<summary>Execution Plan</summary>\n</details>\n"
+        )
 
     def _generate_html_embed(self, planner_state: dict[str, Any]) -> str:
 
@@ -1174,7 +1319,7 @@ class ToolRegistry:
         # schemas for IDs (no longer using enum to allow dynamic task creation)
         task_id_schema = {
             "type": "string",
-            "description": "ID identifying the conversation thread (e.g. 'task_1').",
+            "description": "ID identifying the conversation thread (e.g. 'task_research').",
         }
 
         if plan_mode:
@@ -1212,7 +1357,7 @@ class ToolRegistry:
         # call_subagent: use generic task_id schema
         sub_task_id_schema = {
             "type": "string",
-            "description": "ID identifying the conversation thread (e.g. 'task_1').",
+            "description": "ID identifying the conversation thread (e.g. 'task_research').",
         }
 
         tools_spec.append(
@@ -1233,7 +1378,7 @@ class ToolRegistry:
                             },
                             "prompt": {
                                 "type": "string",
-                                "description": "Detailed instructions for the subagent. Use '@task_id' (e.g. '@task_1') as a TEXT REPLACEMENT MACRO — it will be automatically replaced with the LAST complete subagent response text for that task_id.",
+                                "description": "Detailed instructions for the subagent. If you need data from previous tasks, list them in 'related_tasks' instead of using macros here.",
                             },
                             "task_id": sub_task_id_schema,
                             "related_tasks": {
@@ -1401,10 +1546,11 @@ class ToolRegistry:
             va_model_obj = va_runtime_info or va_db_info
 
             s_tools_dict = {}
+            terminal_sys = ""
             if va.type == "terminal":
                 try:
                     terminal_id = self.pipe_metadata.get("terminal_id")
-                    s_tools_dict = await get_terminal_tools(
+                    s_tools_dict, terminal_sys = await get_terminal_tools(
                         self.request, terminal_id, self.user, extra_params
                     )
                 except Exception as e:
@@ -1443,10 +1589,15 @@ class ToolRegistry:
                 if s_tools_dict
                 else None
             )
+
+            final_sys = va.system_message or ""
+            if terminal_sys:
+                final_sys = f"{final_sys.rstrip()}\n\n{terminal_sys}"
+
             result = {
                 "dict": s_tools_dict,
                 "specs": s_tools,
-                "system_message": va.system_message,
+                "system_message": final_sys,
                 "actual_model": va_model_id,
                 "temperature_override": va.temperature,
             }
@@ -1646,8 +1797,8 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
                 "2. `call_subagent(model_id: str, prompt: str, task_id: str, related_tasks: list[str])`: Use this to delegate a subtask to a specialized model.\n"
                 "   - **Task Status Lifecycle**: Starting a `call_subagent` will automatically set the task to 'in_progress' ONLY if it is currently 'pending' or 'failed'. Success automatically marks the task as 'completed'. Check the `status` field in the response.\n"
                 "   - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent. To **continue or follow up** on a previous interaction, you MUST use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.\n"
-                "   - **@task_id Text Replacement**: When you write `@task_id` (e.g., `@task_1`) in a **prompt** or your **final response**, it will be **automatically replaced** with the LAST complete subagent response text for that task_id.\n"
-                "   - **Raw Task ID (no @)**: Use the plain ID (`task_1`) in tool parameters. NEVER prefix with @ in parameter fields.\n"
+                "   - **@task_id Text Replacement (Orchestrator Macro)**: Writing `@task_id` (e.g., `@task_research`) in your **FINAL response** to the user will automatically insert the full text result of that task. **USE THIS to avoid re-typing or redundantly summarizing large code blocks, data, or technical reports.** Do NOT use these macros in subagent prompts — use `related_tasks` for that purpose.\n"
+                "   - **Raw Task ID (no @)**: Use the plain ID (`task_research`) in tool parameters. NEVER prefix with @ in parameter fields.\n"
                 "   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array.\n"
             )
             tool_idx = 3
@@ -1655,8 +1806,8 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
             tools_doc = (
                 "1. `call_subagent(model_id: str, prompt: str, task_id: str, related_tasks: list[str])`: Use this to delegate a subtask to a specialized model.\n"
                 "   - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent. To **continue or follow up** on a previous interaction, use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.\n"
-                "   - **@task_id Text Replacement**: When you write `@task_id` (e.g., `@task_1`) in a **prompt** or your **final response**, it will be **automatically replaced** with the LAST complete subagent response text for that task_id.\n"
-                "   - **Raw Task ID (no @)**: Use the plain ID (`task_1`) in tool parameters. NEVER prefix with @ in parameter fields.\n"
+                "   - **@task_id Text Replacement (Orchestrator Macro)**: Writing `@task_id` (e.g., `@task_research`) in your **FINAL response** to the user will automatically insert the full text result of that task. **USE THIS to avoid re-typing or redundantly summarizing large code blocks, data, or technical reports.** Do NOT use these macros in subagent prompts — use `related_tasks` for that purpose.\n"
+                "   - **Raw Task ID (no @)**: Use the plain ID (`task_research`) in tool parameters. NEVER prefix with @ in parameter fields.\n"
                 "   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array.\n"
             )
             tool_idx = 2
@@ -1670,11 +1821,12 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
         mandatory_rules = (
             "### MANDATORY RULES:\n"
             "- Delegate work to subagents using `call_subagent` for complex analysis, generation, or reasoning.\n"
-            "- **CODING RULE**: For COMPLEX coding, scripting, calculation, or data-processing task, delegate to a `code_interpreter_agent` or equivalent if available and the task is complex. NEVER use web_search_agent or knowledge_agent or any unrelated subagent for code. ALWAYS provide FULL code in the final output, either by writing it yourself or using @task_id substitution tags.\n"
-            "- **ALWAYS pass `related_tasks`** when a subagent needs results from previous tasks.\n"
-            "- Use `@task_id` references in your final response to include large previous outputs.\n"
-            "- Final Output is YOUR responsibility. Make it look good.\n"
-            "- If any subagent response is incomplete, missing details, or lacks required assets, you MUST follow up with additional subagent calls or clarifying prompts until the answer is complete and all requirements are met. Using the same task id makes sure the subagent can continue from where it left off.\n"
+            "- **CODING RULE**: For COMPLEX coding, scripting, calculation, or data-processing task, delegate to a `code_interpreter_agent` or equivalent. NEVER use web_search_agent or knowledge_agent for code. **ALWAYS provide FULL code in the final output by using @task_id substitution tags** (e.g., '@task_coding') to avoid truncation or partial copying.\n"
+            "- **ALWAYS pass `related_tasks`** when a subagent needs results from previous tasks. Subagents CANNOT see other task results without this.\n"
+            "- **ID CONSISTENCY**: You MUST use the EXACT `task_id` values you defined during the PLANNING phase, unless you are creating a fundamentally new task that was not part of the original plan.\n"
+            "- **ANTIGRAVITY MACROS**: Use `@task_id` references in your FINAL response to include large previous outputs, code, or reports. **DO NOT summarize or manually copy-paste large technical results** if a macro can include the original verbatim.\n"
+            "- Final Output is YOUR responsibility. Make it look professional and clean.\n"
+            "- If any subagent response is incomplete, missing details, or lacks required assets, you MUST follow up with additional subagent calls or clarifying prompts until the answer is complete and all requirements are met.\n"
             "- For any assets (images, files, data, etc.), ensure that links, relative/absolute paths, or URLs are always provided in the output so downstream consumers can access them.\n"
         )
         if truncation:
@@ -1691,8 +1843,8 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
 \n### PLANNING PHASE - ACTIVE
 Analyze the request and decompose it into a series of logical, executable tasks using the available subagents.
 - **Goal**: Create a step-by-step roadmap to fulfill the user's core objective.
-- **Output Schema**: Return STRICTLY a JSON object: `{"tasks": [{"task_id": "task_1", "description": "..."}, ...]}`.
-- **Task Granularity**: Each task should be an atomic, actionable step (e.g., "Use web_search_agent to find X", "Analyze the results of task_1 to do Y", "Use code_interpreter_agent to build Z").
+- **Output Schema**: Return STRICTLY a JSON object: `{"tasks": [{"task_id": "task_1_research", "description": "..."}, ...]}`.
+- **Task Granularity**: Each task should be an atomic, actionable step (e.g., "Use web_search_agent to find X", "Analyze the results of task_1_research to do Y", "Use code_interpreter_agent to build Z").
 - **Subagent Selection**: Describe tasks in terms of the available subagent capabilities if no subagent has the proper capabilities assume the orchestrator has it.
 - **Constraint**: Return ONLY the raw JSON object. NO prose, NO explanations, NO greetings.
 """
@@ -1925,14 +2077,38 @@ class SubagentManager:
         self.valves = valves
         self.base_url = base_url
         self.model_knowledge = model_knowledge
+        self.result_lock = asyncio.Lock()
+        self.locked_emitter = LockedEmitter(ui.emitter)
 
-        # Resolve virtual agents with fallback model (v3 parity better robustness)
-        self.virtual_agents = {
-            vid: va.model_copy(
-                update={"model_id": va.model_id or valves.PLANNER_MODEL}
-            )
-            for vid, va in self.VIRTUAL_AGENTS.items()
+        # Resolve virtual agents with fallback model and valve overrides
+        AGENT_MODEL_VALVES = {
+            "image_gen_agent": "IMAGE_GENERATION_AGENT_MODEL",
+            "web_search_agent": "WEB_SEARCH_AGENT_MODEL",
+            "knowledge_agent": "KNOWLEDGE_AGENT_MODEL",
+            "code_interpreter_agent": "CODE_INTERPRETER_AGENT_MODEL",
+            "terminal_agent": "TERMINAL_AGENT_MODEL",
         }
+
+        self.virtual_agents = {}
+        for vid, va in self.VIRTUAL_AGENTS.items():
+            valve_field = AGENT_MODEL_VALVES.get(vid)
+            valve_value = getattr(valves, valve_field, "") if valve_field else ""
+            resolved_model = (
+                valve_value.strip()
+                if isinstance(valve_value, str) and valve_value.strip()
+                else (va.model_id or valves.PLANNER_MODEL)
+            )
+
+            # Wire temperature overrides (e.g., for code interpreter)
+            temp = va.temperature
+            if vid == "code_interpreter_agent" and hasattr(
+                valves, "CODE_INTERPRETER_TEMPERATURE"
+            ):
+                temp = valves.CODE_INTERPRETER_TEMPERATURE
+
+            self.virtual_agents[vid] = va.model_copy(
+                update={"model_id": resolved_model, "temperature": temp}
+            )
 
     async def _verify_subagent_response(
         self,
@@ -2114,23 +2290,36 @@ class SubagentManager:
             "If you are missing any required asset links or references, you MUST follow up or retry until all assets are accessible via explicit links or paths. "
         )
 
+        history = self.state.get_history(chat_id, task_id, model_id)
+
+        # Identify which related tasks to inject (only those not already in history)
+        results_injection = []
         if related_tasks:
+            history_text = (
+                "\n".join(m.get("content", "") for m in history) if history else ""
+            )
             for rt in related_tasks:
                 rid = rt.lstrip("@")
                 if rid in self.state.results:
-                    sub_sys += f"\n\n--- RESULTS FROM PREVIOUS TASK {rt} ---\n{self.state.results[rid]}\n--- END OF {rt} ---\n"
+                    header = f"--- RESULTS FROM PREVIOUS TASK {rt} ---"
+                    if header not in history_text:
+                        results_injection.append(
+                            f"\n\n{header}\n{self.state.results[rid]}\n--- END OF {rt} ---\n"
+                        )
 
-        history = self.state.get_history(chat_id, task_id, model_id)
+        injection_content = "".join(results_injection)
+        actual_prompt = prompt + injection_content
+
         if history:
             # v3 pacing: truncating history in sub-threads is risky for OpenRouter providers
             # who expect the full tool call chain. We'll skip aggressive truncation for now.
             if history[0]["role"] == "system":
                 history[0]["content"] = sub_sys
-            history.append({"role": "user", "content": prompt})
+            history.append({"role": "user", "content": actual_prompt})
         else:
             history = [
                 {"role": "system", "content": sub_sys},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": actual_prompt},
             ]
 
         return {
@@ -2171,6 +2360,8 @@ class SubagentManager:
                 sub_final_answer_chunks.append("[Subagent stopped at iteration limit.]")
                 break
 
+            sub_history_lock = asyncio.Lock()
+
             # (B) Execute Turn
             turn_result = await self._execute_subagent_turn(context, body)
             sub_content = turn_result["content"]
@@ -2184,7 +2375,7 @@ class SubagentManager:
                 # Loop Terminal - Final Answer found
                 
                 # Subagent Judge Verification (v3 parity extension)
-                if valves.ENABLE_SUBAGENT_CHECK:
+                if user_valves.ENABLE_SUBAGENT_CHECK:
                     current_answer = "".join(sub_final_answer_chunks).strip()
                     if current_answer:
                         task_desc = self.state.tasks.get(task_id, TaskStateModel(status="pending")).description
@@ -2235,30 +2426,40 @@ class SubagentManager:
                 }
             )
 
-            for stc in tool_calls_list:
-                stc_name = stc["function"]["name"]
-                stc_args_str = stc["function"]["arguments"]
-                call_id = stc.get("id")
-
-                stc_args_obj = Utils.parse_tool_arguments(stc_args_str)
-
-                target_tool = context["tools_dict"].get(stc_name)
-                if target_tool:
-                    await self._execute_subagent_tool_call(
-                        stc_name,
-                        stc_args_str,
-                        stc_args_obj,
-                        call_id,
+            if valves.PARALLEL_SUBAGENT_EXECUTION:
+                # Parallel subagent tool execution
+                tasks = [
+                    self._execute_single_subagent_tool_call(
+                        stc,
                         context,
                         history,
                         sub_called_tools,
                         model_id,
+                        sub_history_lock,
                     )
-                else:
-                    if await self._handle_missing_tool(
-                        stc_name, stc_args_str, call_id, context, history, sub_called_tools, model_id
-                    ):
-                        break
+                    for stc in tool_calls_list
+                ]
+                await asyncio.gather(*tasks)
+
+                # Re-sort the history tail to match original tool_calls order
+                call_id_order = {tc.get("id"): i for i, tc in enumerate(tool_calls_list)}
+                history_tail_start = len(history) - len(tool_calls_list)
+                tool_tail = history[history_tail_start:]
+                tool_tail.sort(
+                    key=lambda m: call_id_order.get(m.get("tool_call_id", ""), 999)
+                )
+                history[history_tail_start:] = tool_tail
+            else:
+                # Sequential subagent tool execution
+                for stc in tool_calls_list:
+                    await self._execute_single_subagent_tool_call(
+                        stc,
+                        context,
+                        history,
+                        sub_called_tools,
+                        model_id,
+                        sub_history_lock,
+                    )
 
         final_result = "\n".join(sub_final_answer_chunks).strip()
         self.state.store_result(task_id, final_result)
@@ -2291,6 +2492,47 @@ class SubagentManager:
             "task_id": task_id,
             "result": json.dumps(structured_response, ensure_ascii=False),
         }
+
+    async def _execute_single_subagent_tool_call(
+        self,
+        stc: dict,
+        context: dict,
+        history: list,
+        sub_called_tools: list,
+        model_id: str,
+        history_lock: Optional[asyncio.Lock] = None,
+    ) -> None:
+        """Helper to execute a single subagent tool call."""
+        stc_name = stc["function"]["name"]
+        stc_args_str = stc["function"]["arguments"]
+        call_id = stc.get("id")
+
+        stc_args_obj = Utils.parse_tool_arguments(stc_args_str)
+
+        target_tool = context["tools_dict"].get(stc_name)
+        if target_tool:
+            await self._execute_subagent_tool_call(
+                stc_name,
+                stc_args_str,
+                stc_args_obj,
+                call_id,
+                context,
+                history,
+                sub_called_tools,
+                model_id,
+                history_lock,
+            )
+        else:
+            await self._handle_missing_tool(
+                stc_name,
+                stc_args_str,
+                call_id,
+                context,
+                history,
+                sub_called_tools,
+                model_id,
+                history_lock,
+            )
 
     async def _handle_subagent_iteration_limit(
         self, iteration: int, max_iters: int, task_id: str, model_id: str, user_valves
@@ -2439,6 +2681,7 @@ class SubagentManager:
         history: list,
         sub_called_tools: list,
         model_id: str,
+        history_lock: Optional[asyncio.Lock] = None,
     ) -> None:
         """Executes a single subagent tool call and updates history/states."""
         target_tool = context["tools_dict"].get(name)
@@ -2448,48 +2691,106 @@ class SubagentManager:
             # We don't strictly need tc_tag here as in planner, 
             # but we follow v3's internal logging/status pattern.
 
-            tc_res = await target_tool["callable"](**args_obj)
-            tc_return = process_tool_result(
-                self.metadata.get("__request__"),
-                name,
-                tc_res,
-                target_tool.get("type", ""),
-                False,
-                self.metadata.get("__metadata__"),
-                context["user_obj"],
-            )
-            res_str = tc_return[0] if len(tc_return) > 0 else str(tc_res)
+            # Inject metadata variables for tools that support them (v3.5 robustness)
+            # This ensures builtin tools like generate_image can emit files/status.
+            allowed_keys = target_tool.get("spec", {}).get("parameters", {}).get("properties", {}).keys()
+            filtered_args = {k: v for k, v in args_obj.items() if k in allowed_keys}
+            
+            # Context variables required by many built-in tools
+            context_vars = {
+                "__request__": self.metadata.get("__request__"),
+                "__user__": self.metadata.get("__user__"),
+                "__event_emitter__": self.locked_emitter,
+                "__event_call__": self.metadata.get("__event_call__"),
+                "__chat_id__": self.metadata.get("__chat_id__") or self.metadata.get("chat_id"),
+                "__message_id__": self.metadata.get("__message_id__") or self.metadata.get("message_id"),
+                "__files__": self.metadata.get("__files__"),
+                "__metadata__": self.metadata.get("__metadata__"),
+            }
+            # We add them to filtered_args if the tool needs them 
+            # (BUILTIN tools often look for these specific keys)
+            filtered_args.update({k: v for k, v in context_vars.items() if v is not None and k in allowed_keys})
+
+            # Execute tool in parallel (Monkeypatch fixes ComfyUI clientId deadlocks)
+            tc_res = await target_tool["callable"](**filtered_args)
+
+            # Serialize only the DB-intensive result processing to prevent race conditions
+            async with self.result_lock:
+                tc_return = process_tool_result(
+                    self.metadata.get("__request__"),
+                    name,
+                    tc_res,
+                    target_tool.get("type", ""),
+                    False,
+                    self.metadata.get("__metadata__"),
+                    context["user_obj"],
+                )
+                
+                # Unpack result components
+                res_str = ""
+                tc_files = []
+                tc_embeds = []
+                
+                if isinstance(tc_return, tuple):
+                    if len(tc_return) >= 3:
+                        res_str, tc_files, tc_embeds = tc_return[:3]
+                    elif len(tc_return) == 2:
+                        res_str, tc_files = tc_return
+                else:
+                    res_str = str(tc_return)
+
+                # v3.5 robustness: ensure generated assets are linked in history and persisted to DB
+                if tc_files:
+                    target_chat_id = self.metadata.get("__chat_id__") or self.metadata.get("chat_id")
+                    target_msg_id = self.metadata.get("__message_id__") or self.metadata.get("message_id")
+                    if target_chat_id and target_msg_id:
+                        try:
+                            # Synchronize with DB for multi-turn persistence
+                            Chats.add_message_files_by_id_and_message_id(target_chat_id, target_msg_id, tc_files)
+                            # Update internal metadata list for this turn
+                            current_files = self.metadata.get("__files__")
+                            if isinstance(current_files, list):
+                                current_files.extend(tc_files)
+                        except Exception as e:
+                            logger.error(f"Failed to persist subagent tool files to DB: {e}")
+
+            # Optional: Strip internal UI reasoning/tags if needed (user prefers keeping reasoning)
+            # res_str = Utils.clean_ui_artifacts(res_str)
 
             truncated_args = {
                 k: (str(v)[:80] + "..." if len(str(v)) > 80 else str(v))
                 for k, v in args_obj.items()
             }
-            sub_called_tools.append(
-                {"tool": name, "arguments": truncated_args, "success": True}
-            )
-            history.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": name,
-                    "content": str(res_str),
-                }
-            )
+            async with (history_lock or asyncio.Lock()):
+                sub_called_tools.append(
+                    {"tool": name, "arguments": truncated_args, "success": True}
+                )
+                history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": str(res_str),
+                    }
+                )
         except Exception as e:
             logger.error(f"[Subagent: {model_id}] Error executing {name}: {e}")
-            await self.ui.emit_status(f"[Subagent: {model_id}] Error executing {name}: {e}")
-            sub_called_tools.append({"tool": name, "arguments": {}, "success": False})
-            history.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": name,
-                    "content": f"Error: {e}",
-                }
+            await self.ui.emit_status(
+                f"[Subagent: {model_id}] Error executing {name}: {e}"
             )
+            async with (history_lock or asyncio.Lock()):
+                sub_called_tools.append({"tool": name, "arguments": {}, "success": False})
+                history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": f"Error: {e}",
+                    }
+                )
 
         
-    async def _handle_missing_tool( 
+    async def _handle_missing_tool(
         self,
         name: str,
         args_str: str,
@@ -2498,16 +2799,20 @@ class SubagentManager:
         history: list,
         sub_called_tools: list,
         model_id: str,
-    ) -> bool: # Returns True if it should break the loop due to repeated failures
+        history_lock: Optional[asyncio.Lock] = None,
+    ) -> bool:  # Returns True if it should break the loop due to repeated failures
         error_msg = f"Tool {name} not found."
         available_tools = list(context["tools_dict"].keys())
         if available_tools:
             error_msg += f" Available tools for this subagent: {', '.join(available_tools)}."
 
         logger.warning(f"[Subagent: {model_id}] {error_msg} Arguments: {args_str}")
-        await self.ui.emit_status(f"[Subagent: {model_id}] Attempted unknown tool: {name}")
+        await self.ui.emit_status(
+            f"[Subagent: {model_id}] Attempted unknown tool: {name}"
+        )
 
-        sub_called_tools.append({"tool": name, "arguments": {}, "success": False})
+        async with (history_lock or asyncio.Lock()):
+            sub_called_tools.append({"tool": name, "arguments": {}, "success": False})
 
         # Safety break logic
         consecutive_failures = 0
@@ -2519,21 +2824,29 @@ class SubagentManager:
             else: break
 
         if consecutive_failures >= 3:
-            history.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "name": name,
-                "content": f"Error: {error_msg} Repeated failures detected. Please stop or try a different approach.",
-            })
-            await self.ui.emit_status(f"[Subagent: {model_id}] Stopping due to repeated tool failures: {name}")
+            async with (history_lock or asyncio.Lock()):
+                history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": f"Error: {error_msg} Repeated failures detected. Please stop or try a different approach.",
+                    }
+                )
+            await self.ui.emit_status(
+                f"[Subagent: {model_id}] Stopping due to repeated tool failures: {name}"
+            )
             return True
 
-        history.append({
-            "role": "tool",
-            "tool_call_id": call_id,
-            "name": name,
-            "content": f"Error: {error_msg}",
-        })
+        async with (history_lock or asyncio.Lock()):
+            history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": name,
+                    "content": f"Error: {error_msg}",
+                }
+            )
         return False
 
 
@@ -2551,15 +2864,25 @@ class InternalToolExecutor:
         self.subagents = engine.subagents
         self.metadata = engine.metadata
 
-    async def update_state(self, args: dict, user_valves: Any) -> str:
-        self.state.update_task(
-            args["task_id"],
-            args["status"],
-            args.get("description"),
-        )
-        if user_valves.PLAN_MODE:
-            await self.ui.emit_html_embed(self.state.tasks)
-        return f"State updated for {args['task_id']}"
+    async def update_state(self, updates: dict[str, Any], user_valves: Any = None) -> str:
+        """Updates the planner's internal state and refreshes the UI summary block."""
+        if "task_id" in updates:
+            # Handle single task update (tool call format)
+            self.state.update_task(
+                updates["task_id"], updates.get("status"), updates.get("description")
+            )
+        else:
+            # Handle batch update (internal format)
+            for tid, tdata in updates.items():
+                if isinstance(tdata, dict):
+                    self.state.update_task(
+                        tid, tdata.get("status"), tdata.get("description")
+                    )
+
+        # Refresh the integrated inline plan summary
+        self.engine.current_plan_html = self.ui.get_html_status_block(self.state.tasks)
+        await self.engine._emit_replace(getattr(self.engine, "total_emitted", ""))
+        return "Plan updated."
 
     async def call_subagent(
         self, args: dict, chat_id: str, valves: Any, body: dict, user_valves: Any
@@ -2570,7 +2893,12 @@ class InternalToolExecutor:
             ).status
             if current_status in ["pending", "failed"]:
                 self.state.update_task(args["task_id"], "in_progress")
-                await self.ui.emit_html_embed(self.state.tasks)
+                self.engine.current_plan_html = self.ui.get_html_status_block(
+                    self.state.tasks
+                )
+                await self.engine._emit_replace(
+                    getattr(self.engine, "total_emitted", "")
+                )
 
         res_dict = await self.subagents.call_subagent(
             args["model_id"],
@@ -2585,7 +2913,10 @@ class InternalToolExecutor:
         )
         self.state.update_task(args["task_id"], "completed")
         if user_valves.PLAN_MODE:
-            await self.ui.emit_html_embed(self.state.tasks)
+            self.engine.current_plan_html = self.ui.get_html_status_block(
+                self.state.tasks
+            )
+            await self.engine._emit_replace(getattr(self.engine, "total_emitted", ""))
         return res_dict["result"]
 
     async def ask_user(self, args: dict, valves: Any) -> str:
@@ -2729,10 +3060,23 @@ class PlannerEngine:
         self.metadata = metadata
         self.model_knowledge = model_knowledge
         self.tools = InternalToolExecutor(self)
+        self.current_plan_html = ""
+        self.total_emitted = ""  # Trace current Turn body only
+
+    async def _emit_replace(self, content: str) -> None:
+        """Helper to emit an inline replace event with the current plan prepended."""
+        await self.ui.emit_replace(self.current_plan_html + content)
+
+    async def _emit_message(self, delta: str) -> None:
+        """Helper to emit an append-only message event (efficient for content deltas)."""
+        await self.ui.emitter({"type": "message", "data": {"content": delta}})
 
     async def run(self, chat_id: str, valves: Any, user_valves: Any, body: dict, files: list = None) -> Union[str, Generator, AsyncGenerator]:
         """Main entry point for the planner engine. Orchestrates planning, execution, and verification."""
         
+        # v3.5: Initialize turn body track
+        self.total_emitted = ""
+
         # 0. State Recovery (v3.3)
         # We attempt to restore previous turn's state BEFORE clearing.
         await self._recover_state_from_files(body, chat_id, files)
@@ -2752,7 +3096,36 @@ class PlannerEngine:
         # Save state to file and attach to response
         await self._save_state_to_file(chat_id)
 
-        return final_answer
+        # v3.5: Final response and asset persistence sync
+        # We emit the final files list to the socket to ensure the UI has the latest state,
+        # but return a string to the Pipe to ensure stable persistence without bare-text issues.
+        full_content = self.current_plan_html + final_answer
+        
+        final_files = []
+        target_chat_id = self.metadata.get("__chat_id__")
+        target_msg_id = self.metadata.get("__message_id__")
+        
+        if target_chat_id and target_msg_id:
+            try:
+                # Query the actual state of the message in DB to include all files (from state and tools)
+                full_message = Chats.get_message_by_id_and_message_id(target_chat_id, target_msg_id)
+                if full_message:
+                    final_files = full_message.get("files", [])
+            except Exception as e:
+                logger.error(f"Failed to fetch final files from DB: {e}")
+                # Fallback to metadata list if DB query fails
+                final_files = self.metadata.get("__files__", [])
+
+        # v3.6: Explicitly emit the final files list one last time to sync the UI local store.
+        if final_files and self.ui:
+            await self.ui.emitter({"type": "files", "data": {"files": final_files}})
+
+        # Return the full content as a string. 
+        # For Pipes, this is the most stable way to ensure the final save includes all text.
+        # Assets are maintained via the 'files' and 'replace' emitters.
+        return full_content
+
+
 
     async def _recover_state_from_files(self, body: dict, chat_id: str, current_files: list = None) -> None:
         """
@@ -2860,10 +3233,16 @@ class PlannerEngine:
                     for key_str, history in data["subagent_history"].items():
                         try:
                             # Reconstruct tuple key (chat_id, sub_task_id, model_id)
-                            parts = key_str.split("::")
-                            if len(parts) == 3:
-                                tuple_key = tuple(parts)
-                                self.state.subagent_history[tuple_key] = history
+                            try:
+                                parts = json.loads(key_str)
+                                if isinstance(parts, list) and len(parts) == 3:
+                                    tuple_key = tuple(parts)
+                                    self.state.subagent_history[tuple_key] = history
+                            except (json.JSONDecodeError, TypeError):
+                                # Discard invalid keys (per user request)
+                                logger.warning(
+                                    f"Discarding invalid subagent history key: {key_str}"
+                                )
                         except Exception as parse_err:
                             logger.error(f"Failed to parse subagent history key {key_str}: {parse_err}")
                     logger.info(f"Restored {len(self.state.subagent_history)} sub-conversation threads.")
@@ -2890,7 +3269,7 @@ class PlannerEngine:
             serialized_history = {}
             for tuple_key, history in self.state.subagent_history.items():
                 if isinstance(tuple_key, (list, tuple)) and len(tuple_key) == 3:
-                    key_str = "::".join(map(str, tuple_key))
+                    key_str = json.dumps(list(tuple_key))
                     serialized_history[key_str] = history
 
             state_data = {
@@ -2961,7 +3340,9 @@ class PlannerEngine:
         """Generates the initial task list based on the user prompt."""
         await self.ui.emit_status("Planning...")
         if user_valves.PLAN_MODE:
-            await self.ui.emit_html_embed(self.state.tasks)
+            # v3.5: Initialize and emit the plan block (initially empty)
+            self.current_plan_html = self.ui.get_html_status_block(self.state.tasks)
+            await self._emit_replace("")
 
         # Prepare context
         distilled_history = Utils.distill_history_for_llm(body.get("messages", []))
@@ -3039,6 +3420,15 @@ class PlannerEngine:
                 tid, desc = task.get("task_id"), task.get("description")
                 if tid and desc:
                     self.state.update_task(tid, "pending", desc)
+            
+            # After successful parsing, show the final formulated plan
+            if self.state.tasks:
+                if user_valves.PLAN_MODE:
+                    self.current_plan_html = self.ui.get_html_status_block(
+                        self.state.tasks
+                    )
+                    await self._emit_replace("")
+                break
 
             if not self.state.tasks:
                 if json_retries < max_json_retries:
@@ -3056,7 +3446,7 @@ class PlannerEngine:
                     continue
                 else:
                     logger.warning("No tasks parsed from plan after retries. Using fallback.")
-                    self.state.update_task("task_1", "pending", "Process user request")
+                    self.state.update_task("main_task", "pending", "Process user request")
 
             await self.ui.emit_status(
                 f"Plan formed with {len(self.state.tasks)} tasks."
@@ -3186,7 +3576,8 @@ class PlannerEngine:
                 content = f"Thinking: {turn_result['reasoning']}"
                 # Revert to turn_start_base to delete the thinking block from UI (v3 parity)
                 total_emitted = turn_start_base + content
-                await self.ui.emit_replace(total_emitted)
+                self.total_emitted = total_emitted
+                await self._emit_replace(total_emitted)
             elif content or tc_dict or turn_result.get("reasoning"):
                 # Ensure total_emitted is updated even if content is empty (v3 parity fix for reasoning stripping)
                 total_emitted = turn_emitted
@@ -3206,7 +3597,8 @@ class PlannerEngine:
                     )
                     if should_continue:
                         # Ensure UI reflects the judge's decision to continue before the next planner turn
-                        await self.ui.emit_replace(total_emitted)
+                        self.total_emitted = total_emitted
+                        await self._emit_replace(total_emitted)
                         judge_retries += 1
                         continue
 
@@ -3223,7 +3615,10 @@ class PlannerEngine:
                             + total_emitted[idx + len(content) :]
                         )
                 await self.ui.emit_status("Completed", True)
-                await self.ui.emit_replace(total_emitted)
+                self.total_emitted = total_emitted
+                await self._emit_replace(total_emitted)
+                
+                # Revert: Don't prepend here; let PlannerEngine.run handle it once.
                 return total_emitted
 
             # (D) Handle Tool Calls
@@ -3321,7 +3716,14 @@ class PlannerEngine:
         reasoning_buffer = ""
         reasoning_start_time = None
         total_emitted_base = total_emitted
+        self.total_emitted = total_emitted
         error_occurred = False
+
+        # Debounce control
+        last_emit_time = 0
+        EMIT_INTERVAL_S = 0.5  # Emit reasoning every 500ms
+        token_count = 0
+        TOKENS_THRESHOLD = 50
 
         async for event in Utils.get_streaming_completion(
             self.metadata.get("__request__"), planner_body, user_obj
@@ -3335,19 +3737,27 @@ class PlannerEngine:
                         reasoning_start_time = time.monotonic()
                     reasoning_chunks.append(piece)
                     reasoning_buffer += piece
-                    # Clean tool calls and stray tags from reasoning display
-                    display = Utils.hide_tool_calls(reasoning_buffer)
-                    display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
-                    display = "\n".join(
-                        f"> {l}" if not l.startswith(">") else l
-                        for l in display.splitlines()
-                    )
-                    await self.ui.emit_replace(
-                        total_emitted_base
-                        + '\n\n<details type="reasoning" done="false">\n<summary>Thinking...</summary>\n'
-                        + display
-                        + "\n</details>\n\n"
-                    )
+                    token_count += 1
+
+                    # Debounce Reasoning: Only emit every 500ms or 50 tokens
+                    now = time.monotonic()
+                    if (now - last_emit_time > EMIT_INTERVAL_S) or (token_count >= TOKENS_THRESHOLD):
+                        last_emit_time = now
+                        token_count = 0
+                        # Clean tool calls and stray tags from reasoning display
+                        display = Utils.hide_tool_calls(reasoning_buffer)
+                        display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
+                        display = "\n".join(
+                            f"> {l}" if not l.startswith(">") else l
+                            for l in display.splitlines()
+                        )
+                        self.total_emitted = (
+                            total_emitted_base
+                            + '\n\n<details type="reasoning" done="false">\n<summary>Thinking...</summary>\n'
+                            + display
+                            + "\n</details>\n\n"
+                        )
+                        await self._emit_replace(self.total_emitted)
 
             elif etype in ["content", "tool_calls"]:
                 if reasoning_buffer:
@@ -3370,16 +3780,28 @@ class PlannerEngine:
                             + "\n</details>\n\n"
                         )
                     reasoning_buffer = ""
-                    await self.ui.emit_replace(
-                        total_emitted_base + "".join(content_chunks)
-                    )
+                    self.total_emitted = total_emitted_base + "".join(content_chunks)
+                    # Use replace to transition from reasoning block to content
+                    await self._emit_replace(self.total_emitted)
 
                 if etype == "content":
                     text = event["text"]
                     content_chunks.append(text)
-                    # Clean thinking tags from content stream
-                    display_content = Utils.clean_thinking("".join(content_chunks))
-                    await self.ui.emit_replace(total_emitted_base + display_content)
+                    
+                    full_content = "".join(content_chunks)
+                    display_content = Utils.clean_thinking(full_content)
+                    new_total = total_emitted_base + display_content
+                    
+                    if new_total != self.total_emitted:
+                        # Only emit if the visible content actually changed
+                        delta = new_total[len(self.total_emitted):]
+                        if delta and not Utils.THINKING_TAG_CLEANER_PATTERN.search(text):
+                            # Efficient delta append
+                            await self._emit_message(delta)
+                        else:
+                            # Something complex happened (e.g. tag closed/opened), use replace
+                            await self._emit_replace(new_total)
+                        self.total_emitted = new_total
                 elif etype == "tool_calls":
                     for tc in event["data"]:
                         idx = tc["index"]
@@ -3402,9 +3824,8 @@ class PlannerEngine:
             elif etype == "error":
                 error_msg = f"LLM Error: {event.get('text', 'Unknown failure')}"
                 await self.ui.emit_status(error_msg, True)
-                await self.ui.emit_replace(
-                    total_emitted + f"\n\n> [!CAUTION]\n> {error_msg}"
-                )
+                self.total_emitted = total_emitted + f"\n\n> [!CAUTION]\n> {error_msg}"
+                await self._emit_replace(self.total_emitted)
                 error_occurred = True
                 break
 
@@ -3460,91 +3881,209 @@ class PlannerEngine:
     ) -> str:
         """Executes tool calls while providing immediate UI feedback via Details tags."""
 
+        # 1. Emit all tool calls (pending status) first - mimicking native OWUI behavior
+        # Keep track of individual tags for later replacement when done
+        tc_tag_map = {}
+        history_lock = asyncio.Lock()
         for tc in sorted(tool_calls, key=lambda x: str(x.get("id", ""))):
             func_name, args_str, call_id = (
                 tc["function"]["name"],
                 tc["function"]["arguments"],
                 tc.get("id", str(uuid4())),
             )
-
-            args = Utils.parse_tool_arguments(args_str)
-
-            resolved_args = Utils.resolve_dict_references(args, self.state.results)
-
-            # UI Restoration: Build and emit tool call details (v3 parity)
+            # Build and append "Executing..." tag
             tc_tag = self.ui.build_tool_call_details(
                 call_id, func_name, args_str, done=False
             )
+            tc_tag_map[call_id] = tc_tag
             total_emitted += "\n\n" + tc_tag
-            await self.ui.emit_replace(total_emitted)
 
-            tool_res = ""
-            try:
-                match func_name:
-                    case "update_state":
-                        tool_res = await self.tools.update_state(resolved_args, user_valves)
-                    case "call_subagent":
-                        tool_res = await self.tools.call_subagent(
-                            resolved_args, chat_id, valves, body, user_valves
-                        )
-                    case "ask_user":
-                        tool_res = await self.tools.ask_user(resolved_args, valves)
-                    case "give_options":
-                        tool_res = await self.tools.give_options(resolved_args, valves)
-                    case "read_task_result":
-                        tool_res = self.tools.read_task_result(resolved_args)
-                    case "review_tasks":
-                        tool_res = await self.tools.review_tasks(
-                            resolved_args, valves, body, user_obj
-                        )
-                    case name if name in external_tools_dict:
-                        tool_data = external_tools_dict[name]
-                        allowed_keys = (
-                            tool_data.get("spec", {})
-                            .get("parameters", {})
-                            .get("properties", {})
-                            .keys()
-                        )
-                        filtered_args = {
-                            k: v for k, v in resolved_args.items() if k in allowed_keys
-                        }
-                        res = await tool_data["callable"](**filtered_args)
-                        tc_return = process_tool_result(
-                            self.metadata.get("__request__"),
-                            name,
-                            res,
-                            tool_data.get("type", ""),
-                            False,
-                            self.metadata.get("__metadata__"),
-                            user_obj,
-                        )
-                        tool_res = tc_return[0] if len(tc_return) > 0 else str(res)
-                    case _:
-                        # Tool not found: Log, and provide better feedback to LLM
-                        error_msg = f"Tool {func_name} not found."
+        self.total_emitted = total_emitted
+        await self._emit_replace(total_emitted)
 
-                        available_tools = ["call_subagent", "review_tasks"]
-                        if user_valves.PLAN_MODE:
-                            available_tools.append("update_state")
-                        if user_valves.TASK_RESULT_TRUNCATION:
-                            available_tools.append("read_task_result")
-                        if user_valves.ENABLE_USER_INPUT_TOOLS:
-                            available_tools.extend(["ask_user", "give_options"])
+        # 2. Sequential or Parallel execution
+        if valves.PARALLEL_TOOL_EXECUTION:
+            # Parallel execution with real-time UI updates via Pydantic model
+            ui_state = UIState(total_emitted=total_emitted)
+            
+            tasks = [
+                self._execute_single_tool_call(
+                    tc,
+                    exec_history,
+                    external_tools_dict,
+                    chat_id,
+                    valves,
+                    user_valves,
+                    user_obj,
+                    body,
+                    tc_tag_map,
+                    ui_state,
+                    history_lock,
+                )
+                for tc in sorted(tool_calls, key=lambda x: str(x.get("id", "")))
+            ]
 
-                        available_tools.extend(list(external_tools_dict.keys()))
-                        error_msg += (
-                            f" Available tools for the current planner session: "
-                            f"{', '.join(available_tools)}."
-                        )
+            await asyncio.gather(*tasks)
 
-                        logger.warning(f"[Planner] {error_msg}")
-                        await self.ui.emit_status(f"Attempted unknown tool: {func_name}")
-                        tool_res = f"Error: {error_msg}"
-            except Exception as e:
-                logger.error(f"[Planner] Error executing {func_name}: {e}")
-                await self.ui.emit_status(f"Error executing {func_name}")
-                tool_res = f"Error: {e}"
+            # Re-sort the tool result messages appended during this parallel batch
+            # to match the original tool_calls order
+            call_id_order = {tc.get("id"): i for i, tc in enumerate(tool_calls)}
+            history_tail_start = len(exec_history) - len(tool_calls)
+            tool_tail = exec_history[history_tail_start:]
+            tool_tail.sort(
+                key=lambda m: call_id_order.get(m.get("tool_call_id", ""), 999)
+            )
+            exec_history[history_tail_start:] = tool_tail
 
+            total_emitted = ui_state.total_emitted
+        else:
+            # Sequential execution (original behavior)
+            for tc in sorted(tool_calls, key=lambda x: str(x.get("id", ""))):
+                done_tag, _ = await self._execute_single_tool_call(
+                    tc,
+                    exec_history,
+                    external_tools_dict,
+                    chat_id,
+                    valves,
+                    user_valves,
+                    user_obj,
+                    body,
+                    tc_tag_map,
+                    None,  # No shared state for sequential
+                    history_lock,
+                )
+                total_emitted = total_emitted.replace(tc_tag_map[tc.get("id")], done_tag)
+                tc_tag_map[tc.get("id")] = done_tag
+                self.total_emitted = total_emitted
+                await self._emit_replace(total_emitted)
+
+        await self.ui.emit_status("Planner evaluating...")
+        return total_emitted
+
+    async def _execute_single_tool_call(
+        self,
+        tc: dict,
+        exec_history: list,
+        external_tools_dict: dict,
+        chat_id: str,
+        valves: Any,
+        user_valves: Any,
+        user_obj: Any,
+        body: dict,
+        tc_tag_map: dict,
+        ui_state: Optional[UIState] = None,
+        history_lock: Optional[asyncio.Lock] = None,
+    ) -> tuple[str, str]:
+        """Helper to execute a single tool call and return the UI tag and tool result."""
+        func_name, args_str, call_id = (
+            tc["function"]["name"],
+            tc["function"]["arguments"],
+            tc.get("id", str(uuid4())),
+        )
+
+        args = Utils.parse_tool_arguments(args_str)
+        # Skip macro expansion (@task_id) for prompts (W6) - we use related_tasks instead
+        resolved_args = Utils.resolve_dict_references(
+            args,
+            self.state.results,
+            skip_keys=["task_id", "task_ids", "related_tasks", "prompt"],
+        )
+
+        tool_res = ""
+        try:
+            match func_name:
+                case "update_state":
+                    tool_res = await self.tools.update_state(resolved_args, user_valves)
+                case "call_subagent":
+                    tool_res = await self.tools.call_subagent(
+                        resolved_args, chat_id, valves, body, user_valves
+                    )
+                case "ask_user":
+                    tool_res = await self.tools.ask_user(resolved_args, valves)
+                case "give_options":
+                    tool_res = await self.tools.give_options(resolved_args, valves)
+                case "read_task_result":
+                    tool_res = self.tools.read_task_result(resolved_args)
+                case "review_tasks":
+                    tool_res = await self.tools.review_tasks(
+                        resolved_args, valves, body, user_obj
+                    )
+                case name if name in external_tools_dict:
+                    tool_data = external_tools_dict[name]
+                    allowed_keys = (
+                        tool_data.get("spec", {})
+                        .get("parameters", {})
+                        .get("properties", {})
+                        .keys()
+                    )
+                    filtered_args = {
+                        k: v for k, v in resolved_args.items() if k in allowed_keys
+                    }
+                    res = await tool_data["callable"](**filtered_args)
+                    tc_return = process_tool_result(
+                        self.metadata.get("__request__"),
+                        name,
+                        res,
+                        tool_data.get("type", ""),
+                        False,
+                        self.metadata.get("__metadata__"),
+                        user_obj,
+                    )
+                    # Handle multiple return values (str, files, embeds)
+                    res_str = ""
+                    tc_files = []
+                    if isinstance(tc_return, tuple):
+                        if len(tc_return) >= 2:
+                            res_str, tc_files = tc_return[:2]
+                    else:
+                        res_str = str(tc_return)
+                        
+                    # Persistence & Visibility (v3.5)
+                    if tc_files:
+                        target_chat_id = self.metadata.get("__chat_id__") or chat_id
+                        target_msg_id = self.metadata.get("__message_id__")
+                        if target_chat_id and target_msg_id:
+                            try:
+                                # Synchronize with DB for multi-turn persistence
+                                Chats.add_message_files_by_id_and_message_id(target_chat_id, target_msg_id, tc_files)
+                                # Update internal metadata list for this turn
+                                current_files = self.metadata.get("__files__")
+                                if isinstance(current_files, list):
+                                    current_files.extend(tc_files)
+                            except Exception as e:
+                                logger.error(f"Failed to persist tool files to DB: {e}")
+
+                    tool_res = res_str
+                case _:
+                    # Tool not found: Log, and provide better feedback to LLM
+                    error_msg = f"Tool {func_name} not found."
+
+                    available_tools = ["call_subagent", "review_tasks"]
+                    if user_valves.PLAN_MODE:
+                        available_tools.append("update_state")
+                    if user_valves.TASK_RESULT_TRUNCATION:
+                        available_tools.append("read_task_result")
+                    if user_valves.ENABLE_USER_INPUT_TOOLS:
+                        available_tools.extend(["ask_user", "give_options"])
+
+                    available_tools.extend(list(external_tools_dict.keys()))
+                    error_msg += (
+                        f" Available tools for the current planner session: "
+                        f"{', '.join(available_tools)}."
+                    )
+
+                    logger.warning(f"[Planner] {error_msg}")
+                    await self.ui.emit_status(f"Attempted unknown tool: {func_name}")
+                    tool_res = f"Error: {error_msg}"
+        except Exception as e:
+            logger.error(f"[Planner] Error executing {func_name}: {e}")
+            await self.ui.emit_status(f"Error executing {func_name}")
+            tool_res = f"Error: {e}"
+
+        # Maintain global history - ordering is critical for KV caching and model consistency.
+        # We append as they finish (with lock), and the caller (_handle_tool_calls) 
+        # re-sorts the history tail to match the original tool_calls order after completion.
+        async with (history_lock or asyncio.Lock()):
             exec_history.append(
                 {
                     "role": "tool",
@@ -3554,17 +4093,22 @@ class PlannerEngine:
                 }
             )
 
-            # v3 parity: switch to evaluating status after tool results are in
-            await self.ui.emit_status("Planner evaluating...")
-
-            # Replace the "Executing..." tag with "Done" tag in the total_emitted string
-            done_tag = self.ui.build_tool_call_details(
-                call_id, func_name, args_str, done=True, result=tool_res
-            )
-            total_emitted = total_emitted.replace(tc_tag, done_tag)
-            await self.ui.emit_replace(total_emitted)
-
-        return total_emitted
+        # Update UI to "Done" status for THIS tool call
+        done_tag = self.ui.build_tool_call_details(
+        call_id, func_name, args_str, done=True, result=tool_res
+        )
+        
+        # Real-time UI updates for parallel mode (dry extracting the emit_replace logic)
+        if ui_state:
+            async with ui_state.lock:
+                ui_state.total_emitted = ui_state.total_emitted.replace(tc_tag_map[call_id], done_tag)
+                current_total = ui_state.total_emitted
+                self.total_emitted = current_total
+                
+            # Release lock before slow streaming emission (large content transfer)
+            await self._emit_replace(current_total)
+        
+        return done_tag, tool_res
 
 
     async def _phase_verification(
@@ -3587,14 +4131,43 @@ class PlannerEngine:
         can_retry = user_valves.YOLO_MODE or (retries < valves.JUDGE_RETRY_LIMIT)
 
         if not unresolved or not can_retry:
+            # Revert: Don't prepend here; let PlannerEngine.run handle it once.
             return False, total_emitted
 
         await self.ui.emit_status("Verifying task states...")
+        # Build detailed task context for the judge (W4)
+        task_context_lines = []
+        for tid in unresolved:
+            task_obj = self.state.tasks.get(tid)
+            desc = task_obj.description if task_obj else "(no description)"
+            status = task_obj.status if task_obj else "unknown"
+            task_context_lines.append(f"  - {tid} [{status}]: {desc}")
+        task_context_block = "\n".join(task_context_lines)
+
+        # Append compact results summary for inter-task dependency validation
+        results_summary = []
+        for tid, result in self.state.results.items():
+            preview = result[:300] + "..." if len(result) > 300 else result
+            results_summary.append(f"  @{tid}: {preview}")
+
+        results_block = ""
+        if results_summary:
+            results_block = (
+                "SYSTEM: Completed task results summary:\n"
+                + "\n".join(results_summary)
+                + "\n\n"
+            )
+
         judge_msg = (
-            f"SYSTEM: Review the conversation. The following tasks are not marked as completed: {', '.join(unresolved)}. "
-            "Respond with a JSON object (no extra text) containing:\n"
-            "1. 'updates': array of {'task_id': string, 'status': 'completed'|'failed', 'description': string}\n"
-            "2. 'follow_up_prompt': string - instructions to continue if tasks are genuinely incomplete, or empty string if all resolved."
+            f"{results_block}"
+            f"SYSTEM: Review the conversation history above.\n"
+            f"The following tasks have not been marked as completed:\n"
+            f"{task_context_block}\n\n"
+            f"For each incomplete task, determine whether the conversation history already contains "
+            f"a completed result that satisfies the task description. If yes, mark it 'completed'. "
+            f"If the task was genuinely not attempted or failed, mark it 'failed' and provide a "
+            f"specific follow-up instruction that will resolve it.\n"
+            f"Respond with a JSON object following the schema exactly."
         )
 
         if not exec_history or exec_history[-1].get("content") != content:
@@ -3671,7 +4244,10 @@ class PlannerEngine:
                             updated = True
 
                     if updated:
-                        await self.ui.emit_html_embed(self.state.tasks)
+                        self.current_plan_html = self.ui.get_html_status_block(
+                            self.state.tasks
+                        )
+                        await self._emit_replace(total_emitted)
 
                     follow_up = judge_res.get("follow_up_prompt", "").strip()
                     still_incomplete = [
@@ -3728,6 +4304,8 @@ class PlannerEngine:
             and not exec_history[-1].get("tool_calls")
         ):
             exec_history.pop()
+        
+        # Revert: Don't prepend here; let PlannerEngine.run handle it once.
         return False, total_emitted
 
 
@@ -3761,9 +4339,13 @@ class Pipe:
             default="",
             description="Model used for review_tasks , works Best with a Base Model (not workspace presets) | (leave blank to use the planner model)",
         )
-        ENABLE_SUBAGENT_CHECK: bool = Field(
+        PARALLEL_TOOL_EXECUTION: bool = Field(
             default=False,
-            description="Enable a judge model to verify subagent responses for task completion and correct asset referencing BEFORE returning to the planner.",
+            description="Enable parallel execution of tool calls using asyncio.gather. WARNING: Use with caution if tools have stateful dependencies within the same turn.",
+        )
+        PARALLEL_SUBAGENT_EXECUTION: bool = Field(
+            default=False,
+            description="Enable parallel execution of subagent tool calls using asyncio.gather. WARNING: Use with caution if tools have stateful dependencies within the same turn.",
         )
         SUBAGENT_CHECK_MODEL: str = Field(
             default="",
@@ -3853,6 +4435,10 @@ Your goal is to fulfill the user's request.""",
         ENABLE_PLAN_APPROVAL: bool = Field(
             default=False,
             description="Enable manual plan approval. After planning, you will be asked to Accept or provide Feedback (Ignored in YOLO mode).",
+        )
+        ENABLE_SUBAGENT_CHECK: bool = Field(
+            default=False,
+            description="Enable a judge model to verify subagent responses for task completion and correct asset referencing BEFORE returning to the planner.",
         )
 
     def __init__(self):
