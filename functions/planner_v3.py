@@ -18,7 +18,17 @@ import time
 import uuid
 import html as html_module
 from uuid import uuid4
-from typing import Callable, Awaitable, Any, Optional, Union, Generator, AsyncGenerator, Dict
+from typing import (
+    Callable,
+    Awaitable,
+    Any,
+    Optional,
+    Union,
+    Generator,
+    AsyncGenerator,
+    Dict,
+    List,
+)
 from pydantic import BaseModel, Field
 from fastapi import Request, UploadFile
 from starlette.datastructures import Headers
@@ -63,7 +73,6 @@ try:
     _apply_comfy_patch()
 except Exception as e:
     logging.error(f"Failed to apply ComfyUI parallelism patch: {e}")
-
 
 
 # --- Pydantic Models ---
@@ -112,6 +121,7 @@ class SubagentTaskResponse(BaseModel):
 # --- New Helper Classes ---
 class LockedEmitter:
     """Thread-safe proxy for the event emitter to prevent concurrent DB writes in Open WebUI event handlers."""
+
     def __init__(self, emitter: Optional[Callable[[dict], Awaitable[None]]]):
         self.emitter = emitter
         self.lock = asyncio.Lock()
@@ -327,8 +337,6 @@ class Utils:
             ).strip()
         return tool_calls_dict, cleaned_text
 
-
-
     @staticmethod
     def clean_thinking(text: str) -> str:
         """
@@ -435,13 +443,13 @@ class Utils:
     @staticmethod
     def clean_ui_artifacts(text: str) -> str:
         """
-        Strips UI-specific HTML components (like <details>, <iframe, <thinking>) 
+        Strips UI-specific HTML components (like <details>, <iframe, <thinking>)
         that may have been added by Open WebUI's result processing.
         Preserves model reasoning if it's not wrapped in UI-only tags.
         """
         if not text or not isinstance(text, str):
             return text
-        
+
         # 1. Strip reasoning/status details — these are pure UI decoration
         text = re.sub(
             r'<details\s+type="(?:reasoning|status|state)".*?>.*?</details>',
@@ -450,8 +458,13 @@ class Utils:
             flags=re.DOTALL,
         )
         # 2. Strip thinking/thought tags - redundant with clean_thinking but safe here
-        text = re.sub(r"<(?:thinking|thought)>.*?</(?:thinking|thought)>", "", text, flags=re.DOTALL)
-        
+        text = re.sub(
+            r"<(?:thinking|thought)>.*?</(?:thinking|thought)>",
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+
         return text.strip()
 
     @staticmethod
@@ -498,7 +511,9 @@ class Utils:
             if hasattr(response, "body_iterator"):
                 sse_buffer = ""
                 async for chunk in response.body_iterator:
-                    decoded = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+                    decoded = (
+                        chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+                    )
                     sse_buffer += decoded
                     events, sse_buffer, done = Utils._parse_sse_events(sse_buffer)
                     for event_payload in events:
@@ -531,7 +546,10 @@ class Utils:
                     error_detail = body_json.get("error", {}).get(
                         "message", str(body_json)
                     )
-                    yield {"type": "error", "text": f"LLM Provider Error: {error_detail}"}
+                    yield {
+                        "type": "error",
+                        "text": f"LLM Provider Error: {error_detail}",
+                    }
                     return
                 except:
                     yield {
@@ -575,7 +593,7 @@ class Utils:
                     # Safer regex: must not follow a word character or dot, followed by the exact ID and a word boundary
                     pattern = rf"(?<![\w.-])@{re.escape(tid)}\b"
                     # Escape backslashes in the replacement string for re.sub
-                    safe_result = result.replace('\\', '\\\\')
+                    safe_result = result.replace("\\", "\\\\")
                     parts[i] = re.sub(pattern, safe_result, parts[i])
 
         return "".join(parts)
@@ -603,7 +621,7 @@ class Utils:
                 # Safer regex: must not follow a word character or dot, followed by the exact ID and a word boundary
                 pattern = rf"(?<![\w.-])@{re.escape(tid)}\b"
                 # Escape backslashes in the replacement string for re.sub
-                safe_result = result.replace('\\', '\\\\')
+                safe_result = result.replace("\\", "\\\\")
                 data = re.sub(pattern, safe_result, data)
             return data
         elif isinstance(data, list):
@@ -720,6 +738,8 @@ class PlannerState:
         return self._subagent_history
 
     def update_task(self, task_id: str, status: str, description: str = None) -> None:
+        if not task_id or not isinstance(task_id, str) or not task_id.strip():
+            return
         if task_id not in self._tasks:
             self._tasks[task_id] = TaskStateModel(status="pending", description="")
         self._tasks[task_id].status = status
@@ -1035,7 +1055,10 @@ class UIRenderer:
         name: str,
         arguments: str,
         done: bool = False,
-        result: Any = None,
+        result: str = "",
+        files: list = None,
+        embeds: list = None,
+        duration: str = "",
     ) -> str:
         """Constructs the HTML for a tool call to be embedded in the chat message (v3 parity)."""
         args_escaped = html_module.escape(arguments)
@@ -1048,16 +1071,23 @@ class UIRenderer:
             result_escaped = html_module.escape(
                 json.dumps(result_text, ensure_ascii=False)
             )
-            return (
-                f'<details type="tool_calls" done="true" id="{call_id}" '
-                f'name="{name}" arguments="{args_escaped}" '
-                f'result="{result_escaped}">\n'
-                f"<summary>Tool Executed</summary>\n</details>\n"
-            )
+        result_str = str(result) if result is not None else ""
+        res_escaped = html_module.escape(result_str)
+
+        # Format files/embeds as JSON if present
+        files_json = json.dumps(files) if files else ""
+        embeds_json = json.dumps(embeds) if embeds else ""
+
+        # Default summary for the expanded view
+        default_summary = f"View Result from {name}"
+        if not done:
+            default_summary = f"Executing {name}..."
+
         return (
-            f'<details type="tool_calls" done="false" id="{call_id}" '
-            f'name="{name}" arguments="{args_escaped}">\n'
-            f"<summary>Executing...</summary>\n</details>\n"
+            f'<details type="tool_calls" done="{"true" if done else "false"}" id="{call_id}" '
+            f'name="{name}" arguments="{args_escaped}" result="{res_escaped}" '
+            f"files='{files_json}' embeds='{embeds_json}' duration=\"{duration}\">\n"
+            f"<summary>{default_summary}</summary>\n</details>\n"
         )
 
     def get_html_status_block(self, planner_state: dict[str, Any]) -> str:
@@ -1079,7 +1109,6 @@ class UIRenderer:
         )
 
     def _generate_html_embed(self, planner_state: dict[str, Any]) -> str:
-
 
         embed_id = "pe-" + hashlib.md5(str(time.monotonic()).encode()).hexdigest()[:8]
 
@@ -1319,7 +1348,7 @@ class ToolRegistry:
         # schemas for IDs (no longer using enum to allow dynamic task creation)
         task_id_schema = {
             "type": "string",
-            "description": "ID identifying the conversation thread (e.g. 'task_research').",
+            "description": "REQUIRED: Unique identifier for the task/thread (e.g. 'task_research').",
         }
 
         if plan_mode:
@@ -1357,7 +1386,7 @@ class ToolRegistry:
         # call_subagent: use generic task_id schema
         sub_task_id_schema = {
             "type": "string",
-            "description": "ID identifying the conversation thread (e.g. 'task_research').",
+            "description": "REQUIRED: Unique identifier for this subagent thread (e.g. 'task_research').",
         }
 
         tools_spec.append(
@@ -1507,7 +1536,9 @@ class ToolRegistry:
         # 1. Resolve external tools
         tools_dict = {}
         if tool_ids:
-            tools_dict = await get_tools(self.request, tool_ids, self.user, extra_params)
+            tools_dict = await get_tools(
+                self.request, tool_ids, self.user, extra_params
+            )
 
         # 2. Resolve filtered built-in tools
         # We need model_info for get_builtin_tools model context
@@ -1793,13 +1824,14 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
                 "   - **Rollback or Retry**: Move a task back to 'pending' or 'in_progress' if a retry is needed or if a subagent failed but can be corrected.\n"
                 "   - **Manual Completion**: Mark a task as 'completed' or 'failed' ONLY when the task did NOT involve calling a subagent. `call_subagent` already handles state transitions automatically.\n"
                 "   - **Avoid Redundancy**: Do NOT call `update_state` to set 'in_progress' or 'completed' for tasks you are delegating via `call_subagent`; observe the 'status' field in the tool response instead.\n"
+                "   - **NO REDUNDANT UPDATES**: NEVER call `update_state` to change a task's status to `in_progress` or `completed` if you are using `call_subagent` for that task. `call_subagent` manages these transitions internally. Doing so wastes tokens and execution turns.\n"
                 "   - **Constraints**: Always provide a `description` when adding a new `task_id`. For updates, the `description` is optional.\n"
                 "2. `call_subagent(model_id: str, prompt: str, task_id: str, related_tasks: list[str])`: Use this to delegate a subtask to a specialized model.\n"
                 "   - **Task Status Lifecycle**: Starting a `call_subagent` will automatically set the task to 'in_progress' ONLY if it is currently 'pending' or 'failed'. Success automatically marks the task as 'completed'. Check the `status` field in the response.\n"
                 "   - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent. To **continue or follow up** on a previous interaction, you MUST use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.\n"
                 "   - **@task_id Text Replacement (Orchestrator Macro)**: Writing `@task_id` (e.g., `@task_research`) in your **FINAL response** to the user will automatically insert the full text result of that task. **USE THIS to avoid re-typing or redundantly summarizing large code blocks, data, or technical reports.** Do NOT use these macros in subagent prompts — use `related_tasks` for that purpose.\n"
-                "   - **Raw Task ID (no @)**: Use the plain ID (`task_research`) in tool parameters. NEVER prefix with @ in parameter fields.\n"
-                "   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array.\n"
+                "   - **Raw Task ID (no @ or :)**: Use the plain ID (`task_research`) in tool parameters. NEVER prefix with @ or : in parameter fields or when defining task IDs.\n"
+                "   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array. **The task must already have a result stored (completed status) for this to work.**\n"
             )
             tool_idx = 3
         else:
@@ -1807,8 +1839,8 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
                 "1. `call_subagent(model_id: str, prompt: str, task_id: str, related_tasks: list[str])`: Use this to delegate a subtask to a specialized model.\n"
                 "   - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent. To **continue or follow up** on a previous interaction, use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.\n"
                 "   - **@task_id Text Replacement (Orchestrator Macro)**: Writing `@task_id` (e.g., `@task_research`) in your **FINAL response** to the user will automatically insert the full text result of that task. **USE THIS to avoid re-typing or redundantly summarizing large code blocks, data, or technical reports.** Do NOT use these macros in subagent prompts — use `related_tasks` for that purpose.\n"
-                "   - **Raw Task ID (no @)**: Use the plain ID (`task_research`) in tool parameters. NEVER prefix with @ in parameter fields.\n"
-                "   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array.\n"
+                "   - **Raw Task ID (no @ or :)**: Use the plain ID (`task_research`) in tool parameters. NEVER prefix with @ or : in parameter fields or when defining task IDs.\n"
+                "   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array. **The task must already have a result stored (completed status) for this to work.**\n"
             )
             tool_idx = 2
 
@@ -1823,7 +1855,7 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
             "- Delegate work to subagents using `call_subagent` for complex analysis, generation, or reasoning.\n"
             "- **CODING RULE**: For COMPLEX coding, scripting, calculation, or data-processing task, delegate to a `code_interpreter_agent` or equivalent. NEVER use web_search_agent or knowledge_agent for code. **ALWAYS provide FULL code in the final output by using @task_id substitution tags** (e.g., '@task_coding') to avoid truncation or partial copying.\n"
             "- **ALWAYS pass `related_tasks`** when a subagent needs results from previous tasks. Subagents CANNOT see other task results without this.\n"
-            "- **ID CONSISTENCY**: You MUST use the EXACT `task_id` values you defined during the PLANNING phase, unless you are creating a fundamentally new task that was not part of the original plan.\n"
+            "- **ID CONSISTENCY**: You MUST use the EXACT `task_id` values you defined during the PLANNING phase. NEVER prepend task IDs with colons (:) or @ symbols in tool calls.\n"
             "- **ANTIGRAVITY MACROS**: Use `@task_id` references in your FINAL response to include large previous outputs, code, or reports. **DO NOT summarize or manually copy-paste large technical results** if a macro can include the original verbatim.\n"
             "- Final Output is YOUR responsibility. Make it look professional and clean.\n"
             "- If any subagent response is incomplete, missing details, or lacks required assets, you MUST follow up with additional subagent calls or clarifying prompts until the answer is complete and all requirements are met.\n"
@@ -1846,7 +1878,7 @@ Analyze the request and decompose it into a series of logical, executable tasks 
 - **Output Schema**: Return STRICTLY a JSON object: `{"tasks": [{"task_id": "task_1_research", "description": "..."}, ...]}`.
 - **Task Granularity**: Each task should be an atomic, actionable step (e.g., "Use web_search_agent to find X", "Analyze the results of task_1_research to do Y", "Use code_interpreter_agent to build Z").
 - **Subagent Selection**: Describe tasks in terms of the available subagent capabilities if no subagent has the proper capabilities assume the orchestrator has it.
-- **Constraint**: Return ONLY the raw JSON object. NO prose, NO explanations, NO greetings.
+- **Constraint**: Return ONLY the raw JSON object. NO prose, NO explanations, NO greetings. DO NOT prepend task_id values with colons (:) or @ symbols.
 """
         elif mode == "execute":
             full_prompt += """
@@ -1991,7 +2023,7 @@ class SubagentManager:
                 "You can generate content in ANY language — HTML, CSS, JavaScript, Python, shell scripts, JSON, YAML, and more.\n"
                 "### FILE HANDLING:\n"
                 "- If the user provides a 'file:///' URI, this is the absolute local path on the backend server. Open it directly in your Python code.\n"
-                "- If you see a relative link like '/api/v1/files/uuid', and you need to access it in your environment, use 'curl -O {OPEN_WEBUI_URL}/api/v1/files/uuid' (prepend the base URL).\n"
+                "- If you see a relative link like '/api/v1/files/uuid', and you need to access it in your environment, use 'curl --cookie \"token={OPEN_WEBUI_TOKEN}\" -O {OPEN_WEBUI_URL}/api/v1/files/uuid' (prepend the base URL and pass the token as a cookie).\n"
                 "- Use relative links (e.g. '/api/v1/files/uuid') when creating HTML artifacts or UI-facing references.\n"
                 "### BEST PRACTICES:\n"
                 "- For HTML/CSS/JS or any web content: output the FULL, complete, self-contained content DIRECTLY — "
@@ -2032,7 +2064,7 @@ class SubagentManager:
                 "You are a specialized terminal subagent. Your role is to execute terminal commands, read and write files, and perform system operations.\n"
                 "### FILE HANDLING:\n"
                 "- If the user provides a 'file:///' URI, this is the absolute local path on the backend server. Use it directly in your commands.\n"
-                "- If you see a relative link like '/api/v1/files/uuid', and you need to access it via <curl/wget>, prepend the base URL: '{OPEN_WEBUI_URL}/api/v1/files/uuid'.\n"
+                "- If you see a relative link like '/api/v1/files/uuid', and you need to access it via <curl/wget>, prepend the base URL and pass the token as a cookie: 'curl --cookie \"token={OPEN_WEBUI_TOKEN}\" -O {OPEN_WEBUI_URL}/api/v1/files/uuid'.\n"
                 "- If you see a relative link like '/files/uuid', and you need to access it, try to find it in the current working directory or subdirectories.\n"
                 "### BEST PRACTICES:\n"
                 "- Use 'ls -F' to distinguish directories from files.\n"
@@ -2204,7 +2236,9 @@ class SubagentManager:
                     current_retry += 1
                     continue
                 else:
-                    logger.warning(f"Failed to parse judge JSON after retries: {e}. Raw: {raw_judge_text}")
+                    logger.warning(
+                        f"Failed to parse judge JSON after retries: {e}. Raw: {raw_judge_text}"
+                    )
                     # Fallback to simple string check if JSON parsing fails for some reason
                     if "REDO:" in raw_judge_text.upper():
                         return False, raw_judge_text
@@ -2236,7 +2270,14 @@ class SubagentManager:
 
         # 2. Execute Loop
         result = await self._execute_subagent_loop(
-            context, task_id, model_id, chat_id, valves, body, user_valves, planner_input=prompt
+            context,
+            task_id,
+            model_id,
+            chat_id,
+            valves,
+            body,
+            user_valves,
+            planner_input=prompt,
         )
 
         return result
@@ -2280,6 +2321,28 @@ class SubagentManager:
         # Inject base_url into subagent instructions (Terminal/Coding agents only if they use the placeholders)
         sub_sys = sub_sys.replace("{OPEN_WEBUI_URL}", self.base_url)
 
+        # Extract Authentication Token from Request (v3.5 extension)
+        # Support both Authorization header and Cookie: token=<JWT>
+        request = self.metadata.get("__request__")
+        token = ""
+        if request and hasattr(request, "headers"):
+            # 1. Try Cookie header (Open WebUI backend standard)
+            cookie_header = request.headers.get("cookie", "")
+            token_match = re.search(r"token=([^;]+)", cookie_header)
+            if token_match:
+                token = token_match.group(1).strip()
+
+            # 2. Fallback to Authorization: Bearer
+            if not token:
+                auth_header = request.headers.get("authorization", "")
+                if auth_header.lower().startswith("bearer "):
+                    token = auth_header[7:].strip()
+
+        # Perform token substitution in system prompt
+        # Internal substitution intended for subagents (terminal/code interpreter)
+        # to access Open WebUI files/API via curl/wget using {OPEN_WEBUI_TOKEN}.
+        sub_sys = sub_sys.replace("{OPEN_WEBUI_TOKEN}", token)
+
         # Subagent background execution rules (v3 parity)
         sub_sys += (
             "\n\nCRITICAL CONTEXT: You are running as a headless subagent entirely in the background. "
@@ -2309,6 +2372,10 @@ class SubagentManager:
 
         injection_content = "".join(results_injection)
         actual_prompt = prompt + injection_content
+
+        # Perform token substitution in the actual prompt
+        # Allows user/planner to pass wildcard to subagents (terminal/code interpreter).
+        actual_prompt = actual_prompt.replace("{OPEN_WEBUI_TOKEN}", token)
 
         if history:
             # v3 pacing: truncating history in sub-threads is risky for OpenRouter providers
@@ -2345,7 +2412,7 @@ class SubagentManager:
     ) -> dict[str, Any]:
         """Main tool-calling loop for the subagent."""
         sub_final_answer_chunks = []
-        sub_called_tools = []
+        sub_called_tools = {}
         sub_iteration = 0
         max_sub_iters = valves.MAX_SUBAGENT_ITERATIONS or 100
         history = context["history"]
@@ -2354,9 +2421,11 @@ class SubagentManager:
             sub_iteration += 1
 
             # (A) Iteration Limit Check
-            if not await self._handle_subagent_iteration_limit(
-                sub_iteration, max_sub_iters, task_id, model_id, user_valves
-            ):
+            can_continue, new_max = await self._handle_subagent_iteration_limit(
+                sub_iteration, max_sub_iters, task_id, model_id, valves, user_valves
+            )
+            max_sub_iters = new_max
+            if not can_continue:
                 sub_final_answer_chunks.append("[Subagent stopped at iteration limit.]")
                 break
 
@@ -2373,24 +2442,30 @@ class SubagentManager:
 
             if not sub_tc_dict:
                 # Loop Terminal - Final Answer found
-                
+
                 # Subagent Judge Verification (v3 parity extension)
                 if user_valves.ENABLE_SUBAGENT_CHECK:
                     current_answer = "".join(sub_final_answer_chunks).strip()
                     if current_answer:
-                        task_desc = self.state.tasks.get(task_id, TaskStateModel(status="pending")).description
-                        is_approved, redo_instruction = await self._verify_subagent_response(
-                            task_id,
-                            model_id,
-                            current_answer,
-                            valves,
-                            context["user_obj"],
-                            body,
-                            task_description=task_desc,
-                            planner_input=planner_input,
+                        task_desc = self.state.tasks.get(
+                            task_id, TaskStateModel(status="pending")
+                        ).description
+                        is_approved, redo_instruction = (
+                            await self._verify_subagent_response(
+                                task_id,
+                                model_id,
+                                current_answer,
+                                valves,
+                                context["user_obj"],
+                                body,
+                                task_description=task_desc,
+                                planner_input=planner_input,
+                            )
                         )
                         if not is_approved:
-                            history.append({"role": "user", "content": redo_instruction})
+                            history.append(
+                                {"role": "user", "content": redo_instruction}
+                            )
                             await self.ui.emit_status(
                                 f"Refining {model_id} response for {task_id}..."
                             )
@@ -2411,7 +2486,7 @@ class SubagentManager:
                 break
 
             if turn_result.get("error") and not sub_tc_dict:
-                # If a provider error occurred and no tools were found, 
+                # If a provider error occurred and no tools were found,
                 # we still append to history then break to avoid infinite loops.
                 history.append({"role": "assistant", "content": sub_content or ""})
                 break
@@ -2421,7 +2496,8 @@ class SubagentManager:
             history.append(
                 {
                     "role": "assistant",
-                    "content": sub_content or "",  # Some providers prefer "" over None with tools
+                    "content": sub_content
+                    or "",  # Some providers prefer "" over None with tools
                     "tool_calls": tool_calls_list,
                 }
             )
@@ -2442,7 +2518,9 @@ class SubagentManager:
                 await asyncio.gather(*tasks)
 
                 # Re-sort the history tail to match original tool_calls order
-                call_id_order = {tc.get("id"): i for i, tc in enumerate(tool_calls_list)}
+                call_id_order = {
+                    tc.get("id"): i for i, tc in enumerate(tool_calls_list)
+                }
                 history_tail_start = len(history) - len(tool_calls_list)
                 tool_tail = history[history_tail_start:]
                 tool_tail.sort(
@@ -2460,6 +2538,9 @@ class SubagentManager:
                         model_id,
                         sub_history_lock,
                     )
+
+                # Clear status after tool execution to avoid "hang"
+                await self.ui.emit_status(f"Consulting {model_id}...")
 
         final_result = "\n".join(sub_final_answer_chunks).strip()
         self.state.store_result(task_id, final_result)
@@ -2498,7 +2579,7 @@ class SubagentManager:
         stc: dict,
         context: dict,
         history: list,
-        sub_called_tools: list,
+        sub_called_tools: dict[str, int],
         model_id: str,
         history_lock: Optional[asyncio.Lock] = None,
     ) -> None:
@@ -2535,11 +2616,17 @@ class SubagentManager:
             )
 
     async def _handle_subagent_iteration_limit(
-        self, iteration: int, max_iters: int, task_id: str, model_id: str, user_valves
-    ) -> bool:
+        self,
+        iteration: int,
+        max_iters: int,
+        task_id: str,
+        model_id: str,
+        valves,
+        user_valves,
+    ) -> tuple[bool, int]:
         """Handles iteration limits by prompting the user or stopping if not in YOLO mode."""
         if user_valves.YOLO_MODE or max_iters <= 0 or iteration <= max_iters:
-            return True
+            return True, max_iters
 
         if self.metadata.get("__event_call__"):
             try:
@@ -2563,11 +2650,16 @@ class SubagentManager:
                     )
                 except:
                     res_json = {"action": "cancel", "value": str(raw_str)}
-                return res_json.get("action") == "continue"
+
+                if res_json.get("action") == "continue":
+                    # Add original valve amount to the limit
+                    extension = valves.MAX_SUBAGENT_ITERATIONS or 10
+                    return True, max_iters + extension
+                return False, max_iters
             except Exception as e:
                 logger.error(f"Iteration limit modal error: {e}")
-                return False
-        return False
+                return False, max_iters
+        return False, max_iters
 
     async def _execute_subagent_turn(
         self, context: dict[str, Any], body: dict[str, Any]
@@ -2679,7 +2771,7 @@ class SubagentManager:
         call_id: str,
         context: dict,
         history: list,
-        sub_called_tools: list,
+        sub_called_tools: dict[str, int],
         model_id: str,
         history_lock: Optional[asyncio.Lock] = None,
     ) -> None:
@@ -2688,28 +2780,41 @@ class SubagentManager:
         try:
             # UI Parity: Emit status and tool call details
             await self.ui.emit_status(f"[Subagent: {model_id}] Executing {name}...")
-            # We don't strictly need tc_tag here as in planner, 
+            # We don't strictly need tc_tag here as in planner,
             # but we follow v3's internal logging/status pattern.
 
             # Inject metadata variables for tools that support them (v3.5 robustness)
             # This ensures builtin tools like generate_image can emit files/status.
-            allowed_keys = target_tool.get("spec", {}).get("parameters", {}).get("properties", {}).keys()
+            allowed_keys = (
+                target_tool.get("spec", {})
+                .get("parameters", {})
+                .get("properties", {})
+                .keys()
+            )
             filtered_args = {k: v for k, v in args_obj.items() if k in allowed_keys}
-            
+
             # Context variables required by many built-in tools
             context_vars = {
                 "__request__": self.metadata.get("__request__"),
                 "__user__": self.metadata.get("__user__"),
                 "__event_emitter__": self.locked_emitter,
                 "__event_call__": self.metadata.get("__event_call__"),
-                "__chat_id__": self.metadata.get("__chat_id__") or self.metadata.get("chat_id"),
-                "__message_id__": self.metadata.get("__message_id__") or self.metadata.get("message_id"),
+                "__chat_id__": self.metadata.get("__chat_id__")
+                or self.metadata.get("chat_id"),
+                "__message_id__": self.metadata.get("__message_id__")
+                or self.metadata.get("message_id"),
                 "__files__": self.metadata.get("__files__"),
                 "__metadata__": self.metadata.get("__metadata__"),
             }
-            # We add them to filtered_args if the tool needs them 
+            # We add them to filtered_args if the tool needs them
             # (BUILTIN tools often look for these specific keys)
-            filtered_args.update({k: v for k, v in context_vars.items() if v is not None and k in allowed_keys})
+            filtered_args.update(
+                {
+                    k: v
+                    for k, v in context_vars.items()
+                    if v is not None and k in allowed_keys
+                }
+            )
 
             # Execute tool in parallel (Monkeypatch fixes ComfyUI clientId deadlocks)
             tc_res = await target_tool["callable"](**filtered_args)
@@ -2725,12 +2830,12 @@ class SubagentManager:
                     self.metadata.get("__metadata__"),
                     context["user_obj"],
                 )
-                
+
                 # Unpack result components
                 res_str = ""
                 tc_files = []
                 tc_embeds = []
-                
+
                 if isinstance(tc_return, tuple):
                     if len(tc_return) >= 3:
                         res_str, tc_files, tc_embeds = tc_return[:3]
@@ -2741,18 +2846,26 @@ class SubagentManager:
 
                 # v3.5 robustness: ensure generated assets are linked in history and persisted to DB
                 if tc_files:
-                    target_chat_id = self.metadata.get("__chat_id__") or self.metadata.get("chat_id")
-                    target_msg_id = self.metadata.get("__message_id__") or self.metadata.get("message_id")
+                    target_chat_id = self.metadata.get(
+                        "__chat_id__"
+                    ) or self.metadata.get("chat_id")
+                    target_msg_id = self.metadata.get(
+                        "__message_id__"
+                    ) or self.metadata.get("message_id")
                     if target_chat_id and target_msg_id:
                         try:
                             # Synchronize with DB for multi-turn persistence
-                            Chats.add_message_files_by_id_and_message_id(target_chat_id, target_msg_id, tc_files)
+                            Chats.add_message_files_by_id_and_message_id(
+                                target_chat_id, target_msg_id, tc_files
+                            )
                             # Update internal metadata list for this turn
                             current_files = self.metadata.get("__files__")
                             if isinstance(current_files, list):
                                 current_files.extend(tc_files)
                         except Exception as e:
-                            logger.error(f"Failed to persist subagent tool files to DB: {e}")
+                            logger.error(
+                                f"Failed to persist subagent tool files to DB: {e}"
+                            )
 
             # Optional: Strip internal UI reasoning/tags if needed (user prefers keeping reasoning)
             # res_str = Utils.clean_ui_artifacts(res_str)
@@ -2761,10 +2874,8 @@ class SubagentManager:
                 k: (str(v)[:80] + "..." if len(str(v)) > 80 else str(v))
                 for k, v in args_obj.items()
             }
-            async with (history_lock or asyncio.Lock()):
-                sub_called_tools.append(
-                    {"tool": name, "arguments": truncated_args, "success": True}
-                )
+            async with history_lock or asyncio.Lock():
+                sub_called_tools[name] = sub_called_tools.get(name, 0) + 1
                 history.append(
                     {
                         "role": "tool",
@@ -2778,8 +2889,8 @@ class SubagentManager:
             await self.ui.emit_status(
                 f"[Subagent: {model_id}] Error executing {name}: {e}"
             )
-            async with (history_lock or asyncio.Lock()):
-                sub_called_tools.append({"tool": name, "arguments": {}, "success": False})
+            async with history_lock or asyncio.Lock():
+                sub_called_tools[name] = sub_called_tools.get(name, 0) + 1
                 history.append(
                     {
                         "role": "tool",
@@ -2789,7 +2900,6 @@ class SubagentManager:
                     }
                 )
 
-        
     async def _handle_missing_tool(
         self,
         name: str,
@@ -2797,22 +2907,24 @@ class SubagentManager:
         call_id: str,
         context: dict,
         history: list,
-        sub_called_tools: list,
+        sub_called_tools: dict[str, int],
         model_id: str,
         history_lock: Optional[asyncio.Lock] = None,
     ) -> bool:  # Returns True if it should break the loop due to repeated failures
         error_msg = f"Tool {name} not found."
         available_tools = list(context["tools_dict"].keys())
         if available_tools:
-            error_msg += f" Available tools for this subagent: {', '.join(available_tools)}."
+            error_msg += (
+                f" Available tools for this subagent: {', '.join(available_tools)}."
+            )
 
         logger.warning(f"[Subagent: {model_id}] {error_msg} Arguments: {args_str}")
         await self.ui.emit_status(
             f"[Subagent: {model_id}] Attempted unknown tool: {name}"
         )
 
-        async with (history_lock or asyncio.Lock()):
-            sub_called_tools.append({"tool": name, "arguments": {}, "success": False})
+        async with history_lock or asyncio.Lock():
+            sub_called_tools[name] = sub_called_tools.get(name, 0) + 1
 
         # Safety break logic
         consecutive_failures = 0
@@ -2820,11 +2932,13 @@ class SubagentManager:
             if h.get("role") == "tool" and "not found" in h.get("content", ""):
                 if h.get("name") == name:
                     consecutive_failures += 1
-                else: break
-            else: break
+                else:
+                    break
+            else:
+                break
 
         if consecutive_failures >= 3:
-            async with (history_lock or asyncio.Lock()):
+            async with history_lock or asyncio.Lock():
                 history.append(
                     {
                         "role": "tool",
@@ -2838,7 +2952,7 @@ class SubagentManager:
             )
             return True
 
-        async with (history_lock or asyncio.Lock()):
+        async with history_lock or asyncio.Lock():
             history.append(
                 {
                     "role": "tool",
@@ -2864,20 +2978,31 @@ class InternalToolExecutor:
         self.subagents = engine.subagents
         self.metadata = engine.metadata
 
-    async def update_state(self, updates: dict[str, Any], user_valves: Any = None) -> str:
+    async def update_state(
+        self, updates: dict[str, Any], user_valves: Any = None
+    ) -> str:
         """Updates the planner's internal state and refreshes the UI summary block."""
         if "task_id" in updates:
+            tid = updates.get("task_id", "").lstrip("@:")
+            if not tid:
+                return "Error: task_id is required and cannot be empty or ':'."
             # Handle single task update (tool call format)
             self.state.update_task(
-                updates["task_id"], updates.get("status"), updates.get("description")
+                tid, updates.get("status"), updates.get("description")
             )
         else:
             # Handle batch update (internal format)
+            updated_count = 0
             for tid, tdata in updates.items():
                 if isinstance(tdata, dict):
-                    self.state.update_task(
-                        tid, tdata.get("status"), tdata.get("description")
-                    )
+                    clean_tid = tid.lstrip("@:")
+                    if clean_tid:
+                        self.state.update_task(
+                            clean_tid, tdata.get("status"), tdata.get("description")
+                        )
+                        updated_count += 1
+            if updated_count == 0:
+                return "Error: No valid task IDs found in update payload."
 
         # Refresh the integrated inline plan summary
         self.engine.current_plan_html = self.ui.get_html_status_block(self.state.tasks)
@@ -2887,12 +3012,18 @@ class InternalToolExecutor:
     async def call_subagent(
         self, args: dict, chat_id: str, valves: Any, body: dict, user_valves: Any
     ) -> str:
+        task_id = args.get("task_id", "").lstrip("@:")
+        if not task_id:
+            return "Error: task_id is required for subagent calls."
+        if not args.get("model_id") or not args.get("prompt"):
+            return "Error: model_id and prompt are required for subagent calls."
+
         if user_valves.PLAN_MODE:
             current_status = self.state.tasks.get(
-                args["task_id"], TaskStateModel(status="pending")
+                task_id, TaskStateModel(status="pending")
             ).status
             if current_status in ["pending", "failed"]:
-                self.state.update_task(args["task_id"], "in_progress")
+                self.state.update_task(task_id, "in_progress")
                 self.engine.current_plan_html = self.ui.get_html_status_block(
                     self.state.tasks
                 )
@@ -2900,18 +3031,34 @@ class InternalToolExecutor:
                     getattr(self.engine, "total_emitted", "")
                 )
 
+        sanitized_related = []
+        missing_tasks = []
+        for rt in args.get("related_tasks", []):
+            if rt is None:
+                continue
+            clean_rt = str(rt).lstrip("@:")
+            if not clean_rt:
+                continue
+            if clean_rt not in self.state.results:
+                missing_tasks.append(rt)
+            else:
+                sanitized_related.append(clean_rt)
+
+        if missing_tasks:
+            return f"Error: The following related tasks do not exist or have no results yet: {', '.join(missing_tasks)}. Ensure you only list completed tasks in 'related_tasks'."
+
         res_dict = await self.subagents.call_subagent(
             args["model_id"],
             args["prompt"],
-            args["task_id"],
-            args.get("related_tasks", []),
+            task_id,
+            sanitized_related,
             chat_id,
             valves,
             body,
             user_valves,
             self.metadata,
         )
-        self.state.update_task(args["task_id"], "completed")
+        self.state.update_task(task_id, "completed")
         if user_valves.PLAN_MODE:
             self.engine.current_plan_html = self.ui.get_html_status_block(
                 self.state.tasks
@@ -2995,10 +3142,12 @@ class InternalToolExecutor:
         )
 
     def read_task_result(self, args: dict) -> str:
-        rid = args.get("task_id", "").lstrip("@")
+        rid = args.get("task_id", "").lstrip("@:")
         return self.state.results.get(rid, f"Task {rid} not found.")
 
-    async def review_tasks(self, args: dict, valves: Any, body: dict, user_obj: Any) -> str:
+    async def review_tasks(
+        self, args: dict, valves: Any, body: dict, user_obj: Any
+    ) -> str:
         rt_ids, rt_prompt = args.get("task_ids", []), args.get("prompt", "")
         if not rt_ids or not rt_prompt:
             return "Error: must specify task_ids and prompt."
@@ -3006,7 +3155,7 @@ class InternalToolExecutor:
         await self.ui.emit_status("Reviewing tasks cross-reference...")
         review_sys = "You are a specialized review subagent. Synthesize the following task results logically."
         for rx in rt_ids:
-            clean_rx = rx.lstrip("@")
+            clean_rx = rx.lstrip("@:")
             if clean_rx in self.state.results:
                 review_sys += f"\n\n--- RESULTS FROM TASK {rx} ---\n{self.state.results[clean_rx]}\n--- END OF {rx} ---\n"
 
@@ -3071,44 +3220,56 @@ class PlannerEngine:
         """Helper to emit an append-only message event (efficient for content deltas)."""
         await self.ui.emitter({"type": "message", "data": {"content": delta}})
 
-    async def run(self, chat_id: str, valves: Any, user_valves: Any, body: dict, files: list = None) -> Union[str, Generator, AsyncGenerator]:
+    async def run(
+        self,
+        chat_id: str,
+        valves: Any,
+        user_valves: Any,
+        body: dict,
+        files: list = None,
+    ) -> AsyncGenerator[str, None]:
         """Main entry point for the planner engine. Orchestrates planning, execution, and verification."""
-        
+
         # v3.5: Initialize turn body track
         self.total_emitted = ""
 
         # 0. State Recovery (v3.3)
         # We attempt to restore previous turn's state BEFORE clearing.
         await self._recover_state_from_files(body, chat_id, files)
-        
+
         user_obj = self.metadata.get("__user_obj__")
 
         # 1. Phase 1: Planning
         if user_valves.PLAN_MODE:
             await self._phase_planning(valves, user_valves, user_obj, body)
+            yield ""  # Heartbeat
 
         # 2. Phase 2: Execution & Verification Loop
-        final_answer = await self._phase_execution_loop(
+        # We use an async generator for the loop to keep the stream alive
+        final_answer = ""
+        async for delta in self._phase_execution_loop(
             chat_id, valves, user_valves, user_obj, body
-        )
-        
+        ):
+            if isinstance(delta, str):
+                final_answer = delta  # Final string returned at the end of generator
+                yield ""  # Heartbeat token
+
         # 3. State Persistence (v3.3)
-        # Save state to file and attach to response
         await self._save_state_to_file(chat_id)
 
         # v3.5: Final response and asset persistence sync
-        # We emit the final files list to the socket to ensure the UI has the latest state,
-        # but return a string to the Pipe to ensure stable persistence without bare-text issues.
         full_content = self.current_plan_html + final_answer
-        
+
         final_files = []
         target_chat_id = self.metadata.get("__chat_id__")
         target_msg_id = self.metadata.get("__message_id__")
-        
+
         if target_chat_id and target_msg_id:
             try:
                 # Query the actual state of the message in DB to include all files (from state and tools)
-                full_message = Chats.get_message_by_id_and_message_id(target_chat_id, target_msg_id)
+                full_message = Chats.get_message_by_id_and_message_id(
+                    target_chat_id, target_msg_id
+                )
                 if full_message:
                     final_files = full_message.get("files", [])
             except Exception as e:
@@ -3120,20 +3281,20 @@ class PlannerEngine:
         if final_files and self.ui:
             await self.ui.emitter({"type": "files", "data": {"files": final_files}})
 
-        # Return the full content as a string. 
+        # We yield the final content as the last token
         # For Pipes, this is the most stable way to ensure the final save includes all text.
-        # Assets are maintained via the 'files' and 'replace' emitters.
-        return full_content
+        yield full_content
+        return
 
-
-
-    async def _recover_state_from_files(self, body: dict, chat_id: str, current_files: list = None) -> None:
+    async def _recover_state_from_files(
+        self, body: dict, chat_id: str, current_files: list = None
+    ) -> None:
         """
         Scans attached files (current and history) for the latest state file.
         Prioritizes the absolute latest JSON state file found.
         """
         state_file = None
-        
+
         # 1. First, check files attached directly to this message
         if current_files:
             for f in reversed(current_files):
@@ -3141,38 +3302,42 @@ class PlannerEngine:
                 if "planner_state" in name and name.endswith(".json"):
                     state_file = f
                     break
-        
+
         # 2. If not found in current message, look back through history (explicit DB query)
         if not state_file:
             chat_id = self.metadata.get("__chat_id__")
             if chat_id:
-                logger.info(f"Performing deep history scan for chat {chat_id} via database...")
+                logger.info(
+                    f"Performing deep history scan for chat {chat_id} via database..."
+                )
                 chat_obj = Chats.get_chat_by_id(chat_id)
                 if chat_obj and hasattr(chat_obj, "chat"):
                     messages_map = chat_obj.chat.get("history", {}).get("messages", {})
                     # Standard Open WebUI history traversal
                     current_id = chat_obj.chat.get("history", {}).get("currentId")
-                    
+
                     visited = set()
                     while current_id and current_id not in visited:
                         visited.add(current_id)
                         msg = messages_map.get(current_id)
                         if not msg:
                             break
-                        
+
                         msg_files = msg.get("files")
                         if msg_files:
                             for f in reversed(msg_files):
                                 name = f.get("name", f.get("filename", ""))
                                 if "planner_state" in name and name.endswith(".json"):
                                     state_file = f
-                                    logger.info(f"Successfully recovered state from DB history: {name}")
+                                    logger.info(
+                                        f"Successfully recovered state from DB history: {name}"
+                                    )
                                     break
-                        
+
                         if state_file:
                             break
                         current_id = msg.get("parentId")
-            
+
             # Fallback to body messages if DB query failed or chat_id missing
             if not state_file:
                 messages = body.get("messages", [])
@@ -3188,7 +3353,9 @@ class PlannerEngine:
                         break
 
         if not state_file:
-            logger.info("No planner state file found in current turn, database, or history.")
+            logger.info(
+                "No planner state file found in current turn, database, or history."
+            )
             return
 
         try:
@@ -3196,37 +3363,43 @@ class PlannerEngine:
             if not file_id:
                 logger.warning(f"State file found but missing ID: {state_file}")
                 return
-            
+
             # Use global Files model (Open WebUI)
             # Defensive check: if Files is somehow None or not available, log it
             if Files is None:
-                logger.error("Global 'Files' model table is None - cannot recover state.")
+                logger.error(
+                    "Global 'Files' model table is None - cannot recover state."
+                )
                 return
-                
+
             file_obj = Files.get_file_by_id(file_id)
             if not file_obj:
                 logger.warning(f"State file with ID {file_id} not found in database.")
                 return
-            
-            file_path = getattr(file_obj, 'path', None)
-            if not file_path and hasattr(file_obj, 'meta'):
-                file_path = file_obj.meta.get('path')
-            
+
+            file_path = getattr(file_obj, "path", None)
+            if not file_path and hasattr(file_obj, "meta"):
+                file_path = file_obj.meta.get("path")
+
             if file_path and os.path.exists(file_path):
-                with open(file_path, 'r', encoding='utf-8') as f_in:
+                with open(file_path, "r", encoding="utf-8") as f_in:
                     data = json.load(f_in)
-                    
+
                 # Restore tasks
                 if "tasks" in data:
                     self.state.tasks.clear()
                     for tid, tdata in data["tasks"].items():
-                        self.state.update_task(tid, tdata.get("status", "pending"), tdata.get("description", ""))
-                
+                        self.state.update_task(
+                            tid,
+                            tdata.get("status", "pending"),
+                            tdata.get("description", ""),
+                        )
+
                 # Restore results
                 if "results" in data:
                     self.state.results.clear()
                     self.state.results.update(data["results"])
-                
+
                 # Restore subagent history
                 if "subagent_history" in data:
                     self.state.subagent_history.clear()
@@ -3244,10 +3417,16 @@ class PlannerEngine:
                                     f"Discarding invalid subagent history key: {key_str}"
                                 )
                         except Exception as parse_err:
-                            logger.error(f"Failed to parse subagent history key {key_str}: {parse_err}")
-                    logger.info(f"Restored {len(self.state.subagent_history)} sub-conversation threads.")
-                
-                status_msg = f"Recovered state from {state_file.get('name', 'latest file')}"
+                            logger.error(
+                                f"Failed to parse subagent history key {key_str}: {parse_err}"
+                            )
+                    logger.info(
+                        f"Restored {len(self.state.subagent_history)} sub-conversation threads."
+                    )
+
+                status_msg = (
+                    f"Recovered state from {state_file.get('name', 'latest file')}"
+                )
                 logger.info(status_msg)
                 await self.ui.emit_status(status_msg)
             else:
@@ -3260,7 +3439,7 @@ class PlannerEngine:
         emitter = self.metadata.get("__event_emitter__")
         request = self.metadata.get("__request__")
         user = self.metadata.get("__user_obj__")
-        
+
         if not emitter or not request or not user:
             return
 
@@ -3273,38 +3452,34 @@ class PlannerEngine:
                     serialized_history[key_str] = history
 
             state_data = {
-                "tasks": {tid: {"status": t.status, "description": t.description} for tid, t in self.state.tasks.items()},
+                "tasks": {
+                    tid: {"status": t.status, "description": t.description}
+                    for tid, t in self.state.tasks.items()
+                },
                 "results": self.state.results,
-                "subagent_history": serialized_history
+                "subagent_history": serialized_history,
             }
-            
+
             filename = f"planner_state_{chat_id}.json"
-            content = json.dumps(state_data, ensure_ascii=False).encode('utf-8')
-            
+            content = json.dumps(state_data, ensure_ascii=False).encode("utf-8")
+
             # Use in-memory file with proper headers to set content_type
             file_upload = UploadFile(
-                file=io.BytesIO(content), 
+                file=io.BytesIO(content),
                 filename=filename,
-                headers=Headers({"content-type": "application/json"})
+                headers=Headers({"content-type": "application/json"}),
             )
-            
+
             # Call sync as in working examples and confirmed in source
             file_item = upload_file_handler(
-                request=request, 
-                file=file_upload, 
-                metadata={}, 
-                process=False, 
-                user=user
+                request=request, file=file_upload, metadata={}, process=False, user=user
             )
-            
+
             if file_item:
                 file_id = getattr(file_item, "id", None)
                 if file_id:
-                    file_info = {
-                        "file_id": str(file_id),
-                        "name": filename
-                    }
-                    
+                    file_info = {"file_id": str(file_id), "name": filename}
+
                     # 1. Update the internal list for this turn
                     internal_files = self.metadata.get("__files__")
                     if isinstance(internal_files, list):
@@ -3313,26 +3488,23 @@ class PlannerEngine:
                     # 2. Synchronize directly with the database for multi-turn persistence
                     target_chat_id = self.metadata.get("__chat_id__") or chat_id
                     target_msg_id = self.metadata.get("__message_id__")
-                    
+
                     if target_chat_id and target_msg_id:
                         try:
                             # Direct DB update (same method used in Doodle Paint)
                             Chats.add_message_files_by_id_and_message_id(
-                                target_chat_id, 
-                                target_msg_id, 
-                                [file_info]
+                                target_chat_id, target_msg_id, [file_info]
                             )
-                            logger.info(f"Successfully persisted state file to chat {target_chat_id} message {target_msg_id}")
+                            logger.info(
+                                f"Successfully persisted state file to chat {target_chat_id} message {target_msg_id}"
+                            )
                         except Exception as db_err:
-                            logger.error(f"Failed to synchronize state file with database: {db_err}")
+                            logger.error(
+                                f"Failed to synchronize state file with database: {db_err}"
+                            )
 
                     # 3. Emit event for immediate UI feedback
-                    await emitter({
-                        "type": "files",
-                        "data": {
-                            "files": [file_info]
-                        }
-                    })
+                    await emitter({"type": "files", "data": {"files": [file_info]}})
         except Exception as e:
             logger.error(f"Failed to save state to file: {e}")
 
@@ -3396,7 +3568,10 @@ class PlannerEngine:
             }
 
             # Inject model knowledge if knowledge_agent is NOT present
-            if not getattr(valves, "ENABLE_KNOWLEDGE_AGENT", True) and self.model_knowledge:
+            if (
+                not getattr(valves, "ENABLE_KNOWLEDGE_AGENT", True)
+                and self.model_knowledge
+            ):
                 plan_body["metadata"]["knowledge"] = self.model_knowledge
                 plan_body["metadata"]["__model_knowledge__"] = self.model_knowledge
 
@@ -3420,7 +3595,7 @@ class PlannerEngine:
                 tid, desc = task.get("task_id"), task.get("description")
                 if tid and desc:
                     self.state.update_task(tid, "pending", desc)
-            
+
             # After successful parsing, show the final formulated plan
             if self.state.tasks:
                 if user_valves.PLAN_MODE:
@@ -3428,7 +3603,6 @@ class PlannerEngine:
                         self.state.tasks
                     )
                     await self._emit_replace("")
-                break
 
             if not self.state.tasks:
                 if json_retries < max_json_retries:
@@ -3445,15 +3619,16 @@ class PlannerEngine:
                     json_retries += 1
                     continue
                 else:
-                    logger.warning("No tasks parsed from plan after retries. Using fallback.")
-                    self.state.update_task("main_task", "pending", "Process user request")
+                    logger.warning(
+                        "No tasks parsed from plan after retries. Using fallback."
+                    )
+                    self.state.update_task(
+                        "main_task", "pending", "Process user request"
+                    )
 
             await self.ui.emit_status(
                 f"Plan formed with {len(self.state.tasks)} tasks."
             )
-
-            if user_valves.PLAN_MODE:
-                await self.ui.emit_html_embed(self.state.tasks)
 
             # Plan Approval logic (Ignored in YOLO mode)
             if (
@@ -3511,10 +3686,11 @@ class PlannerEngine:
 
     async def _phase_execution_loop(
         self, chat_id: str, valves: Any, user_valves: Any, user_obj: Any, body: dict
-    ):
+    ) -> AsyncGenerator[str, None]:
         """Main loop for execution and periodic verification (v3 parity loop stability)."""
         planner_iteration = 0
         judge_retries = 0
+        max_planner_iters = valves.MAX_PLANNER_ITERATIONS or 20
         total_emitted = ""
 
         # Prepare context
@@ -3545,6 +3721,7 @@ class PlannerEngine:
             await self.ui.emit_status(
                 f"Starting execution for {len(self.state.tasks)} tasks..."
             )
+            yield ""  # Heartbeat
 
         external_tools_dict = await self.registry.get_planner_tools_dict(
             body, user_valves
@@ -3555,9 +3732,11 @@ class PlannerEngine:
             await self.ui.emit_status("Working...")
 
             # (A) Iteration Limit Check
-            if not await self._handle_iteration_limit(
-                planner_iteration, valves, user_valves
-            ):
+            can_continue, new_max = await self._handle_iteration_limit(
+                planner_iteration, max_planner_iters, valves, user_valves
+            )
+            max_planner_iters = new_max
+            if not can_continue:
                 break
 
             # (B) Execute Turn
@@ -3570,6 +3749,7 @@ class PlannerEngine:
                 turn_result["total_emitted"],
             )
             turn_start_base = turn_result["turn_start_base"]
+            yield ""  # Heartbeat
 
             # Reasoning Promotion (v3 parity): Only if NO content AND NO tool calls (prevent double content)
             if not content and not tc_dict and turn_result.get("reasoning"):
@@ -3578,9 +3758,11 @@ class PlannerEngine:
                 total_emitted = turn_start_base + content
                 self.total_emitted = total_emitted
                 await self._emit_replace(total_emitted)
+                yield ""  # Heartbeat
             elif content or tc_dict or turn_result.get("reasoning"):
                 # Ensure total_emitted is updated even if content is empty (v3 parity fix for reasoning stripping)
                 total_emitted = turn_emitted
+                yield ""  # Heartbeat
 
             if not tc_dict:
                 # (C) Verification Phase (Judge)
@@ -3595,6 +3777,7 @@ class PlannerEngine:
                         user_obj,
                         body,
                     )
+                    yield ""  # Heartbeat
                     if should_continue:
                         # Ensure UI reflects the judge's decision to continue before the next planner turn
                         self.total_emitted = total_emitted
@@ -3617,20 +3800,24 @@ class PlannerEngine:
                 await self.ui.emit_status("Completed", True)
                 self.total_emitted = total_emitted
                 await self._emit_replace(total_emitted)
-                
-                # Revert: Don't prepend here; let PlannerEngine.run handle it once.
-                return total_emitted
+
+                # We yield the final string as the last item
+                yield total_emitted
+                return  # End generator
 
             # (D) Handle Tool Calls
             tool_calls_list = list(tc_dict.values())
             exec_history.append(
                 {
                     "role": "assistant",
-                    "content": content or "",  # Some providers prefer "" over None with tools
+                    "content": content
+                    or "",  # Some providers prefer "" over None with tools
                     "tool_calls": tool_calls_list,
                 }
             )
-            total_emitted = await self._handle_tool_calls(
+
+            # Use async generator for tool calls too
+            async for delta in self._handle_tool_calls(
                 tool_calls_list,
                 exec_history,
                 total_emitted,
@@ -3640,18 +3827,17 @@ class PlannerEngine:
                 user_valves,
                 user_obj,
                 body,
-            )
+            ):
+                if isinstance(delta, str):
+                    total_emitted = delta
+                    yield ""  # Heartbeat
 
     async def _handle_iteration_limit(
-        self, iteration: int, valves: Any, user_valves: Any
-    ) -> bool:
+        self, iteration: int, max_iters: int, valves: Any, user_valves: Any
+    ) -> tuple[bool, int]:
         """Prompts user if iteration limit reached."""
-        if (
-            user_valves.YOLO_MODE
-            or valves.MAX_PLANNER_ITERATIONS <= 0
-            or iteration <= valves.MAX_PLANNER_ITERATIONS
-        ):
-            return True
+        if user_valves.YOLO_MODE or max_iters <= 0 or iteration <= max_iters:
+            return True, max_iters
         if self.metadata.get("__event_call__"):
             try:
                 js = self.ui.build_continue_cancel_js(
@@ -3677,12 +3863,14 @@ class PlannerEngine:
                 except:
                     res_json = {"action": "cancel", "value": str(raw_str)}
                 if res_json.get("action") == "continue":
-                    return True
+                    # Extend by original valve amount
+                    extension = valves.MAX_PLANNER_ITERATIONS or 20
+                    return True, max_iters + extension
                 await self.ui.emit_status("Planner stopped by user.", True)
             except Exception as e:
                 logger.error(f"Iteration limit modal error: {e}")
-                return False
-        return False
+                return False, max_iters
+        return False, max_iters
 
     async def _execute_planner_turn(
         self,
@@ -3741,7 +3929,9 @@ class PlannerEngine:
 
                     # Debounce Reasoning: Only emit every 500ms or 50 tokens
                     now = time.monotonic()
-                    if (now - last_emit_time > EMIT_INTERVAL_S) or (token_count >= TOKENS_THRESHOLD):
+                    if (now - last_emit_time > EMIT_INTERVAL_S) or (
+                        token_count >= TOKENS_THRESHOLD
+                    ):
                         last_emit_time = now
                         token_count = 0
                         # Clean tool calls and stray tags from reasoning display
@@ -3787,15 +3977,17 @@ class PlannerEngine:
                 if etype == "content":
                     text = event["text"]
                     content_chunks.append(text)
-                    
+
                     full_content = "".join(content_chunks)
                     display_content = Utils.clean_thinking(full_content)
                     new_total = total_emitted_base + display_content
-                    
+
                     if new_total != self.total_emitted:
                         # Only emit if the visible content actually changed
-                        delta = new_total[len(self.total_emitted):]
-                        if delta and not Utils.THINKING_TAG_CLEANER_PATTERN.search(text):
+                        delta = new_total[len(self.total_emitted) :]
+                        if delta and not Utils.THINKING_TAG_CLEANER_PATTERN.search(
+                            text
+                        ):
                             # Efficient delta append
                             await self._emit_message(delta)
                         else:
@@ -3878,34 +4070,46 @@ class PlannerEngine:
         user_valves: Any,
         user_obj: Any,
         body: dict,
-    ) -> str:
+    ) -> AsyncGenerator[str, None]:
         """Executes tool calls while providing immediate UI feedback via Details tags."""
 
-        # 1. Emit all tool calls (pending status) first - mimicking native OWUI behavior
-        # Keep track of individual tags for later replacement when done
+        # Count tools for native grouping logic (handled by OWUI)
         tc_tag_map = {}
         history_lock = asyncio.Lock()
-        for tc in sorted(tool_calls, key=lambda x: str(x.get("id", ""))):
-            func_name, args_str, call_id = (
-                tc["function"]["name"],
-                tc["function"]["arguments"],
-                tc.get("id", str(uuid4())),
-            )
-            # Build and append "Executing..." tag
+        sorted_tcs = sorted(tool_calls, key=lambda x: str(x.get("id", "")))
+
+        # Ensure spacing before the tool call batch
+        if total_emitted and not total_emitted.endswith("\n\n"):
+            total_emitted += "\n\n"
+
+        for tc in sorted_tcs:
+            func_name = tc["function"]["name"]
+            args_str = tc["function"]["arguments"]
+            call_id = tc.get("id", str(uuid4()))
+
+            # Build initial "Executing..." tag
             tc_tag = self.ui.build_tool_call_details(
                 call_id, func_name, args_str, done=False
             )
             tc_tag_map[call_id] = tc_tag
-            total_emitted += "\n\n" + tc_tag
+            total_emitted += tc_tag
 
+        # Ensure spacing after the tool call batch
+        total_emitted += "\n\n"
+
+        # Update UI with all initial tags
         self.total_emitted = total_emitted
         await self._emit_replace(total_emitted)
+        yield ""  # Heartbeat
 
         # 2. Sequential or Parallel execution
         if valves.PARALLEL_TOOL_EXECUTION:
             # Parallel execution with real-time UI updates via Pydantic model
             ui_state = UIState(total_emitted=total_emitted)
-            
+
+            # Use a simple counter to track completion for the generator
+            pending_count = len(sorted_tcs)
+
             tasks = [
                 self._execute_single_tool_call(
                     tc,
@@ -3920,10 +4124,14 @@ class PlannerEngine:
                     ui_state,
                     history_lock,
                 )
-                for tc in sorted(tool_calls, key=lambda x: str(x.get("id", "")))
+                for tc in sorted_tcs
             ]
 
-            await asyncio.gather(*tasks)
+            # We wait for all tasks, but we want to yield heartbeats while they run.
+            # asyncio.as_completed is better here.
+            for coro in asyncio.as_completed(tasks):
+                await coro
+                yield ""  # Heartbeat whenever a tool finishes
 
             # Re-sort the tool result messages appended during this parallel batch
             # to match the original tool_calls order
@@ -3938,7 +4146,8 @@ class PlannerEngine:
             total_emitted = ui_state.total_emitted
         else:
             # Sequential execution (original behavior)
-            for tc in sorted(tool_calls, key=lambda x: str(x.get("id", ""))):
+            for tc in sorted_tcs:
+                call_id = tc.get("id")
                 done_tag, _ = await self._execute_single_tool_call(
                     tc,
                     exec_history,
@@ -3952,13 +4161,17 @@ class PlannerEngine:
                     None,  # No shared state for sequential
                     history_lock,
                 )
-                total_emitted = total_emitted.replace(tc_tag_map[tc.get("id")], done_tag)
-                tc_tag_map[tc.get("id")] = done_tag
+
+                # Sibling update in sequential mode
+                total_emitted = total_emitted.replace(tc_tag_map[call_id], done_tag)
+                tc_tag_map[call_id] = done_tag
                 self.total_emitted = total_emitted
                 await self._emit_replace(total_emitted)
+                yield ""  # Heartbeat
 
         await self.ui.emit_status("Planner evaluating...")
-        return total_emitted
+        yield total_emitted
+        return
 
     async def _execute_single_tool_call(
         self,
@@ -4034,10 +4247,11 @@ class PlannerEngine:
                     tc_files = []
                     if isinstance(tc_return, tuple):
                         if len(tc_return) >= 2:
-                            res_str, tc_files = tc_return[:2]
+                            r_val, tc_files = tc_return[:2]
+                            res_str = str(r_val) if r_val is not None else ""
                     else:
-                        res_str = str(tc_return)
-                        
+                        res_str = str(tc_return) if tc_return is not None else ""
+
                     # Persistence & Visibility (v3.5)
                     if tc_files:
                         target_chat_id = self.metadata.get("__chat_id__") or chat_id
@@ -4045,7 +4259,9 @@ class PlannerEngine:
                         if target_chat_id and target_msg_id:
                             try:
                                 # Synchronize with DB for multi-turn persistence
-                                Chats.add_message_files_by_id_and_message_id(target_chat_id, target_msg_id, tc_files)
+                                Chats.add_message_files_by_id_and_message_id(
+                                    target_chat_id, target_msg_id, tc_files
+                                )
                                 # Update internal metadata list for this turn
                                 current_files = self.metadata.get("__files__")
                                 if isinstance(current_files, list):
@@ -4081,9 +4297,9 @@ class PlannerEngine:
             tool_res = f"Error: {e}"
 
         # Maintain global history - ordering is critical for KV caching and model consistency.
-        # We append as they finish (with lock), and the caller (_handle_tool_calls) 
+        # We append as they finish (with lock), and the caller (_handle_tool_calls)
         # re-sorts the history tail to match the original tool_calls order after completion.
-        async with (history_lock or asyncio.Lock()):
+        async with history_lock or asyncio.Lock():
             exec_history.append(
                 {
                     "role": "tool",
@@ -4095,21 +4311,24 @@ class PlannerEngine:
 
         # Update UI to "Done" status for THIS tool call
         done_tag = self.ui.build_tool_call_details(
-        call_id, func_name, args_str, done=True, result=tool_res
+            call_id, func_name, args_str, done=True, result=tool_res
         )
-        
-        # Real-time UI updates for parallel mode (dry extracting the emit_replace logic)
+
+        # Real-time UI updates for parallel mode
         if ui_state:
             async with ui_state.lock:
-                ui_state.total_emitted = ui_state.total_emitted.replace(tc_tag_map[call_id], done_tag)
+                # Direct sibling replacement in total_emitted
+                ui_state.total_emitted = ui_state.total_emitted.replace(
+                    tc_tag_map[call_id], done_tag
+                )
+                tc_tag_map[call_id] = done_tag
                 current_total = ui_state.total_emitted
                 self.total_emitted = current_total
-                
-            # Release lock before slow streaming emission (large content transfer)
-            await self._emit_replace(current_total)
-        
-        return done_tag, tool_res
 
+            # Release lock before slow streaming emission
+            await self._emit_replace(current_total)
+
+        return done_tag, tool_res
 
     async def _phase_verification(
         self,
@@ -4239,7 +4458,10 @@ class PlannerEngine:
                     updated = False
                     for upd in judge_res.get("updates", []):
                         tid, status = upd.get("task_id"), upd.get("status")
-                        if tid in self.state.tasks and status in ["completed", "failed"]:
+                        if tid in self.state.tasks and status in [
+                            "completed",
+                            "failed",
+                        ]:
                             self.state.update_task(tid, status, upd.get("description"))
                             updated = True
 
@@ -4277,15 +4499,21 @@ class PlannerEngine:
                                 + "\n</details>\n\n"
                             )
 
-                        await self.ui.emit_status("Continuing based on judge feedback...")
+                        await self.ui.emit_status(
+                            "Continuing based on judge feedback..."
+                        )
                         return True, total_emitted
                     break
                 else:
                     raise ValueError(f"No JSON brace found in judge response: {raw}")
             except Exception as e:
                 if current_judge_retry < max_judge_retries:
-                    logger.warning(f"Judge verification parsing failed: {e}. Retrying...")
-                    judge_body["messages"].append({"role": "assistant", "content": "".join(judge_chunks)})
+                    logger.warning(
+                        f"Judge verification parsing failed: {e}. Retrying..."
+                    )
+                    judge_body["messages"].append(
+                        {"role": "assistant", "content": "".join(judge_chunks)}
+                    )
                     judge_body["messages"].append(
                         {
                             "role": "user",
@@ -4304,7 +4532,7 @@ class PlannerEngine:
             and not exec_history[-1].get("tool_calls")
         ):
             exec_history.pop()
-        
+
         # Revert: Don't prepend here; let PlannerEngine.run handle it once.
         return False, total_emitted
 
@@ -4467,7 +4695,7 @@ Your goal is to fulfill the user's request.""",
         """
         # Ensure metadata is present even if not passed
         __metadata__ = __metadata__ or body.get("metadata", {})
-        
+
         self.user_valves = (
             __user__.pop("valves", None)
             if isinstance(__user__, dict)
@@ -4523,6 +4751,9 @@ Your goal is to fulfill the user's request.""",
             planner_info.get("info", {}).get("meta", {}).get("features", {})
         )
 
+        # Subagent Token Handling
+        # Extraction and substitution are handled internally during subagent context preparation.
+
         registry = ToolRegistry(
             self.valves,
             user_obj,
@@ -4544,4 +4775,8 @@ Your goal is to fulfill the user's request.""",
             ui, state, subagents, registry, metadata, model_knowledge=model_knowledge
         )
 
-        return await engine.run(chat_id, self.valves, self.user_valves, body, __files__)
+        # Use a generator to keep the SSE stream active and the "Exploring" status valid
+        async for delta in engine.run(
+            chat_id, self.valves, self.user_valves, body, __files__
+        ):
+            yield delta
