@@ -3,8 +3,18 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.5.0
+version: 3.6.0
 required_open_webui_version: 0.8.12
+
+Requirements (Open WebUI parity):
+- Native function calling only: models must use OpenAI-style ``tools`` on the API body.
+  Non-native tool modes are not supported.
+- Built-in virtual subagents (image_gen_agent, web_search_agent, knowledge_agent,
+  code_interpreter_agent, terminal_agent) use fixed role features so the pipe works
+  without duplicating workspace toggles; disable a role via planner valves if needed.
+- Models listed in SUBAGENT_MODELS / workspace terminal lists use the same tool
+  surface as their saved workspace model (toolIds, MCP, terminal, and builtins only
+  when native FC and meta.capabilities.builtin_tools allow).
 """
 
 import ast
@@ -16,6 +26,7 @@ import os
 import re
 import time
 import uuid
+import copy
 import html as html_module
 from uuid import uuid4
 from typing import (
@@ -38,11 +49,26 @@ from open_webui.utils.chat import (
     generate_chat_completion as generate_raw_chat_completion,
 )
 from open_webui.utils.tools import get_tools, get_builtin_tools, get_terminal_tools
-from open_webui.utils.middleware import process_tool_result
+from open_webui.utils.middleware import (
+    process_tool_result,
+    add_file_context,
+    chat_completion_files_handler,
+    get_system_oauth_token,
+)
+from open_webui.utils.mcp.client import MCPClient
+from open_webui.utils.access_control import has_connection_access
+from open_webui.utils.misc import is_string_allowed
+from open_webui.utils.headers import include_user_info_headers
+from open_webui.env import (
+    ENABLE_FORWARD_USER_INFO_HEADERS,
+    FORWARD_SESSION_INFO_HEADER_CHAT_ID,
+    FORWARD_SESSION_INFO_HEADER_MESSAGE_ID,
+)
 from open_webui.models.models import Models
 from open_webui.models.users import Users
 from open_webui.models.files import Files
 from open_webui.models.chats import Chats
+from open_webui.models.skills import Skills
 from open_webui.routers.files import upload_file_handler
 
 # --- ComfyUI Parallelism Patch (v14) ---
@@ -73,6 +99,36 @@ try:
     _apply_comfy_patch()
 except Exception as e:
     logging.error(f"Failed to apply ComfyUI parallelism patch: {e}")
+
+
+# --- MCP Parallelism & Resilience Patch (v15) ---
+# Monkeypatch MCPClient to use unique identifiers per connection,
+# similar to ComfyUI, avoiding session collisions and status leaks.
+try:
+    from open_webui.utils.mcp.client import MCPClient
+
+    _orig_mcp_connect = MCPClient.connect
+
+    async def _patched_mcp_connect(self, url: str, headers: Optional[dict] = None):
+        # 1. Provide a unique identity to the session via headers.
+        # This helps backend servers isolate concurrent requests from the same user/agent.
+        new_headers = dict(headers) if headers else {}
+        uid = uuid.uuid4().hex[:8]
+        new_headers.setdefault("X-MCP-Client-ID", f"planner_{uid}")
+        
+        # Some SSE/HTTP implementations use User-Agent or custom headers for pinning.
+        orig_ua = new_headers.get("User-Agent", "OpenWebUI-MCP-Client")
+        new_headers["User-Agent"] = f"{orig_ua} (Planner-{uid})"
+
+        # 2. Call original connect with isolated headers
+        return await _orig_mcp_connect(self, url, new_headers)
+
+    if not hasattr(MCPClient, "_patched_mcp"):
+        MCPClient.connect = _patched_mcp_connect
+        MCPClient._patched_mcp = True
+except Exception as e:
+    logging.error(f"Failed to apply MCP parallelism patch: {e}")
+
 
 
 # --- Pydantic Models ---
@@ -158,6 +214,308 @@ def setup_logger():
 
 
 logger = setup_logger()
+
+
+def merge_workspace_model_dict(app_models: dict[str, Any], model_id: str) -> dict[str, Any]:
+    """Merge app.state.MODELS entry with DB model for OWUI-shaped workspace config (tool + builtin parity)."""
+    m = copy.deepcopy(app_models.get(model_id) or {"id": model_id, "info": {}})
+    if "info" not in m:
+        m["info"] = {}
+    meta = m["info"].setdefault("meta", {})
+    params = m["info"].setdefault("params", {})
+    db = Models.get_model_by_id(model_id)
+    if not db:
+        return m
+    db_meta = (
+        db.meta.model_dump()
+        if hasattr(db.meta, "model_dump")
+        else (dict(db.meta) if db.meta else {})
+    )
+    db_params = (
+        db.params.model_dump()
+        if hasattr(db.params, "model_dump")
+        else (dict(db.params) if db.params else {})
+    )
+    if isinstance(db_meta, dict):
+        for k, v in db_meta.items():
+            if k not in meta or meta.get(k) in (None, {}, []):
+                meta[k] = copy.deepcopy(v)
+    if isinstance(db_params, dict):
+        for k, v in db_params.items():
+            if k not in params or params.get(k) in (None, {}, []):
+                params[k] = copy.deepcopy(v)
+    return m
+
+
+def workspace_feature_flags(model: dict[str, Any]) -> dict[str, bool]:
+    """Features saved on the model (meta + params), same sources OWUI merges for workspace models."""
+    feats: dict[str, bool] = {}
+    info = model.get("info") or {}
+    for key in ("meta", "params"):
+        block = info.get(key) or {}
+        if isinstance(block.get("features"), dict):
+            for fk, fv in block["features"].items():
+                feats[fk] = bool(fv)
+    return feats
+
+
+async def planner_merge_mcp_tools_from_ids(
+    request: Request,
+    user: Any,
+    tool_ids: list[str],
+    metadata: dict[str, Any],
+    extra_params: dict[str, Any],
+    event_emitter: Any = None,
+    mcp_handler: Optional[Callable] = None,
+) -> dict[str, Any]:
+    """
+    Resolve server:mcp:* tool IDs like open_webui.utils.middleware.process_chat_payload
+    (get_tools in OWUI does not implement MCP).
+    """
+    out: dict[str, Any] = {}
+    if not tool_ids or not request:
+        return out
+
+    oauth_token = None
+    try:
+        oauth_token = await get_system_oauth_token(request, user)
+    except Exception:
+        pass
+
+    for tool_id in tool_ids:
+        if not isinstance(tool_id, str):
+            continue
+        
+        # v15: Improve resolution to handle unprefixed IDs or mcp: prefix
+        server_id = None
+        if tool_id.startswith("server:mcp:"):
+            server_id = tool_id[len("server:mcp:") :]
+        elif tool_id.startswith("mcp:"):
+            server_id = tool_id[len("mcp:") :]
+        else:
+            # v15: Check if this ID matches any known MCP server directly (unprefixed) OR is a prefixed tool name
+            for server_connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
+                if server_connection.get("type", "") == "mcp":
+                    sid = server_connection.get("info", {}).get("id")
+                    if not sid:
+                        continue
+                    if tool_id == sid or tool_id.startswith(f"{sid}_"):
+                        server_id = sid
+                        break
+        
+        if not server_id:
+            logger.debug(f"[Planner] tool_id '{tool_id}' not resolved as MCP. Prefix check failed.")
+            continue
+            
+        try:
+            mcp_server_connection = None
+            for server_connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
+                if (
+                    server_connection.get("type", "") == "mcp"
+                    and server_connection.get("info", {}).get("id") == server_id
+                ):
+                    mcp_server_connection = server_connection
+                    break
+
+            if not mcp_server_connection:
+                logger.error("MCP server with id %s not found in connections. Available server IDs: %s", 
+                             server_id, 
+                             [s.get("info", {}).get("id") for s in request.app.state.config.TOOL_SERVER_CONNECTIONS if s.get("type") == "mcp"])
+                continue
+
+            if not has_connection_access(user, mcp_server_connection):
+                logger.warning("Access denied to MCP server %s for user %s", server_id, getattr(user, "id", ""))
+                continue
+
+            auth_type = mcp_server_connection.get("auth_type", "")
+            headers: dict[str, str] = {}
+            if auth_type == "bearer":
+                headers["Authorization"] = f"Bearer {mcp_server_connection.get('key', '')}"
+            elif auth_type == "none":
+                pass
+            elif auth_type == "session":
+                tok = getattr(getattr(request, "state", None), "token", None)
+                creds = getattr(tok, "credentials", None) if tok else None
+                if creds:
+                    headers["Authorization"] = f"Bearer {creds}"
+            elif auth_type == "system_oauth":
+                if oauth_token:
+                    headers["Authorization"] = f"Bearer {oauth_token.get('access_token', '')}"
+            elif auth_type == "oauth_2.1":
+                try:
+                    splits = server_id.split(":")
+                    sid = splits[-1] if len(splits) > 1 else server_id
+                    mgr = getattr(request.app.state, "oauth_client_manager", None)
+                    if mgr:
+                        ot = await mgr.get_oauth_token(user.id, f"mcp:{sid}")
+                        if ot:
+                            headers["Authorization"] = f"Bearer {ot.get('access_token', '')}"
+                except Exception as e:
+                    logger.error("OAuth token for MCP: %s", e)
+
+            connection_headers = mcp_server_connection.get("headers", None)
+            if connection_headers and isinstance(connection_headers, dict):
+                for key, value in connection_headers.items():
+                    headers[key] = value
+
+            if ENABLE_FORWARD_USER_INFO_HEADERS and user:
+                headers = include_user_info_headers(headers, user)
+                if metadata and metadata.get("chat_id"):
+                    headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata.get("chat_id")
+                if metadata and metadata.get("message_id"):
+                    headers[FORWARD_SESSION_INFO_HEADER_MESSAGE_ID] = metadata.get("message_id")
+
+            if mcp_handler is not None:
+                client = await mcp_handler(
+                    url=mcp_server_connection.get("url", ""),
+                    headers=headers if headers else None,
+                )
+            else:
+                # Fallback to local client (original behavior, legacy or fallback)
+                client = MCPClient()
+                await client.connect(
+                    url=mcp_server_connection.get("url", ""),
+                    headers=headers if headers else None,
+                )
+
+            function_name_filter_list = mcp_server_connection.get("config", {}).get(
+                "function_name_filter_list", ""
+            )
+            if isinstance(function_name_filter_list, str):
+                function_name_filter_list = function_name_filter_list.split(",")
+
+            tool_specs = await client.list_tool_specs()
+
+            def make_tool_function(mcp_client, function_name, sid):
+                async def tool_function(**kwargs):
+                    try:
+                        logger.debug(f"[MCP] Calling '{function_name}' on server '{sid}' with args: {kwargs}")
+                        result = await mcp_client.call_tool(
+                            function_name,
+                            function_args=kwargs,
+                        )
+                        logger.debug(f"[MCP] Raw result from '{function_name}' on '{sid}': {result}")
+                        
+                        # MCP returns CallToolResult with 'content' list
+                        if hasattr(result, "content") and result.content:
+                            texts = []
+                            for c in result.content:
+                                if hasattr(c, "text") and c.text:
+                                    texts.append(c.text)
+                                elif hasattr(c, "image"):
+                                    texts.append(f"[Image Content: {c.image[:50]}...]" if isinstance(c.image, str) else "[Image Content]")
+                                else:
+                                    texts.append(str(c))
+                            
+                            final_res = "\n".join(texts)
+                            logger.debug(f"[MCP] Unpacked result (len {len(final_res)}): {final_res[:100]}...")
+                            return final_res
+                            
+                        if hasattr(result, "isError") and result.isError:
+                            return f"MCP Error from {sid}: {result}"
+                            
+                        return str(result)
+                    except Exception as e:
+                        logger.error(f"Failed to call MCP tool '{function_name}' on '{sid}': {e}", exc_info=True)
+                        return f"Error calling MCP tool: {e}"
+
+                return tool_function
+
+            for tool_spec in tool_specs:
+                if function_name_filter_list:
+                    if not is_string_allowed(tool_spec["name"], function_name_filter_list):
+                        continue
+                tool_function = make_tool_function(client, tool_spec["name"], server_id)
+                out[f'{server_id}_{tool_spec["name"]}'] = {
+                    "spec": {
+                        **tool_spec,
+                        "name": f'{server_id}_{tool_spec["name"]}',
+                    },
+                    "callable": tool_function,
+                    "type": "mcp",
+                    "client": client,
+                    "direct": False,
+                }
+        except Exception as e:
+            logger.debug("MCP tool load failed for %s: %s", tool_id, e)
+            if event_emitter:
+                try:
+                    await event_emitter(
+                        {
+                            "type": "chat:message:error",
+                            "data": {
+                                "error": {
+                                    "content": f"Failed to connect to MCP server '{server_id}'"
+                                }
+                            },
+                        }
+                    )
+                except Exception:
+                    pass
+            continue
+
+    return out
+
+
+async def apply_native_completion_file_prep(
+    request: Any,
+    body: dict[str, Any],
+    user: Any,
+    workspace_model: dict[str, Any],
+    pipe_metadata: dict[str, Any],
+    event_emitter: Any,
+    has_builtin_tools_in_payload: bool,
+) -> None:
+    """
+    Mirror middleware: add_file_context when native FC + builtins are used;
+    then chat_completion_files_handler when file_context capability is enabled.
+    Mutates body in place (messages + metadata).
+    """
+    if not request or not user or not body:
+        return
+
+    async def _noop_emitter(_ev: dict) -> None:
+        return None
+
+    emitter = event_emitter if event_emitter is not None else _noop_emitter
+
+    info_params = (workspace_model.get("info") or {}).get("params") or {}
+    fc = info_params.get("function_calling", "native")
+    caps = ((workspace_model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
+    builtin_tools_enabled = caps.get("builtin_tools", True)
+    chat_id = pipe_metadata.get("chat_id")
+    msgs = body.get("messages")
+    if msgs is not None and fc == "native" and builtin_tools_enabled and body.get("tools") and has_builtin_tools_in_payload:
+        body["messages"] = add_file_context(list(msgs), chat_id, user)
+
+    file_context_enabled = caps.get("file_context", True)
+    if not file_context_enabled:
+        return
+
+    udump = user.model_dump() if hasattr(user, "model_dump") else {}
+    extra = {
+        "__event_emitter__": emitter,
+        "__metadata__": pipe_metadata,
+        "__user__": udump,
+        "__request__": request,
+    }
+    try:
+        body, _flags = await chat_completion_files_handler(request, body, extra, user)
+    except Exception as e:
+        logger.error("chat_completion_files_handler (planner parity): %s", e)
+
+
+def unpack_terminal_tools_result(result: Any) -> tuple[dict, Any]:
+    """
+    Open WebUI get_terminal_tools returns (tools_dict, system_prompt) on success
+    but a bare dict on failure paths (not found, access denied, empty specs).
+    """
+    if isinstance(result, tuple) and len(result) == 2:
+        return result[0], result[1]
+    if isinstance(result, dict):
+        return result, None
+    return {}, None
+
 
 # ---------------------------------------------------------------------------
 # Utility Classes
@@ -724,6 +1082,7 @@ class PlannerState:
         self._subagent_history: dict[Any, Any] = (
             global_history if global_history is not None else {}
         )
+        self._subagent_metadata: dict[Any, Any] = {}
 
     @property
     def tasks(self) -> dict[str, TaskStateModel]:
@@ -736,6 +1095,10 @@ class PlannerState:
     @property
     def subagent_history(self) -> dict[Any, Any]:
         return self._subagent_history
+
+    @property
+    def subagent_metadata(self) -> dict[Any, Any]:
+        return self._subagent_metadata
 
     def update_task(self, task_id: str, status: str, description: str = None) -> None:
         if not task_id or not isinstance(task_id, str) or not task_id.strip():
@@ -1242,15 +1605,77 @@ class ToolRegistry:
         request: Any = None,
         pipe_metadata: dict[str, Any] = None,
         model_knowledge: Optional[list[dict]] = None,
-        planner_features: Optional[dict[str, Any]] = None,
+        planner_info: Optional[dict[str, Any]] = None,
+        mcp_handler: Optional[Callable] = None,
     ):
         self.valves = valves
         self.user = user
         self.request = request
         self.pipe_metadata = pipe_metadata or {}
         self.model_knowledge = model_knowledge
-        self.planner_features = planner_features or {}
+        self.planner_info = planner_info or {}
+        self.planner_features = self.planner_info.get("info", {}).get("meta", {}).get("features", {})
         self.subagent_tools_cache = {}
+        self.mcp_handler = mcp_handler
+
+    async def _resolve_model_skills(
+        self, model_db_info: Any, extra_params: dict
+    ) -> tuple[list[str], str]:
+        """
+        Replicate Open WebUI skill discovery logic.
+        Returns a list of skill IDs and a formatted system prompt fragment.
+        """
+        skill_ids = []
+        skill_prompt = ""
+
+        if not model_db_info:
+            return [], ""
+
+        # Handle both DB models and raw dictionaries (like pipe_metadata or app_models info)
+        if isinstance(model_db_info, dict):
+            # Try to resolve skillIds from either top-level or info.meta
+            meta = model_db_info.get("info", {}).get("meta", {})
+            if not meta:
+                meta = model_db_info # Direct metadata dict
+            model_skill_ids = meta.get("skillIds", [])
+        else:
+            meta = (
+                model_db_info.meta.model_dump()
+                if hasattr(model_db_info.meta, "model_dump")
+                else model_db_info.meta
+            )
+            model_skill_ids = meta.get("skillIds", []) if isinstance(meta, dict) else []
+
+        if not model_skill_ids:
+            return [], ""
+
+        try:
+            # Check user access to these skills
+            user_id = self.user.id
+            accessible_skill_ids = {
+                s.id for s in Skills.get_skills_by_user_id(user_id, "read")
+            }
+
+            available_skills = []
+            for sid in model_skill_ids:
+                if sid in accessible_skill_ids:
+                    skill = Skills.get_skill_by_id(sid)
+                    if skill and skill.is_active:
+                        available_skills.append(skill)
+                        skill_ids.append(sid)
+
+            if available_skills:
+                skill_descriptions = ""
+                for skill in available_skills:
+                    skill_descriptions += f"<skill>\n<name>{skill.name}</name>\n<description>{skill.description or ''}</description>\n</skill>\n"
+
+                if skill_descriptions:
+                    skill_prompt = f"<available_skills>\n{skill_descriptions}</available_skills>"
+
+        except Exception as e:
+            logger.error(f"Error resolving skills: {e}")
+
+        return skill_ids, skill_prompt
 
     def get_filtered_builtin_tools(
         self,
@@ -1263,7 +1688,8 @@ class ToolRegistry:
         Resolves built-in tools for the planner, filtering out those handled by subagents.
         Only adds tools if they were originally present in the planner model's features.
         """
-        if not self.planner_features:
+        # Always proceed if skills are present, otherwise check for features
+        if not self.planner_features and not extra_params.get("__skill_ids__"):
             return {}
 
         active_features = {}
@@ -1287,15 +1713,58 @@ class ToolRegistry:
                 ):
                     active_features["knowledge"] = True
 
-        if not active_features:
+        if not active_features and not extra_params.get("__skill_ids__"):
             return {}
 
         try:
+            # v3 parity: Explicitly control which built-in tool categories are enabled
+            # to prevent polluting the planner with redundant core tools (time, notes, etc.)
+            # handled by subagents.
+            # Base on live MODELS entry so capabilities/knowledge match Open WebUI core;
+            # view_skill is controlled only by extra_params["__skill_ids__"] (see OWUI get_builtin_tools).
+            if self.planner_info:
+                m_info = copy.deepcopy(self.planner_info)
+            else:
+                m_info = copy.deepcopy(model_info or {})
+            if "info" not in m_info:
+                m_info["info"] = {}
+            if "meta" not in m_info["info"]:
+                m_info["info"]["meta"] = {}
+            meta = m_info["info"]["meta"]
+            if self.model_knowledge:
+                mk = self.model_knowledge
+                meta["knowledge"] = (
+                    copy.deepcopy(mk)
+                    if isinstance(mk, list)
+                    else [copy.deepcopy(mk)]
+                )
+            elif isinstance(model_info, dict):
+                pipe_meta = model_info.get("info", {}).get("meta", {})
+                if pipe_meta.get("knowledge") is not None:
+                    meta.setdefault(
+                        "knowledge", copy.deepcopy(pipe_meta["knowledge"])
+                    )
+
+            # Start by disabling everything, then enable only active features and skills
+            builtin_tools_config = {
+                "time": False,
+                "knowledge": active_features.get("knowledge", False),
+                "chats": False,
+                "memory": active_features.get("memory", False), # Usually handled by OWUI, but for parity
+                "web_search": active_features.get("web_search", False),
+                "image_generation": active_features.get("image_generation", False),
+                "code_interpreter": active_features.get("code_interpreter", False),
+                "notes": False,
+                "channels": False,
+            }
+
+            m_info["info"]["meta"]["builtinTools"] = builtin_tools_config
+
             return get_builtin_tools(
                 self.request,
                 extra_params,
                 features=active_features,
-                model=model_info,
+                model=m_info,
             )
         except Exception as e:
             logger.error(f"Failed to load filtered built-in tools: {e}")
@@ -1340,6 +1809,16 @@ class ToolRegistry:
             sid = sid.strip()
             if sid and sid not in final_subagents:
                 final_subagents.append(sid)
+
+        # 3. Workspace Terminal Overrides: from WORKSPACE_TERMINAL_MODELS list
+        workspace_terminal_models = [
+            m.strip()
+            for m in self.valves.WORKSPACE_TERMINAL_MODELS.split(",")
+            if m.strip()
+        ]
+        for mid in workspace_terminal_models:
+            if mid and mid not in final_subagents:
+                final_subagents.append(mid)
 
         subagents_list = final_subagents
 
@@ -1527,30 +2006,80 @@ class ToolRegistry:
         self, body: dict[str, Any], user_valves: Any
     ) -> dict[str, Any]:
         """Resolve external tools and filtered built-in tools for the planner."""
-        tool_ids = body.get("metadata", {}).get("toolIds", [])
+        tool_ids = self.pipe_metadata.get("toolIds") or self.pipe_metadata.get("tool_ids") or []
+        logger.debug(f"[Planner] Resolving tools for planner. pipe_metadata keys: {list(self.pipe_metadata.keys())}, tool_ids: {tool_ids}")
         extra_params = {
             "chat_id": self.pipe_metadata.get("chat_id") or body.get("chat_id"),
             "tool_ids": tool_ids,
+            "__user__": self.user.model_dump() if hasattr(self.user, "model_dump") else (self.user.__dict__ if self.user else {}),
+            "__metadata__": self.pipe_metadata,
         }
 
-        # 1. Resolve external tools
-        tools_dict = {}
-        if tool_ids:
+        # 1. Resolve external tools (DB + OpenAPI servers) and MCP (not in get_tools)
+        seen_ids: set[str] = set()
+        ordered_tool_ids: list[str] = []
+        for t in tool_ids or []:
+            if t and t not in seen_ids:
+                seen_ids.add(t)
+                ordered_tool_ids.append(t)
+
+        tools_dict: dict[str, Any] = {}
+        if ordered_tool_ids:
             tools_dict = await get_tools(
-                self.request, tool_ids, self.user, extra_params
+                self.request, ordered_tool_ids, self.user, extra_params
             )
+        app_models = getattr(self.request.app.state, "MODELS", {})
+        model_ws = merge_workspace_model_dict(
+            app_models, body.get("model", "") or ""
+        )
+        extra_mcp = {
+            **extra_params,
+            "__model__": model_ws,
+            "__messages__": body.get("messages", []),
+            "__files__": self.pipe_metadata.get("files") or [],
+        }
+        mcp_tools = await planner_merge_mcp_tools_from_ids(
+            self.request,
+            self.user,
+            ordered_tool_ids,
+            self.pipe_metadata,
+            extra_mcp,
+            None,
+            self.mcp_handler,
+        )
+        if mcp_tools:
+            tools_dict.update(mcp_tools)
 
         # 2. Resolve filtered built-in tools
-        # We need model_info for get_builtin_tools model context
-        app_models = getattr(self.request.app.state, "MODELS", {})
-        planner_model_id = self.valves.PLANNER_MODEL
-        planner_info = app_models.get(planner_model_id, {})
+        # For the planner, configuration (skills/tools) comes from its own model info
+        skill_ids, skill_prompt = await self._resolve_model_skills(
+            self.planner_info, extra_params
+        )
+        if skill_prompt:
+            # For now, we set __skill_ids__ so view_skill is available.
+            extra_params["__skill_ids__"] = skill_ids
 
         builtin_tools = self.get_filtered_builtin_tools(
-            self.valves, user_valves, planner_info, extra_params
+            self.valves, user_valves, self.pipe_metadata, extra_params
         )
         if builtin_tools:
             tools_dict.update(builtin_tools)
+
+        # Terminal fallback for Planner
+        enable_planner_terminal = user_valves.ENABLE_PLANNER_TERMINAL_ACCESS
+        is_terminal_agent_present = self.valves.ENABLE_TERMINAL_AGENT or self.valves.WORKSPACE_TERMINAL_MODELS
+        
+        terminal_id = self.pipe_metadata.get("terminal_id")
+        if terminal_id and (enable_planner_terminal or not is_terminal_agent_present):
+            try:
+                raw_term = await get_terminal_tools(
+                    self.request, terminal_id, self.user, extra_params
+                )
+                t_tools, _t_sys = unpack_terminal_tools_result(raw_term)
+                if t_tools:
+                    tools_dict.update(t_tools)
+            except Exception as e:
+                logger.error(f"Failed to load terminal tools for planner: {e}")
 
         return tools_dict
 
@@ -1564,6 +2093,14 @@ class ToolRegistry:
         """Fetches tools for subagents, ensuring builtin tools (image gen, search, etc.) are loaded for virtual agents."""
         if model_id in self.subagent_tools_cache:
             return self.subagent_tools_cache[model_id]
+
+        # Ensure __user__ is present and non-empty for view_skill/builtin tools parity
+        if not extra_params.get("__user__") and self.user:
+             extra_params["__user__"] = self.user.model_dump() if hasattr(self.user, "model_dump") else (self.user.__dict__ if self.user else {})
+        
+        # If still empty, try fallback to pipe metadata or internal metadata
+        if not extra_params.get("__user__"):
+            extra_params["__user__"] = self.pipe_metadata.get("__user__") or {}
 
         # 1. Virtual Agents Handling
         if model_id in virtual_agents:
@@ -1581,22 +2118,36 @@ class ToolRegistry:
             if va.type == "terminal":
                 try:
                     terminal_id = self.pipe_metadata.get("terminal_id")
-                    s_tools_dict, terminal_sys = await get_terminal_tools(
+                    raw_term = await get_terminal_tools(
                         self.request, terminal_id, self.user, extra_params
                     )
+                    s_tools_dict, terminal_sys = unpack_terminal_tools_result(raw_term)
                 except Exception as e:
                     logger.error(f"Failed to load terminal tools for {model_id}: {e}")
             elif va.type == "builtin":
-                # Important: merge the va override with the actual model info to ensure id/name exist
-                builtin_model = va.builtin_model_override or {}
-                if not builtin_model and va_model_obj:
-                    builtin_model = va_model_obj
-                elif builtin_model and va_model_obj:
-                    # If we have both, we ensure the ID is carried over
+                if va.builtin_model_override:
+                    builtin_model = copy.deepcopy(va.builtin_model_override)
+                elif isinstance(va_model_obj, dict):
+                    builtin_model = copy.deepcopy(va_model_obj)
+                else:
+                    builtin_model = merge_workspace_model_dict(
+                        app_models, va_model_id
+                    )
+                if va.builtin_model_override and va_model_obj:
                     if hasattr(va_model_obj, "id"):
                         builtin_model["id"] = va_model_obj.id
                     elif isinstance(va_model_obj, dict):
                         builtin_model["id"] = va_model_obj.get("id", va_model_id)
+
+                if model_id == "knowledge_agent" and self.model_knowledge:
+                    bm_info = builtin_model.setdefault("info", {})
+                    bm_meta = bm_info.setdefault("meta", {})
+                    mk = self.model_knowledge
+                    bm_meta["knowledge"] = (
+                        copy.deepcopy(mk)
+                        if isinstance(mk, list)
+                        else [copy.deepcopy(mk)]
+                    )
 
                 try:
                     # Use features from va config and the merged model
@@ -1635,12 +2186,12 @@ class ToolRegistry:
             self.subagent_tools_cache[model_id] = result
             return result
 
-        # Regular subagent logic
-        model_info = app_models.get(model_id, {})
+        # Regular subagent: workspace model + exact toolIds/MCP, then builtins only per OWUI gates
+        model_ws = merge_workspace_model_dict(app_models, model_id)
         model_db_info = Models.get_model_by_id(model_id)
         model_system_message = ""
-        subagent_tool_ids = []
-        p_features = {}
+        subagent_tool_ids: list[str] = []
+        logger.debug(f"[Planner] Resolving subagent tools for {model_id}. Registry tracker: {self.mcp_handler is not None}")
 
         if model_db_info:
             meta = (
@@ -1655,54 +2206,131 @@ class ToolRegistry:
             )
 
             if isinstance(meta, dict):
-                subagent_tool_ids.extend(meta.get("toolIds", []))
-                if isinstance(meta.get("features"), dict):
-                    p_features.update(meta["features"])
+                subagent_tool_ids.extend(meta.get("toolIds") or meta.get("tool_ids") or [])
 
             if isinstance(params, dict):
                 subagent_tool_ids.extend(
-                    params.get("toolIds", []) or params.get("tools", [])
+                    params.get("toolIds") or params.get("tool_ids") or params.get("tools") or []
                 )
                 model_system_message = params.get("system", "") or ""
-                if isinstance(params.get("features"), dict):
-                    p_features.update(params["features"])
 
-        if model_info:
-            info_meta = model_info.get("info", {}).get("meta", {})
-            info_params = model_info.get("info", {}).get("params", {})
-            subagent_tool_ids.extend(info_meta.get("toolIds", []))
-            subagent_tool_ids.extend(
-                info_params.get("toolIds", []) or info_params.get("tools", [])
-            )
-            if not model_system_message:
-                model_system_message = info_params.get("system", "") or ""
-            if isinstance(info_meta.get("features"), dict):
-                p_features.update(info_meta["features"])
-            if isinstance(info_params.get("features"), dict):
-                p_features.update(info_params["features"])
+        info_meta = model_ws.get("info", {}).get("meta", {})
+        info_params = model_ws.get("info", {}).get("params", {})
+        subagent_tool_ids.extend(info_meta.get("toolIds") or info_meta.get("tool_ids") or [])
+        subagent_tool_ids.extend(
+            info_params.get("toolIds") or info_params.get("tool_ids") or info_params.get("tools") or []
+        )
+        if not model_system_message:
+            model_system_message = info_params.get("system", "") or ""
 
-        s_tools_dict = {}
-        if subagent_tool_ids:
-            s_tools_dict = await get_tools(
-                self.request, list(set(subagent_tool_ids)), self.user, extra_params
-            )
+        seen_sub: set[str] = set()
+        ordered_sub_ids: list[str] = []
+        for tid in subagent_tool_ids:
+            if tid and tid not in seen_sub:
+                seen_sub.add(tid)
+                ordered_sub_ids.append(tid)
 
-        # v3 parity: Inject builtin tools for regular subagents
-        try:
-            builtin_tools = get_builtin_tools(
-                self.request, extra_params, features=p_features, model=model_info
+        s_tools_dict: dict[str, Any] = {}
+        if ordered_sub_ids:
+            try:
+                assigned_tools = await get_tools(
+                    self.request, ordered_sub_ids, self.user, extra_params
+                )
+                if assigned_tools:
+                    s_tools_dict.update(assigned_tools)
+            except Exception as e:
+                logger.error(f"Failed to load assigned tools for subagent {model_id}: {e}")
+
+        extra_mcp_sub = {
+            **extra_params,
+            "__model__": model_ws,
+            "__messages__": [],
+            "__files__": self.pipe_metadata.get("files") or [],
+        }
+        mcp_sub = await planner_merge_mcp_tools_from_ids(
+            self.request,
+            self.user,
+            ordered_sub_ids,
+            self.pipe_metadata,
+            extra_mcp_sub,
+            extra_params.get("__event_emitter__"),
+            self.mcp_handler,
+        )
+        if mcp_sub:
+            s_tools_dict.update(mcp_sub)
+
+        skill_ids, skill_prompt = await self._resolve_model_skills(
+            model_db_info, extra_params
+        )
+        if skill_prompt:
+            model_system_message = (
+                f"{model_system_message}\n\n{skill_prompt}"
+                if model_system_message
+                else skill_prompt
             )
-            if builtin_tools:
-                s_tools_dict.update(builtin_tools)
-        except Exception as e:
-            logger.error(f"Failed to load built-in tools for subagent {model_id}: {e}")
+            extra_params["__skill_ids__"] = skill_ids
+
+        workspace_terminal_models = [
+            m.strip()
+            for m in self.valves.WORKSPACE_TERMINAL_MODELS.split(",")
+            if m.strip()
+        ]
+        if model_id in workspace_terminal_models:
+            terminal_id = self.pipe_metadata.get("terminal_id")
+            if terminal_id:
+                try:
+                    raw_term = await get_terminal_tools(
+                        self.request, terminal_id, self.user, extra_params
+                    )
+                    terminal_tools, terminal_sys = unpack_terminal_tools_result(raw_term)
+                    if terminal_tools:
+                        s_tools_dict.update(terminal_tools)
+                    if terminal_sys:
+                        model_system_message = (
+                            f"{model_system_message}\n\n{terminal_sys}"
+                            if model_system_message
+                            else terminal_sys
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to load terminal tools for subagent {model_id}: {e}"
+                    )
+
+        info_params_ws = model_ws.get("info", {}).get("params") or {}
+        function_calling = info_params_ws.get("function_calling", "native")
+        caps_ws = (model_ws.get("info", {}).get("meta") or {}).get("capabilities") or {}
+        builtin_tools_enabled = caps_ws.get("builtin_tools", True)
+        features_ws = workspace_feature_flags(model_ws)
+
+        if function_calling == "native" and builtin_tools_enabled:
+            try:
+                builtin_tools = get_builtin_tools(
+                    self.request,
+                    extra_params,
+                    features=features_ws,
+                    model=model_ws,
+                )
+                for name, td in builtin_tools.items():
+                    if name not in s_tools_dict:
+                        s_tools_dict[name] = td
+            except Exception as e:
+                logger.error(
+                    f"Failed to load built-in tools for subagent {model_id}: {e}"
+                )
+        elif function_calling != "native":
+            logger.warning(
+                "Subagent model %s has non-native function_calling; builtins skipped (planner requires native FC).",
+                model_id,
+            )
 
         result = {
             "dict": s_tools_dict,
             "specs": [
                 {"type": "function", "function": t["spec"]}
                 for t in s_tools_dict.values()
-            ],
+            ]
+            if s_tools_dict
+            else None,
             "system_message": model_system_message,
         }
         self.subagent_tools_cache[model_id] = result
@@ -1751,15 +2379,30 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
         metadata: dict = None,
         mode: str = "execute",
         messages: list = None,
+        skill_prompt: str = "",
+        terminal_sys: str = "",
     ) -> str:
         """Construct the full system prompt with tools and mandatory rules dynamically."""
         full_prompt = valves.SYSTEM_PROMPT
+        if skill_prompt:
+            full_prompt = f"{full_prompt}\n\n{skill_prompt}"
+        if terminal_sys:
+            full_prompt = f"{full_prompt}\n\n{terminal_sys}"
         plan_mode = user_valves.PLAN_MODE
         truncation = user_valves.TASK_RESULT_TRUNCATION
         user_input = user_input_enabled = user_valves.ENABLE_USER_INPUT_TOOLS
         subagents_list = (
             valves.SUBAGENT_MODELS.split(",") if valves.SUBAGENT_MODELS else []
         )
+        # Inclusion of workspace terminal agents in descriptions
+        workspace_terminal_models = [
+            m.strip()
+            for m in valves.WORKSPACE_TERMINAL_MODELS.split(",")
+            if m.strip()
+        ]
+        for mid in workspace_terminal_models:
+            if mid and mid not in subagents_list:
+                subagents_list.append(mid)
 
         metadata = metadata or {}
         pipe_meta = metadata.get("__metadata__", {})
@@ -1809,7 +2452,13 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
             if m in va_descs:
                 desc_list.append(va_descs[m])
             else:
-                desc_list.append(f"- ID: {m}")
+                label = ""
+                workspace_terminal_models = [
+                    v.strip() for v in valves.WORKSPACE_TERMINAL_MODELS.split(",") if v.strip()
+                ]
+                if m in workspace_terminal_models:
+                    label = " (Terminal Access)"
+                desc_list.append(f"- ID: {m}{label}")
 
         if desc_list:
             subagent_descriptions = "\n".join(desc_list)
@@ -2102,6 +2751,7 @@ class SubagentManager:
         valves: Any,
         base_url: str = "",
         model_knowledge: Optional[list[dict]] = None,
+        mcp_handler: Optional[Callable] = None,
     ):
         self.ui = ui
         self.state = state
@@ -2111,6 +2761,7 @@ class SubagentManager:
         self.model_knowledge = model_knowledge
         self.result_lock = asyncio.Lock()
         self.locked_emitter = LockedEmitter(ui.emitter)
+        self.mcp_handler = mcp_handler
 
         # Resolve virtual agents with fallback model and valve overrides
         AGENT_MODEL_VALVES = {
@@ -2300,6 +2951,7 @@ class SubagentManager:
             self.metadata.get("__request__"),
             self.metadata.get("__metadata__"),
             model_knowledge=self.model_knowledge,
+            mcp_handler=self.mcp_handler,
         )
 
         # Fix: Fetch app_models from request.app.state instead of __event_call__
@@ -2355,20 +3007,35 @@ class SubagentManager:
 
         history = self.state.get_history(chat_id, task_id, model_id)
 
-        # Identify which related tasks to inject (only those not already in history)
+        # Sticky Related Tasks (v3.5 extension):
+        # Once a task is linked to a session, we track its version (hash) and re-inject if updated.
+        session_key = (chat_id, task_id, model_id)
+        if session_key not in self.state.subagent_metadata:
+            self.state.subagent_metadata[session_key] = {"linked_tasks": {}}
+        
+        linked_tasks = self.state.subagent_metadata[session_key]["linked_tasks"]
+        
+        # Current batch + Persisted batch
+        task_set = set([rt.lstrip("@:") for rt in (related_tasks or []) if rt])
+        task_set.update(linked_tasks.keys())
+
         results_injection = []
-        if related_tasks:
-            history_text = (
-                "\n".join(m.get("content", "") for m in history) if history else ""
-            )
-            for rt in related_tasks:
-                rid = rt.lstrip("@")
-                if rid in self.state.results:
-                    header = f"--- RESULTS FROM PREVIOUS TASK {rt} ---"
-                    if header not in history_text:
-                        results_injection.append(
-                            f"\n\n{header}\n{self.state.results[rid]}\n--- END OF {rt} ---\n"
-                        )
+        for rid in task_set:
+            if rid in self.state.results:
+                raw_res = self.state.results[rid]
+                res_hash = hashlib.md5(raw_res.encode("utf-8")).hexdigest()
+                
+                # Check if we should inject: new task OR updated result
+                if linked_tasks.get(rid) != res_hash:
+                    # Provide updated context
+                    header = f"--- UPDATED RESULTS FROM TASK {rid} ---"
+                    if linked_tasks.get(rid) is None:
+                        header = f"--- RESULTS FROM RELATED TASK {rid} ---"
+                        
+                    results_injection.append(
+                        f"\n\n{header}\n{raw_res}\n--- END OF {rid} ---\n"
+                    )
+                    linked_tasks[rid] = res_hash
 
         injection_content = "".join(results_injection)
         actual_prompt = prompt + injection_content
@@ -2694,6 +3361,23 @@ class SubagentManager:
         if temp_override is not None:
             sub_body["temperature"] = temp_override
 
+        request = self.metadata.get("__request__")
+        app_models = getattr(request.app.state, "MODELS", {}) if request else {}
+        workspace_model = merge_workspace_model_dict(app_models, actual_model)
+        has_bi = any(
+            (v.get("type") == "builtin")
+            for v in context.get("tools_dict", {}).values()
+        )
+        await apply_native_completion_file_prep(
+            request,
+            sub_body,
+            user_obj,
+            workspace_model,
+            self.metadata.get("__metadata__", {}),
+            self.metadata.get("__event_emitter__"),
+            has_bi,
+        )
+
         # Reasoning state
         reasoning_buffer = ""
         reasoning_start_time = None
@@ -2973,10 +3657,16 @@ class InternalToolExecutor:
 
     def __init__(self, engine: "PlannerEngine"):
         self.engine = engine
-        self.state = engine.state
         self.ui = engine.ui
-        self.subagents = engine.subagents
         self.metadata = engine.metadata
+
+    @property
+    def state(self) -> "PlannerState":
+        return self.engine.state
+
+    @property
+    def subagents(self) -> "SubagentManager":
+        return self.engine.subagents
 
     async def update_state(
         self, updates: dict[str, Any], user_valves: Any = None
@@ -3047,17 +3737,28 @@ class InternalToolExecutor:
         if missing_tasks:
             return f"Error: The following related tasks do not exist or have no results yet: {', '.join(missing_tasks)}. Ensure you only list completed tasks in 'related_tasks'."
 
-        res_dict = await self.subagents.call_subagent(
-            args["model_id"],
-            args["prompt"],
-            task_id,
-            sanitized_related,
-            chat_id,
-            valves,
-            body,
-            user_valves,
-            self.metadata,
+        # Track the subagent call as an active task for cancellation
+        sub_task = asyncio.create_task(
+            self.subagents.call_subagent(
+                args["model_id"],
+                args["prompt"],
+                task_id,
+                sanitized_related,
+                chat_id,
+                valves,
+                body,
+                user_valves,
+                self.metadata,
+            )
         )
+        self.engine.active_tasks.append(sub_task)
+        
+        try:
+            res_dict = await sub_task
+        finally:
+            if sub_task in self.engine.active_tasks:
+                self.engine.active_tasks.remove(sub_task)
+                
         self.state.update_task(task_id, "completed")
         if user_valves.PLAN_MODE:
             self.engine.current_plan_html = self.ui.get_html_status_block(
@@ -3153,29 +3854,42 @@ class InternalToolExecutor:
             return "Error: must specify task_ids and prompt."
 
         await self.ui.emit_status("Reviewing tasks cross-reference...")
-        review_sys = "You are a specialized review subagent. Synthesize the following task results logically."
-        for rx in rt_ids:
-            clean_rx = rx.lstrip("@:")
-            if clean_rx in self.state.results:
-                review_sys += f"\n\n--- RESULTS FROM TASK {rx} ---\n{self.state.results[clean_rx]}\n--- END OF {rx} ---\n"
+        
+        # Track the review call as an active task
+        async def run_review():
+            review_sys = "You are a specialized review subagent. Synthesize the following task results logically."
+            for rx in rt_ids:
+                clean_rx = rx.lstrip("@:")
+                if clean_rx in self.state.results:
+                    review_sys += f"\n\n--- RESULTS FROM TASK {rx} ---\n{self.state.results[clean_rx]}\n--- END OF {rx} ---\n"
 
-        review_body = {
-            **body,
-            "model": valves.REVIEW_MODEL or valves.PLANNER_MODEL,
-            "messages": [
-                {"role": "system", "content": review_sys},
-                {"role": "user", "content": rt_prompt},
-            ],
-            "metadata": self.metadata.get("__metadata__", {}),
-        }
-        res_chunks = []
-        async for ev in Utils.get_streaming_completion(
-            self.metadata.get("__request__"), review_body, user_obj
-        ):
-            if ev["type"] == "content":
-                res_chunks.append(ev["text"])
+            review_body = {
+                **body,
+                "model": valves.REVIEW_MODEL or valves.PLANNER_MODEL,
+                "messages": [
+                    {"role": "system", "content": review_sys},
+                    {"role": "user", "content": rt_prompt},
+                ],
+                "metadata": self.metadata.get("__metadata__", {}),
+            }
+            res_chunks = []
+            async for ev in Utils.get_streaming_completion(
+                self.metadata.get("__request__"), review_body, user_obj
+            ):
+                if ev["type"] == "content":
+                    res_chunks.append(ev["text"])
 
-        final_review = "".join(res_chunks)
+            final_review = "".join(res_chunks)
+            return final_review
+
+        review_task = asyncio.create_task(run_review())
+        self.engine.active_tasks.append(review_task)
+        
+        try:
+            final_review = await review_task
+        finally:
+            if review_task in self.engine.active_tasks:
+                self.engine.active_tasks.remove(review_task)
 
         # Virtual ID Support (v3 parity extension)
         review_id = args.get("review_id")
@@ -3211,6 +3925,119 @@ class PlannerEngine:
         self.tools = InternalToolExecutor(self)
         self.current_plan_html = ""
         self.total_emitted = ""  # Trace current Turn body only
+        self.active_tasks: list[asyncio.Task] = []
+        # v3.6: MCP Connection Hub (Fix for Anyio task-mismatch)
+        # We use a dedicated worker task to own all MCP client anyio scopes.
+        self.mcp_clients: dict[str, Any] = {} # Map unique key (url + headers_hash) to client
+        self._mcp_queue: asyncio.Queue = asyncio.Queue()
+        self._mcp_worker_task: Optional[asyncio.Task] = None
+        self._mcp_lock: asyncio.Lock = asyncio.Lock()
+
+    async def get_or_create_mcp_client(self, url: str, headers: Optional[dict] = None) -> Any:
+        """Proxies a connection request to the MCP worker task to ensure Task affinity."""
+        async with self._mcp_lock:
+            if not self._mcp_worker_task or self._mcp_worker_task.done():
+                self._mcp_worker_task = asyncio.create_task(self._mcp_worker_loop(), name=f"MCP-Worker-{uuid4().hex[:4]}")
+
+            # Create a unique key for the connection to allow reuse
+            headers_json = json.dumps(headers, sort_keys=True) if headers else "{}"
+            conn_key = hashlib.sha256(f"{url}|{headers_json}".encode()).hexdigest()
+
+            if conn_key in self.mcp_clients:
+                return self.mcp_clients[conn_key]
+
+            # Request new connection
+            resp_fut = asyncio.get_running_loop().create_future()
+            await self._mcp_queue.put(("connect", (url, headers, conn_key), resp_fut))
+            return await resp_fut
+
+    async def _mcp_worker_loop(self) -> None:
+        """Dedicated task that 'owns' all MCP client anyio scopes."""
+        task_name = asyncio.current_task().get_name()
+        logger.debug(f"[Planner] {task_name} started.")
+        client_registry = {} # Local tracker to ensure absolute task affinity
+        
+        try:
+            while True:
+                item = await self._mcp_queue.get()
+                if item is None: # Shutdown signal
+                    break
+                
+                cmd, args, resp_fut = item
+                try:
+                    if cmd == "connect":
+                        url, headers, conn_key = args
+                        if conn_key in client_registry:
+                            resp_fut.set_result(client_registry[conn_key])
+                            continue
+                            
+                        logger.debug(f"[Planner] {task_name} connecting to {url}...")
+                        client = MCPClient()
+                        await client.connect(url=url, headers=headers)
+                        client_registry[conn_key] = client
+                        self.mcp_clients[conn_key] = client
+                        resp_fut.set_result(client)
+                        logger.debug(f"[Planner] {task_name} connected to {url} (ID: {id(client)})")
+                except Exception as e:
+                    logger.error(f"[Planner] {task_name} connect error for {args[0]}: {e}")
+                    if not resp_fut.done():
+                        resp_fut.set_result(e)
+                finally:
+                    self._mcp_queue.task_done()
+        except asyncio.CancelledError:
+            logger.debug(f"[Planner] {task_name} cancelled.")
+        finally:
+            # Cleanup all clients in the SAME task context that created them
+            if client_registry:
+                logger.debug(f"[Planner] {task_name} cleaning up {len(client_registry)} clients...")
+                # LIFO: Disconnect in REVERSE order of connection to satisfy Anyio's nested cancel scopes
+                ordered_clients = list(client_registry.items())
+                for url_key, client in reversed(ordered_clients):
+                    try:
+                        logger.debug(f"[Planner] {task_name} disconnecting client ID: {id(client)}")
+                        # Use asyncio.timeout (Python 3.11+) to preserve task affinity.
+                        # Do NOT use wait_for as it spawns a separate Task.
+                        try:
+                            async with asyncio.timeout(3.0):
+                                await client.disconnect()
+                        except asyncio.TimeoutError:
+                            logger.debug(f"[Planner] {task_name} disconnect timed out for ID {id(client)}")
+                        
+                        logger.debug(f"[Planner] {task_name} disconnected client ID: {id(client)}")
+                    except Exception as e:
+                        logger.debug(f"[Planner] {task_name} disconnect error for ID {id(client)}: {e}")
+                client_registry.clear()
+                self.mcp_clients.clear()
+            logger.debug(f"[Planner] {task_name} exited.")
+
+    async def stop(self) -> None:
+        """Forcefully stops all active subagent tasks and disconnects MCP clients."""
+        # 1. Cancel all active tasks
+        if self.active_tasks:
+            logger.info(f"Cancelling {len(self.active_tasks)} active subagent tasks...")
+            for task in self.active_tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait briefly for cancellation to propagate, but with timeout to avoid hanging
+            try:
+                await asyncio.wait(self.active_tasks, timeout=2.0)
+            except Exception as e:
+                logger.error(f"Error during subagent task cancellation wait: {e}")
+            self.active_tasks.clear()
+
+        # 2. Shutdown MCP Connection Hub
+        if self._mcp_worker_task and not self._mcp_worker_task.done():
+            logger.info("Signaling MCP Connection Hub to shutdown...")
+            try:
+                # Send poison pill and wait for worker to cleanup and exit
+                await self._mcp_queue.put(None)
+                await asyncio.wait_for(self._mcp_worker_task, timeout=5.0)
+            except Exception as e:
+                logger.debug(f"Error during MCP worker shutdown: {e}")
+                # Fallback: force cancel if it didn't stop
+                if not self._mcp_worker_task.done():
+                    self._mcp_worker_task.cancel()
 
     async def _emit_replace(self, content: str) -> None:
         """Helper to emit an inline replace event with the current plan prepended."""
@@ -3424,6 +4251,18 @@ class PlannerEngine:
                         f"Restored {len(self.state.subagent_history)} sub-conversation threads."
                     )
 
+                # Restore subagent metadata
+                if "subagent_metadata" in data:
+                    self.state.subagent_metadata.clear()
+                    for key_str, metadata in data["subagent_metadata"].items():
+                        try:
+                            parts = json.loads(key_str)
+                            if isinstance(parts, list) and len(parts) == 3:
+                                tuple_key = tuple(parts)
+                                self.state.subagent_metadata[tuple_key] = metadata
+                        except:
+                            continue
+
                 status_msg = (
                     f"Recovered state from {state_file.get('name', 'latest file')}"
                 )
@@ -3458,6 +4297,11 @@ class PlannerEngine:
                 },
                 "results": self.state.results,
                 "subagent_history": serialized_history,
+                "subagent_metadata": {
+                    json.dumps(list(k)): v
+                    for k, v in self.state.subagent_metadata.items()
+                    if isinstance(k, (list, tuple)) and len(k) == 3
+                },
             }
 
             filename = f"planner_state_{chat_id}.json"
@@ -3518,6 +4362,31 @@ class PlannerEngine:
 
         # Prepare context
         distilled_history = Utils.distill_history_for_llm(body.get("messages", []))
+        # v3.5: Support skill and terminal prompt injection for planner
+        # Temporary extra_params for skill/terminal resolution
+        tmp_params = {"__user__": self.metadata.get("__user__", {})}
+        # Resolve skills from pipe metadata for the planner
+        skill_ids, skill_prompt = await self.registry._resolve_model_skills(
+            self.registry.pipe_metadata, tmp_params
+        )
+        
+        terminal_sys = ""
+        enable_planner_terminal = user_valves.ENABLE_PLANNER_TERMINAL_ACCESS
+        is_terminal_agent_present = valves.ENABLE_TERMINAL_AGENT or valves.WORKSPACE_TERMINAL_MODELS
+        terminal_id = self.metadata.get("__metadata__", {}).get("terminal_id")
+
+        if terminal_id and (enable_planner_terminal or not is_terminal_agent_present):
+            try:
+                raw_term = await get_terminal_tools(
+                    self.metadata.get("__request__"),
+                    terminal_id,
+                    self.metadata.get("__user_obj__"),
+                    tmp_params,
+                )
+                _, terminal_sys = unpack_terminal_tools_result(raw_term)
+            except Exception:
+                pass
+
         plan_sys = PromptBuilder.build_system_prompt(
             valves,
             user_valves,
@@ -3525,6 +4394,8 @@ class PlannerEngine:
             metadata=self.metadata,
             mode="plan",
             messages=distilled_history,
+            skill_prompt=skill_prompt,
+            terminal_sys=terminal_sys,
         )
         messages = [{"role": "system", "content": plan_sys}] + distilled_history
 
@@ -3574,6 +4445,21 @@ class PlannerEngine:
             ):
                 plan_body["metadata"]["knowledge"] = self.model_knowledge
                 plan_body["metadata"]["__model_knowledge__"] = self.model_knowledge
+
+            request = self.metadata.get("__request__")
+            app_models = getattr(request.app.state, "MODELS", {}) if request else {}
+            workspace_model = merge_workspace_model_dict(
+                app_models, body.get("model", "") or ""
+            )
+            await apply_native_completion_file_prep(
+                request,
+                plan_body,
+                user_obj,
+                workspace_model,
+                self.metadata.get("__metadata__", {}),
+                self.metadata.get("__event_emitter__"),
+                False,
+            )
 
             plan_chunks = []
             async for event in Utils.get_streaming_completion(
@@ -3695,6 +4581,32 @@ class PlannerEngine:
 
         # Prepare context
         distilled_history = Utils.distill_history_for_llm(body.get("messages", []))
+        # v3.5: Support skill and terminal prompt injection for planner
+        tmp_params = {"__user__": self.metadata.get("__user__", {})}
+        # Resolve skills from pipe metadata for the planner
+        skill_ids, skill_prompt = await self.registry._resolve_model_skills(
+            self.registry.pipe_metadata, tmp_params
+        )
+
+        terminal_sys = ""
+        enable_planner_terminal = user_valves.ENABLE_PLANNER_TERMINAL_ACCESS
+        is_terminal_agent_present = (
+            valves.ENABLE_TERMINAL_AGENT or valves.WORKSPACE_TERMINAL_MODELS
+        )
+        terminal_id = self.metadata.get("__metadata__", {}).get("terminal_id")
+
+        if terminal_id and (enable_planner_terminal or not is_terminal_agent_present):
+            try:
+                raw_term = await get_terminal_tools(
+                    self.metadata.get("__request__"),
+                    terminal_id,
+                    self.metadata.get("__user_obj__"),
+                    tmp_params,
+                )
+                _, terminal_sys = unpack_terminal_tools_result(raw_term)
+            except Exception:
+                pass
+
         exec_sys = PromptBuilder.build_system_prompt(
             valves,
             user_valves,
@@ -3704,6 +4616,8 @@ class PlannerEngine:
             metadata=self.metadata,
             mode="execute",
             messages=distilled_history,
+            skill_prompt=skill_prompt,
+            terminal_sys=terminal_sys,
         )
         exec_history = [{"role": "system", "content": exec_sys}] + distilled_history
         tasks_serializable = {
@@ -3741,7 +4655,13 @@ class PlannerEngine:
 
             # (B) Execute Turn
             turn_result = await self._execute_planner_turn(
-                exec_history, total_emitted, valves, user_obj, body, user_valves
+                exec_history,
+                total_emitted,
+                valves,
+                user_obj,
+                body,
+                user_valves,
+                external_tools_dict,
             )
             content, tc_dict, turn_emitted = (
                 turn_result["content"],
@@ -3880,12 +4800,20 @@ class PlannerEngine:
         user_obj: Any,
         body: dict,
         user_valves: Any,
+        external_tools_dict: dict = None,
     ) -> dict:
         """Performs a single LLM turn for the planner with live reasoning and clean content streaming."""
         tc_dict, content_chunks, reasoning_chunks = {}, [], []
         tools = self.registry.get_tools_spec(
             user_obj, user_valves, list(self.state.tasks.keys())
         )
+        if external_tools_dict:
+            tools.extend(
+                [
+                    {"type": "function", "function": t["spec"]}
+                    for t in external_tools_dict.values()
+                ]
+            )
 
         planner_body = {
             **body,
@@ -3899,6 +4827,27 @@ class PlannerEngine:
         if not getattr(valves, "ENABLE_KNOWLEDGE_AGENT", True) and self.model_knowledge:
             planner_body["metadata"]["knowledge"] = self.model_knowledge
             planner_body["metadata"]["__model_knowledge__"] = self.model_knowledge
+
+        request = self.metadata.get("__request__")
+        app_models = getattr(request.app.state, "MODELS", {}) if request else {}
+        workspace_model = merge_workspace_model_dict(
+            app_models, body.get("model", "") or ""
+        )
+        has_bi = bool(
+            external_tools_dict
+            and any(
+                v.get("type") == "builtin" for v in external_tools_dict.values()
+            )
+        )
+        await apply_native_completion_file_prep(
+            request,
+            planner_body,
+            user_obj,
+            workspace_model,
+            self.metadata.get("__metadata__", {}),
+            self.metadata.get("__event_emitter__"),
+            has_bi,
+        )
 
         # Reasoning state for live emission (v3 parity)
         reasoning_buffer = ""
@@ -4608,6 +5557,10 @@ Your goal is to fulfill the user's request.""",
             default="",
             description="Model for the terminal agent, works Best with a Base Model (not workspace presets) | (leave blank to use the planner model)",
         )
+        WORKSPACE_TERMINAL_MODELS: str = Field(
+            default="",
+            description="Comma-separated list of model IDs available to be queried as subagents with terminal access. These will override the default virtual terminal agent check.",
+        )
         ENABLE_IMAGE_GENERATION_AGENT: bool = Field(
             default=True, description="Enable built-in image generation subagent"
         )
@@ -4668,6 +5621,10 @@ Your goal is to fulfill the user's request.""",
             default=False,
             description="Enable a judge model to verify subagent responses for task completion and correct asset referencing BEFORE returning to the planner.",
         )
+        ENABLE_PLANNER_TERMINAL_ACCESS: bool = Field(
+            default=False,
+            description="Explicitly grant the planner agent terminal access, even if a dedicated terminal agent is present or defined in WORKSPACE_TERMINAL_MODELS.",
+        )
 
     def __init__(self):
         self.type = "manifold"
@@ -4681,7 +5638,7 @@ Your goal is to fulfill the user's request.""",
         self,
         body: dict,
         __user__: dict,
-        __request__: Request = None,
+        __request__: Request,
         __metadata__: dict = None,
         __event_emitter__: Callable[[dict], Awaitable[None]] = None,
         __event_call__: Callable[[dict], Awaitable[None]] = None,
@@ -4692,7 +5649,14 @@ Your goal is to fulfill the user's request.""",
     ) -> Union[str, Generator, AsyncGenerator]:
         """
         Main pipe entry point for Open WebUI.
+        Requires a live Request; Open WebUI always provides __request__ for tool and model resolution.
         """
+        if __request__ is None:
+            raise TypeError(
+                "Planner pipe requires __request__ (FastAPI/Starlette Request). "
+                "It must not be None."
+            )
+
         # Ensure metadata is present even if not passed
         __metadata__ = __metadata__ or body.get("metadata", {})
 
@@ -4737,7 +5701,7 @@ Your goal is to fulfill the user's request.""",
         base_url = self.valves.OPEN_WEBUI_URL
         if not base_url:
             base_url = os.environ.get("WEBUI_URL", "")
-        if not base_url and __request__:
+        if not base_url:
             base_url = str(__request__.base_url).rstrip("/")
 
         # Extract model knowledge and features for tool management
@@ -4745,24 +5709,30 @@ Your goal is to fulfill the user's request.""",
             "model_knowledge"
         )
         app_models = getattr(__request__.app.state, "MODELS", {})
-        planner_model_id = self.valves.PLANNER_MODEL
-        planner_info = app_models.get(planner_model_id, {})
-        planner_features = (
-            planner_info.get("info", {}).get("meta", {}).get("features", {})
-        )
+        # Use the current pipe model ID for metadata/skill resolution (v3 parity)
+        planner_info = app_models.get(body.get("model", ""), {})
 
         # Subagent Token Handling
         # Extraction and substitution are handled internally during subagent context preparation.
 
+        # Life cycle: Step 1: Create engine shell (without subagents/registry yet)
+        engine = PlannerEngine(
+            ui, state=None, subagents=None, registry=None, metadata=metadata, model_knowledge=model_knowledge
+        )
+
+        # Life cycle: Step 2: Create state and registry (using engine tracker)
+        state = PlannerState()
         registry = ToolRegistry(
             self.valves,
             user_obj,
             __request__,
             pipe_metadata,
             model_knowledge=model_knowledge,
-            planner_features=planner_features,
+            planner_info=planner_info,
+            mcp_handler=engine.get_or_create_mcp_client,
         )
-        state = PlannerState()
+
+        # Life cycle: Step 3: Create subagents (using engine tracker)
         subagents = SubagentManager(
             ui,
             state,
@@ -4770,13 +5740,24 @@ Your goal is to fulfill the user's request.""",
             self.valves,
             base_url=base_url,
             model_knowledge=model_knowledge,
+            mcp_handler=engine.get_or_create_mcp_client,
         )
-        engine = PlannerEngine(
-            ui, state, subagents, registry, metadata, model_knowledge=model_knowledge
-        )
+        
+        # Life cycle: Step 4: Link components
+        engine.subagents = subagents
+        engine.registry = registry
+        engine.state = state
 
         # Use a generator to keep the SSE stream active and the "Exploring" status valid
-        async for delta in engine.run(
-            chat_id, self.valves, self.user_valves, body, __files__
-        ):
-            yield delta
+        try:
+            async for delta in engine.run(
+                chat_id, self.valves, self.user_valves, body, __files__
+            ):
+                yield delta
+        finally:
+            # Lifecycle cleanup: Ensure all subagents and MCP connections are terminated
+            # when the pipe generator is stopped/cancelled.
+            try:
+                await engine.stop()
+            except Exception as e:
+                logger.debug(f"Error during engine.stop() in pipe finally: {e}")
