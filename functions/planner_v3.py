@@ -16,7 +16,6 @@ Requirements (Open WebUI parity):
   surface as their saved workspace model (toolIds, MCP, terminal, and builtins only
   when native FC and meta.capabilities.builtin_tools allow).
 """
-
 import ast
 import asyncio
 import hashlib
@@ -205,6 +204,25 @@ class SubagentTaskResponse(BaseModel):
     note: Optional[str] = None
 
 
+class PlannerContext(BaseModel):
+    """Unified context for the planner during a single turn."""
+
+    request: Request
+    user: Any
+    metadata: dict[str, Any]
+    event_emitter: Any
+    event_call: Optional[Any] = None
+    valves: Any
+    user_valves: Any
+    body: dict[str, Any]
+    model_knowledge: Optional[list[dict]] = None
+    chat_id: str
+    message_id: Optional[str] = None
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
 # --- New Helper Classes ---
 class QueueEmitter:
     """Non-blocking event emitter that pushes to an asyncio.Queue for background processing."""
@@ -256,8 +274,14 @@ class QueueEmitter:
                 if now - self.last_emit_time < self.throttle_interval:
                     return
                 self.last_emit_time = now
+                # v3.15: Put nowait inside lock for atomic throttle-and-push
+                try:
+                    self.queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
+            return
 
-        # Non-blocking fire-and-forget (put_nowait is safe as long as queue isn't full)
+        # Non-blocking fire-and-forget for non-throttled events
         try:
             self.queue.put_nowait(event)
         except asyncio.QueueFull:
@@ -1257,83 +1281,33 @@ class PlannerState:
         self._results[task_id] = result
 
     def get_history(self, chat_id: str, sub_task_id: str, model_id: str) -> list[Any]:
-        # v3.6.8: Standardize on string keys for JSON serialization stability
-        key = f"{chat_id}:{sub_task_id}:{model_id}"
-        return self._subagent_history.get(key, [])
+        # v3.15: Use JSON array as a robust composite key (escapes colons in model/task IDs)
+        key = json.dumps([chat_id, sub_task_id, model_id], ensure_ascii=False)
+        # Check new key format
+        if key in self._subagent_history:
+            return self._subagent_history[key]
+        # Legacy fallback (colon-separated)
+        legacy_key = f"{chat_id}:{sub_task_id}:{model_id}"
+        return self._subagent_history.get(legacy_key, [])
 
     def set_history(
         self, chat_id: str, sub_task_id: str, model_id: str, messages: list[Any]
     ) -> None:
-        # v3.6.8: Standardize on string keys
-        key = f"{chat_id}:{sub_task_id}:{model_id}"
+        # v3.15: Standardize on JSON array keys for robustness
+        key = json.dumps([chat_id, sub_task_id, model_id], ensure_ascii=False)
         self._subagent_history[key] = messages
 
+    def get_metadata(self, chat_id: str, sub_task_id: str, model_id: str) -> dict[str, Any]:
+        # v3.15: Use JSON array as a robust composite key (escapes colons in model/task IDs)
+        key = json.dumps([chat_id, sub_task_id, model_id], ensure_ascii=False)
+        return self._subagent_metadata.get(key, {})
 
-class StreamableHTTPMCPClient:
-    """
-    Per-server MCP client for Streamable HTTP transport.
-    Each call is an independent cancellable task — no worker queue.
-    """
-
-    def __init__(self, url: str, headers: Optional[dict], timeout: int = 120):
-        self.url = url
-        self.headers = headers or {}
-        self.timeout = timeout
-        self._client: Optional[MCPClient] = None
-        self._call_lock = asyncio.Lock()  # kept for ToolRegistry compatibility
-
-    async def connect(self):
-        async with asyncio.timeout(60.0):
-            self._client = MCPClient()
-            await self._client.connect(url=self.url, headers=self.headers)
-
-    async def list_tool_specs(self) -> list[dict]:
-        return await self._call_with_timeout(self._client.list_tool_specs)
-
-    async def call_tool(self, name: str, function_args: Optional[dict] = None) -> Any:
-        return await self._call_with_timeout(
-            self._client.call_tool, name, function_args=function_args or {}
-        )
-
-    async def _call_with_timeout(self, coro_fn, *args, **kwargs):
-        """
-        Wraps each call in an explicit Task so task.cancel() propagates
-        correctly through anyio checkpoints, bypassing asyncio.timeout
-        unreliability on SSE receive loops.
-        """
-
-        async def _inner():
-            return await coro_fn(*args, **kwargs)
-
-        task = asyncio.create_task(_inner())
-        try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=self.timeout)
-        except asyncio.TimeoutError:
-            task.cancel()
-            try:
-                await asyncio.wait_for(task, timeout=3.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-                pass
-            raise asyncio.TimeoutError(
-                f"MCP call to {self.url} timed out after {self.timeout}s"
-            )
-        except Exception:
-            if not task.done():
-                task.cancel()
-            raise
-
-    async def disconnect(self):
-        if self._client:
-            try:
-                async with asyncio.timeout(3.0):
-                    await self._client.disconnect()
-            except Exception:
-                pass
-
-
-# ---------------------------------------------------------------------------
-# UI Rendering
-# ---------------------------------------------------------------------------
+    def set_metadata(
+        self, chat_id: str, sub_task_id: str, model_id: str, metadata: dict[str, Any]
+    ) -> None:
+        # v3.15: Standardize on JSON array keys for robustness
+        key = json.dumps([chat_id, sub_task_id, model_id], ensure_ascii=False)
+        self._subagent_metadata[key] = metadata
 
 
 class UIRenderer:
@@ -1810,6 +1784,405 @@ class UIRenderer:
         )
         return html
 
+class StatePersistence:
+    """Handles loading and saving planner state across turns via JSON files attached to the chat."""
+
+    def __init__(
+        self,
+        context: PlannerContext,
+        state: PlannerState,
+        ui: UIRenderer,
+    ):
+        self.context = context
+        self.state = state
+        self.ui = ui
+        self.metadata = context.metadata
+        self.request = context.request
+        self.user = context.user
+
+    async def recover_from_files(self, body: dict, chat_id: str, current_files: list = None) -> None:
+        """Exact same logic as the old _recover_state_from_files, but now in its own class."""
+        state_file = None
+
+        # 1. First, check files attached directly to this message
+        if current_files:
+            for f in reversed(current_files):
+                name = f.get("name", f.get("filename", ""))
+                if "planner_state" in name and name.endswith(".json"):
+                    state_file = f
+                    break
+
+        # 2. If not found in current message, look back through history (explicit DB query)
+        if not state_file:
+            chat_id = self.context.chat_id
+            if chat_id:
+                logger.info(
+                    f"Performing deep history scan for chat {chat_id} via database..."
+                )
+                chat_obj = await asyncio.to_thread(Chats.get_chat_by_id, chat_id)
+                if chat_obj and hasattr(chat_obj, "chat"):
+                    messages_map = chat_obj.chat.get("history", {}).get("messages", {})
+                    current_id = chat_obj.chat.get("history", {}).get("currentId")
+
+                    visited = set()
+                    while current_id and current_id not in visited:
+                        visited.add(current_id)
+                        msg = messages_map.get(current_id)
+                        if not msg:
+                            break
+
+                        msg_files = msg.get("files")
+                        if msg_files:
+                            for f in reversed(msg_files):
+                                name = f.get("name", f.get("filename", ""))
+                                if "planner_state" in name and name.endswith(".json"):
+                                    state_file = f
+                                    logger.info(
+                                        f"Successfully recovered state from DB history: {name}"
+                                    )
+                                    break
+
+                        if state_file:
+                            break
+                        current_id = msg.get("parentId")
+
+            # Fallback to body messages if DB query failed or chat_id missing
+            if not state_file:
+                messages = body.get("messages", [])
+                for message in reversed(messages):
+                    msg_files = message.get("files")
+                    if msg_files:
+                        for f in reversed(msg_files):
+                            name = f.get("name", f.get("filename", ""))
+                            if "planner_state" in name and name.endswith(".json"):
+                                state_file = f
+                                break
+                    if state_file:
+                        break
+
+        if not state_file:
+            logger.info(
+                "No planner state file found in current turn, database, or history."
+            )
+            return
+
+        try:
+            file_id = state_file.get("file_id") or state_file.get("id")
+            if not file_id:
+                logger.warning(f"State file found but missing ID: {state_file}")
+                return
+
+            if Files is None:
+                logger.error(
+                    "Global 'Files' model table is None - cannot recover state."
+                )
+                return
+
+            file_obj = await asyncio.to_thread(Files.get_file_by_id, file_id)
+            if not file_obj:
+                logger.warning(f"State file with ID {file_id} not found in database.")
+                return
+
+            file_path = getattr(file_obj, "path", None)
+            if not file_path and hasattr(file_obj, "meta"):
+                file_path = file_obj.meta.get("path")
+
+            if file_path and os.path.exists(file_path):
+                with open(file_path, "r", encoding="utf-8") as f_in:
+                    data = json.load(f_in)
+
+                # Restore tasks
+                if "tasks" in data:
+                    self.state.tasks.clear()
+                    for tid, tdata in data["tasks"].items():
+                        self.state.update_task(
+                            tid,
+                            tdata.get("status", "pending"),
+                            tdata.get("description", ""),
+                        )
+
+                # Restore results
+                if "results" in data:
+                    self.state.results.clear()
+                    self.state.results.update(data["results"])
+
+                # Restore subagent history
+                if "subagent_history" in data:
+                    self.state.subagent_history.clear()
+                    for key_str, history in data["subagent_history"].items():
+                        try:
+                            parts = None
+                            if key_str.startswith("[") and key_str.endswith("]"):
+                                parts = json.loads(key_str)
+                            elif ":" in key_str:
+                                parts = key_str.split(":", 2)
+                            else:
+                                parts = (
+                                    ast.literal_eval(key_str)
+                                    if isinstance(key_str, str)
+                                    else key_str
+                                )
+
+                            if isinstance(parts, (list, tuple)) and len(parts) == 3:
+                                norm_key = json.dumps([chat_id, parts[1], parts[2]], ensure_ascii=False)
+                                self.state.subagent_history[norm_key] = history
+                            else:
+                                self.state.subagent_history[str(key_str)] = history
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to reconstruct history key {key_str}: {e}"
+                            )
+
+                # Restore subagent metadata
+                if "subagent_metadata" in data:
+                    self.state.subagent_metadata.clear()
+                    for key_str, metadata in data["subagent_metadata"].items():
+                        try:
+                            parts = None
+                            if key_str.startswith("[") and key_str.endswith("]"):
+                                parts = json.loads(key_str)
+                            elif ":" in key_str:
+                                parts = key_str.split(":", 2)
+                            else:
+                                parts = (
+                                    ast.literal_eval(key_str)
+                                    if isinstance(key_str, str)
+                                    else key_str
+                                )
+
+                            if isinstance(parts, (list, tuple)) and len(parts) == 3:
+                                norm_key = json.dumps([chat_id, parts[1], parts[2]], ensure_ascii=False)
+                                self.state.subagent_metadata[norm_key] = metadata
+                            else:
+                                self.state.subagent_metadata[str(key_str)] = metadata
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to reconstruct metadata key {key_str}: {e}"
+                            )
+
+                status_msg = (
+                    f"Recovered state from {state_file.get('name', 'latest file')}"
+                )
+                logger.info(status_msg)
+                await self.ui.emit_status(status_msg)
+            else:
+                logger.warning(f"State file path not found or invalid: {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to recover planner state: {e}", exc_info=True)
+
+    async def save_to_file(self, chat_id: str) -> None:
+        """Exact same logic as the old _save_state_to_file."""
+        emitter = self.context.event_emitter
+        request = self.request
+        user = self.user
+
+        if not emitter or not request or not user:
+            return
+
+        try:
+            state_data = {
+                "tasks": {
+                    tid: {"status": t.status, "description": t.description}
+                    for tid, t in self.state.tasks.items()
+                },
+                "results": self.state.results,
+                "subagent_history": self.state.subagent_history,
+                "subagent_metadata": self.state.subagent_metadata,
+            }
+
+            filename = f"planner_state_{chat_id}.json"
+            content = json.dumps(state_data, ensure_ascii=False).encode("utf-8")
+
+            file_upload = UploadFile(
+                file=io.BytesIO(content),
+                filename=filename,
+                headers=Headers({"content-type": "application/json"}),
+            )
+
+            file_item = upload_file_handler(
+                request=request, file=file_upload, metadata={}, process=False, user=user
+            )
+
+            if file_item:
+                file_id = getattr(file_item, "id", None)
+                if file_id:
+                    file_info = {"file_id": str(file_id), "name": filename}
+
+                    # 1. Update the internal list for this turn
+                    internal_files = self.metadata.get("__files__")
+                    if isinstance(internal_files, list):
+                        internal_files.append(file_info)
+
+                    # 2. Synchronize directly with the database for multi-turn persistence
+                    target_chat_id = self.context.chat_id or chat_id
+                    target_msg_id = self.context.message_id
+
+                    if target_chat_id and target_msg_id:
+                        try:
+                            # Direct DB update
+                            await asyncio.to_thread(
+                                Chats.add_message_files_by_id_and_message_id,
+                                target_chat_id,
+                                target_msg_id,
+                                [file_info],
+                            )
+                            logger.info(
+                                f"Successfully persisted state file to chat {target_chat_id} message {target_msg_id}"
+                            )
+                        except Exception as db_err:
+                            logger.error(
+                                f"Failed to synchronize state file with database: {db_err}"
+                            )
+
+                    # 3. Emit event for immediate UI feedback
+                    await emitter(
+                        {"type": "chat:message:files", "data": {"files": [file_info]}}
+                    )
+
+                    return file_info
+        except Exception as e:
+            logger.error(f"Failed to save state to file: {e}")
+        return None
+
+
+class MCPHub:
+    """Manages MCP client lifecycle, connection deduplication, and cleanup."""
+
+    def __init__(self, valves: Any):
+        self.valves = valves
+        self.mcp_clients: dict[str, dict[str, Any]] = {}
+        self._mcp_lock: asyncio.Lock = asyncio.Lock()
+        self._connecting_mcp: dict[str, asyncio.Future] = {}
+
+    async def get_or_create_client(
+        self, url: str, headers: Optional[dict] = None
+    ) -> "StreamableHTTPMCPClient":
+        headers_json = json.dumps(headers, sort_keys=True) if headers else "{}"
+        conn_key = hashlib.sha256(f"{url}|{headers_json}".encode()).hexdigest()
+
+        async with self._mcp_lock:
+            if conn_key in self.mcp_clients:
+                return self.mcp_clients[conn_key]["proxy"]
+
+            if conn_key in self._connecting_mcp:
+                fut = self._connecting_mcp[conn_key]
+            else:
+                fut = asyncio.get_running_loop().create_future()
+                self._connecting_mcp[conn_key] = fut
+
+                async def _connect(ck=conn_key, f=fut):
+                    try:
+                        client = StreamableHTTPMCPClient(
+                            url,
+                            headers,
+                            timeout=int(self.valves.SUBAGENT_TIMEOUT),
+                        )
+                        await client.connect()
+                        async with self._mcp_lock:
+                            self.mcp_clients[ck] = {"proxy": client}
+                            self._connecting_mcp.pop(ck, None)
+                        if not f.done():
+                            f.set_result(True)
+                    except Exception as e:
+                        async with self._mcp_lock:
+                            self._connecting_mcp.pop(ck, None)
+                        if not f.done():
+                            f.set_exception(e)
+
+                asyncio.create_task(_connect(), name=f"MCP-Connect-{conn_key[:8]}")
+
+        await fut
+        return self.mcp_clients[conn_key]["proxy"]
+
+    async def stop(self) -> None:
+        if self._connecting_mcp:
+            logger.info(f"Cleaning up {len(self._connecting_mcp)} pending MCP connections...")
+            for fut in list(self._connecting_mcp.values()):
+                if not fut.done():
+                    fut.cancel()
+            self._connecting_mcp.clear()
+
+        if self.mcp_clients:
+            logger.info(f"Disconnecting {len(self.mcp_clients)} MCP clients...")
+            for info in self.mcp_clients.values():
+                await info["proxy"].disconnect()
+            self.mcp_clients.clear()
+
+    def set_metadata(
+        self, chat_id: str, sub_task_id: str, model_id: str, metadata: dict[str, Any]
+    ) -> None:
+        # v3.15: Standardize on JSON array keys for robustness
+        key = json.dumps([chat_id, sub_task_id, model_id], ensure_ascii=False)
+        self._subagent_metadata[key] = metadata
+
+
+class StreamableHTTPMCPClient:
+    """
+    Per-server MCP client for Streamable HTTP transport.
+    Each call is an independent cancellable task — no worker queue.
+    """
+
+    def __init__(self, url: str, headers: Optional[dict], timeout: int = 120):
+        self.url = url
+        self.headers = headers or {}
+        self.timeout = timeout
+        self._client: Optional[MCPClient] = None
+        self._call_lock = asyncio.Lock()  # kept for ToolRegistry compatibility
+
+    async def connect(self):
+        async with asyncio.timeout(60.0):
+            self._client = MCPClient()
+            await self._client.connect(url=self.url, headers=self.headers)
+
+    async def list_tool_specs(self) -> list[dict]:
+        return await self._call_with_timeout(self._client.list_tool_specs)
+
+    async def call_tool(self, name: str, function_args: Optional[dict] = None) -> Any:
+        return await self._call_with_timeout(
+            self._client.call_tool, name, function_args=function_args or {}
+        )
+
+    async def _call_with_timeout(self, coro_fn, *args, **kwargs):
+        """
+        Wraps each call in an explicit Task so task.cancel() propagates
+        correctly through anyio checkpoints, bypassing asyncio.timeout
+        unreliability on SSE receive loops.
+        """
+
+        async def _inner():
+            return await coro_fn(*args, **kwargs)
+
+        task = asyncio.create_task(_inner())
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=self.timeout)
+        except asyncio.TimeoutError:
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=3.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+            raise asyncio.TimeoutError(
+                f"MCP call to {self.url} timed out after {self.timeout}s"
+            )
+        except Exception:
+            if not task.done():
+                task.cancel()
+            raise
+
+    async def disconnect(self):
+        if self._client:
+            try:
+                async with asyncio.timeout(3.0):
+                    await self._client.disconnect()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# UI Rendering
+# ---------------------------------------------------------------------------
+
+
 
 # ---------------------------------------------------------------------------
 # Tool Management
@@ -1817,29 +2190,20 @@ class UIRenderer:
 
 
 class ToolRegistry:
-    def __init__(
-        self,
-        valves: Any,
-        user: Any,
-        request: Any = None,
-        pipe_metadata: dict[str, Any] = None,
-        model_knowledge: Optional[list[dict]] = None,
-        planner_info: Optional[dict[str, Any]] = None,
-        mcp_handler: Optional[Callable] = None,
-        user_skills: dict[str, Any] = None,
-    ):
-        self.valves = valves
-        self.user = user
-        self.request = request
-        self.pipe_metadata = pipe_metadata or {}
-        self.model_knowledge = model_knowledge
-        self.planner_info = planner_info or {}
+    def __init__(self, context: PlannerContext):
+        self.context = context
+        self.engine: Optional["PlannerEngine"] = None
+        self.valves = context.valves
+        self.user = context.user
+        self.request = context.request
+        self.pipe_metadata = context.metadata
+        self.model_knowledge = context.model_knowledge
+        self.planner_info = context.metadata.get("__metadata__", {})
         self.planner_features = (
             self.planner_info.get("info", {}).get("meta", {}).get("features", {})
         )
         self.subagent_tools_cache = {}
-        self.mcp_handler = mcp_handler
-        self.user_skills = user_skills or {}
+        self.user_skills = context.metadata.get("__user_skills__", {})
         self._resolution_lock = asyncio.Lock()
 
     async def _resolve_model_skills(
@@ -1990,8 +2354,9 @@ class ToolRegistry:
             return {}
 
     def get_tools_spec(
-        self, user: Any, user_valves: Any, available_tasks: list[Any] = None
+        self, available_tasks: list[Any] = None
     ) -> list[dict[str, Any]]:
+        user_valves = self.context.user_valves
         plan_mode = user_valves.PLAN_MODE
         truncation = user_valves.TASK_RESULT_TRUNCATION
         user_input_enabled = user_valves.ENABLE_USER_INPUT_TOOLS
@@ -2221,10 +2586,9 @@ class ToolRegistry:
 
         return tools_spec
 
-    async def get_planner_tools_dict(
-        self, body: dict[str, Any], user_valves: Any
-    ) -> dict[str, Any]:
+    async def get_planner_tools_dict(self) -> dict[str, Any]:
         """Resolve external tools and filtered built-in tools for the planner."""
+        user_valves = self.context.user_valves
         tool_ids = (
             self.pipe_metadata.get("toolIds")
             or self.pipe_metadata.get("tool_ids")
@@ -2234,14 +2598,14 @@ class ToolRegistry:
             f"[Planner] Resolving tools for planner. pipe_metadata keys: {list(self.pipe_metadata.keys())}, tool_ids: {tool_ids}"
         )
         extra_params = {
-            "chat_id": self.pipe_metadata.get("chat_id") or body.get("chat_id"),
+            "chat_id": self.context.chat_id,
             "tool_ids": tool_ids,
             "__user__": (
                 self.user.model_dump()
                 if hasattr(self.user, "model_dump")
                 else (self.user.__dict__ if self.user else {})
             ),
-            "__metadata__": self.pipe_metadata,
+            "__metadata__": self.context.metadata,
         }
 
         # 1. Resolve external tools (DB + OpenAPI servers) and MCP (not in get_tools)
@@ -2258,21 +2622,21 @@ class ToolRegistry:
                 self.request, ordered_tool_ids, self.user, extra_params
             )
         app_models = getattr(self.request.app.state, "MODELS", {})
-        model_ws = merge_workspace_model_dict(app_models, body.get("model", "") or "")
+        model_ws = merge_workspace_model_dict(app_models, self.context.body.get("model", "") or "")
         extra_mcp = {
             **extra_params,
             "__model__": model_ws,
-            "__messages__": body.get("messages", []),
+            "__messages__": self.context.body.get("messages", []),
             "__files__": self.pipe_metadata.get("files") or [],
         }
         mcp_tools = await planner_merge_mcp_tools_from_ids(
             self.request,
             self.user,
             ordered_tool_ids,
-            self.pipe_metadata,
+            self.context.metadata,
             extra_mcp,
             None,
-            self.mcp_handler,
+            self.engine.mcp_hub.get_or_create_client,
         )
         if mcp_tools:
             tools_dict.update(mcp_tools)
@@ -2449,7 +2813,7 @@ class ToolRegistry:
                 model_system_message = ""
                 subagent_tool_ids: list[str] = []
                 logger.debug(
-                    f"[Planner] Resolving subagent tools for {model_id}. Registry tracker: {self.mcp_handler is not None}"
+                    f"[Planner] Resolving subagent tools for {model_id}. Registry tracker: {self.engine and self.engine.mcp_hub is not None}"
                 )
 
                 # v3.15: Optimized metadata extraction from model_ws (no DB model_db_info)
@@ -2515,7 +2879,7 @@ class ToolRegistry:
                     self.pipe_metadata,
                     extra_mcp_sub,
                     extra_params.get("__event_emitter__"),
-                    self.mcp_handler,
+                    mcp_handler=self.engine.mcp_hub.get_or_create_client,
                 )
                 if mcp_sub:
                     s_tools_dict.update(mcp_sub)
@@ -3051,24 +3415,23 @@ class SubagentManager:
 
     def __init__(
         self,
+        context: PlannerContext,
         ui: UIRenderer,
         state: PlannerState,
-        metadata: dict[str, Any],
-        valves: Any,
-        base_url: str = "",
-        model_knowledge: Optional[list[dict]] = None,
-        mcp_handler: Optional[Callable] = None,
         registry: ToolRegistry = None,
         engine: "PlannerEngine" = None,
     ):
+        self.context = context
         self.ui = ui
         self.state = state
-        self.metadata = metadata
-        self.valves = valves
-        self.base_url = base_url
-        self.model_knowledge = model_knowledge
+        self.metadata = context.metadata
+        self.valves = context.valves
+        self.user_valves = context.user_valves
+        self.request = context.request
+        self.user = context.user
+        self.model_knowledge = context.model_knowledge
+        self.base_url = str(context.request.url).split("/api")[0]
         self.queue_emitter = ui.emitter  # Already a QueueEmitter in structural overhaul
-        self.mcp_handler = mcp_handler
         self.registry = registry
         self.engine = engine
         # We use the subagent_tools_cache from the registry if available
@@ -3086,19 +3449,19 @@ class SubagentManager:
         self.virtual_agents = {}
         for vid, va in self.VIRTUAL_AGENTS.items():
             valve_field = AGENT_MODEL_VALVES.get(vid)
-            valve_value = getattr(valves, valve_field, "") if valve_field else ""
+            valve_value = getattr(self.valves, valve_field, "") if valve_field else ""
             resolved_model = (
                 valve_value.strip()
                 if isinstance(valve_value, str) and valve_value.strip()
-                else (va.model_id or valves.PLANNER_MODEL)
+                else (va.model_id or self.valves.PLANNER_MODEL)
             )
 
             # Wire temperature overrides (e.g., for code interpreter)
             temp = va.temperature
             if vid == "code_interpreter_agent" and hasattr(
-                valves, "CODE_INTERPRETER_TEMPERATURE"
+                self.valves, "CODE_INTERPRETER_TEMPERATURE"
             ):
-                temp = valves.CODE_INTERPRETER_TEMPERATURE
+                temp = self.valves.CODE_INTERPRETER_TEMPERATURE
 
             self.virtual_agents[vid] = va.model_copy(
                 update={"model_id": resolved_model, "temperature": temp}
@@ -3158,7 +3521,7 @@ class SubagentManager:
             judge_response_chunks = []
             try:
                 async for event in Utils.get_streaming_completion(
-                    self.metadata.get("__request__"), check_body, user_obj
+                    self.context.request, check_body, user_obj
                 ):
                     if event["type"] == "content":
                         judge_response_chunks.append(event["text"])
@@ -3255,18 +3618,11 @@ class SubagentManager:
         body: dict,
     ) -> dict[str, Any]:
         """Resolves model info, tools, and constructs the system prompt and initial history."""
-        user_obj = self.metadata.get("__user_obj__")
-        registry = self.registry or ToolRegistry(
-            valves,
-            user_obj,
-            self.metadata.get("__request__"),
-            self.metadata.get("__metadata__"),
-            model_knowledge=self.model_knowledge,
-            mcp_handler=self.mcp_handler,
-        )
+        user_obj = self.context.user
+        registry = self.registry or ToolRegistry(self.context)
 
         # Fix: Fetch app_models from request.app.state instead of __event_call__
-        app_models = getattr(self.metadata.get("__request__").app.state, "MODELS", {})
+        app_models = getattr(self.context.request.app.state, "MODELS", {})
         sub_info = await registry.get_subagent_tools(
             model_id,
             self.virtual_agents,
@@ -3286,7 +3642,7 @@ class SubagentManager:
 
         # Extract Authentication Token from Request (v3.5 extension)
         # Support both Authorization header and Cookie: token=<JWT>
-        request = self.metadata.get("__request__")
+        request = self.context.request
         token = ""
         if request and hasattr(request, "headers"):
             # 1. Try Cookie header (Open WebUI backend standard)
@@ -3320,12 +3676,13 @@ class SubagentManager:
 
         # Sticky Related Tasks (v3.5 extension):
         # Once a task is linked to a session, we track its version (hash) and re-inject if updated.
-        # v3.6.8: Standardize on string keys for metadata session tracking
-        session_key = f"{chat_id}:{task_id}:{model_id}"
-        if session_key not in self.state.subagent_metadata:
-            self.state.subagent_metadata[session_key] = {"linked_tasks": {}}
+        # v3.15: Standardize on JSON array keys for metadata session tracking
+        metadata = self.state.get_metadata(chat_id, task_id, model_id)
+        if "linked_tasks" not in metadata:
+            metadata["linked_tasks"] = {}
+        self.state.set_metadata(chat_id, task_id, model_id, metadata)
 
-        linked_tasks = self.state.subagent_metadata[session_key]["linked_tasks"]
+        linked_tasks = metadata["linked_tasks"]
 
         # Current batch + Persisted batch
         task_set = set([rt.lstrip("@:") for rt in (related_tasks or []) if rt])
@@ -3613,7 +3970,7 @@ class SubagentManager:
         if user_valves.YOLO_MODE or max_iters <= 0 or iteration <= max_iters:
             return True, max_iters
 
-        if self.metadata.get("__event_call__"):
+        if self.context.event_call:
             try:
                 ctx_msg = f"Subagent '{model_id}' ({task_id}) has reached {iteration - 1} tool-call iterations. Continue?"
                 js = self.ui.build_continue_cancel_js(ctx_msg, timeout_s=300)
@@ -3679,7 +4036,7 @@ class SubagentManager:
         if temp_override is not None:
             sub_body["temperature"] = temp_override
 
-        request = self.metadata.get("__request__")
+        request = self.context.request
         app_models = getattr(request.app.state, "MODELS", {}) if request else {}
         workspace_model = merge_workspace_model_dict(app_models, actual_model)
         has_bi = any(
@@ -3691,7 +4048,7 @@ class SubagentManager:
             user_obj,
             workspace_model,
             self.metadata.get("__metadata__", {}),
-            self.metadata.get("__event_emitter__"),
+            self.context.event_emitter,
             has_bi,
         )
 
@@ -3710,7 +4067,7 @@ class SubagentManager:
             last_heartbeat = turn_start
             # v3.6.8: Wrap the entire iterator to ensure it's closed even on CancelledError/TimeoutError.
             stream_gen = Utils.get_streaming_completion(
-                self.metadata.get("__request__"), sub_body, user_obj
+                self.context.request, sub_body, user_obj
             )
             try:
                 # v3.6.8: Use SUBAGENT_TIMEOUT valve (default 1200s) for long reasoning models.
@@ -3819,7 +4176,7 @@ class SubagentManager:
     ) -> None:
         """Executes a single subagent tool call and updates history/states."""
         target_tool = context["tools_dict"].get(name)
-        user_obj = self.metadata.get("__user_obj__")
+        user_obj = self.context.user
         tc_files = []
         res_content = ""
         try:
@@ -3838,13 +4195,13 @@ class SubagentManager:
 
             # Context variables required by many built-in tools
             context_vars = {
-                "__request__": self.metadata.get("__request__"),
+                "__request__": self.context.request,
                 "__user__": self.metadata.get("__user__"),
                 "__event_emitter__": self.queue_emitter,
-                "__event_call__": self.metadata.get("__event_call__"),
-                "__chat_id__": self.metadata.get("__chat_id__")
+                "__event_call__": self.context.event_call,
+                "__chat_id__": self.context.chat_id
                 or self.metadata.get("chat_id"),
-                "__message_id__": self.metadata.get("__message_id__")
+                "__message_id__": self.context.message_id
                 or self.metadata.get("message_id"),
                 "__files__": self.metadata.get("__files__"),
                 "__metadata__": self.metadata.get("__metadata__"),
@@ -3869,7 +4226,7 @@ class SubagentManager:
             # We use process_tool_result to handle file uploads, base64 conversion,
             # and rich object decomposition.
             tc_return = process_tool_result(
-                self.metadata.get("__request__"),
+                self.context.request,
                 name,
                 res,
                 target_tool.get("type", ""),
@@ -3912,9 +4269,7 @@ class SubagentManager:
             # Accumulate files for final consolidated persistence sync
             if tc_files and self.engine:
                 async with self.engine._files_lock:
-                    self.engine.produced_files.extend(tc_files)
-
-                    # Update internal metadata list for this turn immediately (consistency for macros/fallbacks)
+                    # Update internal metadata list for this turn
                     current_files = self.metadata.get("__files__")
                     if isinstance(current_files, list):
                         # Avoid duplicates in the local metadata list. Handle both 'id', 'file_id', and 'url'.
@@ -3928,25 +4283,12 @@ class SubagentManager:
                                 fid = f.get("id") or f.get("file_id") or f.get("url")
                                 if fid and fid not in existing_ids:
                                     current_files.append(f)
-
-                    # v3.15: Continuous persistence (v3 parity).
-                    # Synchronize with the database immediately to ensure assets (especially images)
-                    # are correctly associated with the message even if the turn is long or interrupted.
-                    target_chat_id = self.metadata.get("__chat_id__")
-                    target_msg_id = self.metadata.get("__message_id__")
-                    if target_chat_id and target_msg_id:
-                        try:
-                            await asyncio.to_thread(
-                                Chats.add_message_files_by_id_and_message_id,
-                                target_chat_id,
-                                target_msg_id,
-                                tc_files,
-                            )
-                        except Exception as e:
-                            logger.error(f"Subagent tool file sync failed: {e}")
+                    
+                    # v3.15: Main planner tool files are also tracked in produced_files for final sync
+                    self.engine.produced_files.extend(tc_files)
 
                     logger.debug(
-                        f"[Subagent: {model_id}] Tool {name} returned {len(tc_files)} files. Synced immediately."
+                        f"[Subagent: {model_id}] Tool {name} returned {len(tc_files)} files. Tracked in engine."
                     )
 
             # Update UI to "Done" status for THIS tool call (For logs/potential future use)
@@ -4051,10 +4393,11 @@ class SubagentManager:
 class InternalToolExecutor:
     """Encapsulates the logic for built-in planner tools."""
 
-    def __init__(self, engine: "PlannerEngine"):
+    def __init__(self, context: PlannerContext, engine: "PlannerEngine"):
+        self.context = context
         self.engine = engine
         self.ui = engine.ui
-        self.metadata = engine.metadata
+        self.metadata = context.metadata
 
     @property
     def state(self) -> "PlannerState":
@@ -4155,28 +4498,8 @@ class InternalToolExecutor:
             if sub_task in self.engine.active_tasks:
                 self.engine.active_tasks.remove(sub_task)
 
-        # v3.15: Intermediate persistence sync.
-        # Committing subagent-produced files to the DB immediately after the subagent task finishes
-        # ensures they persist even if the main execution loop is interrupted later.
-        target_chat_id = self.metadata.get("__chat_id__")
-        target_msg_id = self.metadata.get("__message_id__")
-        if target_chat_id and target_msg_id:
-            async with self.engine._files_lock:
-                if self.engine.produced_files:
-                    try:
-                        await asyncio.to_thread(
-                            Chats.add_message_files_by_id_and_message_id,
-                            target_chat_id,
-                            target_msg_id,
-                            self.engine.produced_files,
-                        )
-                        logger.debug(
-                            f"Intermediate sync: Committed {len(self.engine.produced_files)} files to DB after {task_id}."
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Failed intermediate file sync for {task_id}: {e}"
-                        )
+        # v3.15: Intermediate persistence sync removed.
+        # Subagent files are already synced via self.engine.produced_files track.
 
         self.state.update_task(task_id, "completed")
         if user_valves.PLAN_MODE:
@@ -4293,7 +4616,7 @@ class InternalToolExecutor:
             }
             res_chunks = []
             async for ev in Utils.get_streaming_completion(
-                self.metadata.get("__request__"), review_body, user_obj
+                self.context.request, review_body, user_obj
             ):
                 if ev["type"] == "content":
                     res_chunks.append(ev["text"])
@@ -4328,77 +4651,30 @@ class InternalToolExecutor:
 class PlannerEngine:
     def __init__(
         self,
+        context: PlannerContext,
         ui: UIRenderer,
         state: PlannerState,
         subagents: SubagentManager,
         registry: ToolRegistry,
-        metadata: dict[str, Any],
-        valves: Any = None,
-        model_knowledge: Optional[list[dict]] = None,
     ):
+        self.context = context
         self.ui = ui
         self.state = state
         self.subagents = subagents
         self.registry = registry
-        self.valves = valves
-        self.metadata = metadata
-        self.model_knowledge = model_knowledge
-        self.tools = InternalToolExecutor(self)
+        self.metadata = context.metadata
+        self.valves = context.valves
+
+        self.state_persistence = StatePersistence(context, state, ui)
+        self.mcp_hub = MCPHub(context.valves)
+        self.tools = InternalToolExecutor(context, self)
         self.current_plan_html = ""
         self.total_emitted = ""  # Trace current Turn body only
         self.active_tasks: list[asyncio.Task] = []
         # v3.15: Consolidated file persistence. Accumulate files and sync at the end.
         self.produced_files = []
         self._files_lock = asyncio.Lock()
-        # v3.6: MCP Connection Hub (Fix for Anyio task-mismatch & Parallelism)
-        # We use a fleet of worker tasks (one per connection) to own Anyio scopes.
-        self.mcp_clients: dict[str, dict[str, Any]] = (
-            {}
-        )  # Map conn_key -> {proxy, queue, task}
-        self._mcp_lock: asyncio.Lock = asyncio.Lock()
-        self._connecting_mcp: dict[str, asyncio.Future] = (
-            {}
-        )  # Track in-progress connections
 
-    async def get_or_create_mcp_client(
-        self, url: str, headers: Optional[dict] = None
-    ) -> "StreamableHTTPMCPClient":
-        headers_json = json.dumps(headers, sort_keys=True) if headers else "{}"
-        conn_key = hashlib.sha256(f"{url}|{headers_json}".encode()).hexdigest()
-
-        async with self._mcp_lock:
-            if conn_key in self.mcp_clients:
-                return self.mcp_clients[conn_key]["proxy"]
-
-            if conn_key in self._connecting_mcp:
-                fut = self._connecting_mcp[conn_key]
-            else:
-                fut = asyncio.get_running_loop().create_future()
-                self._connecting_mcp[conn_key] = fut
-
-                async def _connect(ck=conn_key, f=fut):
-                    try:
-                        client = StreamableHTTPMCPClient(
-                            url,
-                            headers,
-                            timeout=int(self.valves.SUBAGENT_TIMEOUT),
-                        )
-                        await client.connect()
-                        async with self._mcp_lock:
-                            self.mcp_clients[ck] = {"proxy": client}
-                            self._connecting_mcp.pop(ck, None)
-                        if not f.done():
-                            f.set_result(True)
-                    except Exception as e:
-                        async with self._mcp_lock:
-                            self._connecting_mcp.pop(ck, None)
-                        if not f.done():
-                            f.set_exception(e)
-
-                asyncio.create_task(_connect(), name=f"MCP-Connect-{conn_key[:8]}")
-
-        await fut
-        return self.mcp_clients[conn_key]["proxy"]
 
     async def stop(self) -> None:
         if self.active_tasks:
@@ -4412,11 +4688,7 @@ class PlannerEngine:
                 logger.error(f"Error during subagent task cancellation: {e}")
             self.active_tasks.clear()
 
-        if self.mcp_clients:
-            logger.info(f"Disconnecting {len(self.mcp_clients)} MCP clients...")
-            for info in self.mcp_clients.values():
-                await info["proxy"].disconnect()
-            self.mcp_clients.clear()
+        await self.mcp_hub.stop()
 
     def get_current_files(self) -> list:
         files_map = {}
@@ -4461,9 +4733,9 @@ class PlannerEngine:
 
         # 0. State Recovery (v3.3)
         # We attempt to restore previous turn's state BEFORE clearing.
-        await self._recover_state_from_files(body, chat_id, files)
+        await self.state_persistence.recover_from_files(body, chat_id, files)
 
-        user_obj = self.metadata.get("__user_obj__")
+        user_obj = self.context.user
 
         # 1. Phase 1: Planning
         if user_valves.PLAN_MODE:
@@ -4490,13 +4762,13 @@ class PlannerEngine:
 
         # v3.3: Final State Persistence
         # Save state to file and attach to response. This adds a state file to produced_files.
-        await self._save_state_to_file(chat_id)
+        await self.state_persistence.save_to_file(chat_id)
 
         # v3.15: Final consolidated file persistence sync.
         # Performs a single DB update for ALL produced files from tools and state saving.
         # We ensure target chat/message IDs are resolved from session metadata.
-        target_chat_id = self.metadata.get("__chat_id__") or chat_id
-        target_msg_id = self.metadata.get("__message_id__")
+        target_chat_id = self.context.chat_id or chat_id
+        target_msg_id = self.context.message_id
 
         if target_chat_id and target_msg_id:
             async with self._files_lock:
@@ -4611,259 +4883,6 @@ class PlannerEngine:
         yield full_content
         return
 
-    async def _recover_state_from_files(
-        self, body: dict, chat_id: str, current_files: list = None
-    ) -> None:
-        """
-        Scans attached files (current and history) for the latest state file.
-        Prioritizes the absolute latest JSON state file found.
-        """
-        state_file = None
-
-        # 1. First, check files attached directly to this message
-        if current_files:
-            for f in reversed(current_files):
-                name = f.get("name", f.get("filename", ""))
-                if "planner_state" in name and name.endswith(".json"):
-                    state_file = f
-                    break
-
-        # 2. If not found in current message, look back through history (explicit DB query)
-        if not state_file:
-            chat_id = self.metadata.get("__chat_id__")
-            if chat_id:
-                logger.info(
-                    f"Performing deep history scan for chat {chat_id} via database..."
-                )
-                chat_obj = await asyncio.to_thread(Chats.get_chat_by_id, chat_id)
-                if chat_obj and hasattr(chat_obj, "chat"):
-                    messages_map = chat_obj.chat.get("history", {}).get("messages", {})
-                    # Standard Open WebUI history traversal
-                    current_id = chat_obj.chat.get("history", {}).get("currentId")
-
-                    visited = set()
-                    while current_id and current_id not in visited:
-                        visited.add(current_id)
-                        msg = messages_map.get(current_id)
-                        if not msg:
-                            break
-
-                        msg_files = msg.get("files")
-                        if msg_files:
-                            for f in reversed(msg_files):
-                                name = f.get("name", f.get("filename", ""))
-                                if "planner_state" in name and name.endswith(".json"):
-                                    state_file = f
-                                    logger.info(
-                                        f"Successfully recovered state from DB history: {name}"
-                                    )
-                                    break
-
-                        if state_file:
-                            break
-                        current_id = msg.get("parentId")
-
-            # Fallback to body messages if DB query failed or chat_id missing
-            if not state_file:
-                messages = body.get("messages", [])
-                for message in reversed(messages):
-                    msg_files = message.get("files")
-                    if msg_files:
-                        for f in reversed(msg_files):
-                            name = f.get("name", f.get("filename", ""))
-                            if "planner_state" in name and name.endswith(".json"):
-                                state_file = f
-                                break
-                    if state_file:
-                        break
-
-        if not state_file:
-            logger.info(
-                "No planner state file found in current turn, database, or history."
-            )
-            return
-
-        try:
-            file_id = state_file.get("file_id") or state_file.get("id")
-            if not file_id:
-                logger.warning(f"State file found but missing ID: {state_file}")
-                return
-
-            # Use global Files model (Open WebUI)
-            # Defensive check: if Files is somehow None or not available, log it
-            if Files is None:
-                logger.error(
-                    "Global 'Files' model table is None - cannot recover state."
-                )
-                return
-
-            file_obj = await asyncio.to_thread(Files.get_file_by_id, file_id)
-            if not file_obj:
-                logger.warning(f"State file with ID {file_id} not found in database.")
-                return
-
-            file_path = getattr(file_obj, "path", None)
-            if not file_path and hasattr(file_obj, "meta"):
-                file_path = file_obj.meta.get("path")
-
-            if file_path and os.path.exists(file_path):
-                with open(file_path, "r", encoding="utf-8") as f_in:
-                    data = json.load(f_in)
-
-                # Restore tasks
-                if "tasks" in data:
-                    self.state.tasks.clear()
-                    for tid, tdata in data["tasks"].items():
-                        self.state.update_task(
-                            tid,
-                            tdata.get("status", "pending"),
-                            tdata.get("description", ""),
-                        )
-
-                # Restore results
-                if "results" in data:
-                    self.state.results.clear()
-                    self.state.results.update(data["results"])
-
-                # Restore subagent history
-                if "subagent_history" in data:
-                    self.state.subagent_history.clear()
-                    for key_str, history in data["subagent_history"].items():
-                        # v3.6.8: Support both legacy [JSON-list] and new colon:separated keys
-                        try:
-                            if ":" in key_str:
-                                parts = key_str.split(":", 2)
-                            else:
-                                parts = (
-                                    ast.literal_eval(key_str)
-                                    if isinstance(key_str, str)
-                                    else key_str
-                                )
-
-                            if isinstance(parts, (list, tuple)) and len(parts) == 3:
-                                # Normalize chat_id to current session if it matched legacy pattern
-                                norm_key = f"{chat_id}:{parts[1]}:{parts[2]}"
-                                self.state.subagent_history[norm_key] = history
-                            else:
-                                # Direct string key storage
-                                self.state.subagent_history[str(key_str)] = history
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to reconstruct history key {key_str}: {e}"
-                            )
-
-                # Restore subagent metadata
-                if "subagent_metadata" in data:
-                    self.state.subagent_metadata.clear()
-                    for key_str, metadata in data["subagent_metadata"].items():
-                        try:
-                            if ":" in key_str:
-                                parts = key_str.split(":", 2)
-                            else:
-                                parts = (
-                                    ast.literal_eval(key_str)
-                                    if isinstance(key_str, str)
-                                    else key_str
-                                )
-
-                            if isinstance(parts, (list, tuple)) and len(parts) == 3:
-                                norm_key = f"{chat_id}:{parts[1]}:{parts[2]}"
-                                self.state.subagent_metadata[norm_key] = metadata
-                            else:
-                                self.state.subagent_metadata[str(key_str)] = metadata
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to reconstruct metadata key {key_str}: {e}"
-                            )
-
-                status_msg = (
-                    f"Recovered state from {state_file.get('name', 'latest file')}"
-                )
-                logger.info(status_msg)
-                await self.ui.emit_status(status_msg)
-            else:
-                logger.error(f"State file path not found or inaccessible: {file_path}")
-        except Exception as e:
-            logger.error(f"Critical error during state recovery: {e}")
-
-    async def _save_state_to_file(self, chat_id: str):
-        """Serializes current state and emits as a file attachment via upload_file_handler."""
-        emitter = self.metadata.get("__event_emitter__")
-        request = self.metadata.get("__request__")
-        user = self.metadata.get("__user_obj__")
-
-        if not emitter or not request or not user:
-            return
-
-        try:
-            state_data = {
-                "tasks": {
-                    tid: {"status": t.status, "description": t.description}
-                    for tid, t in self.state.tasks.items()
-                },
-                "results": self.state.results,
-                "subagent_history": self.state.subagent_history,
-                "subagent_metadata": self.state.subagent_metadata,
-            }
-
-            filename = f"planner_state_{chat_id}.json"
-            content = json.dumps(state_data, ensure_ascii=False).encode("utf-8")
-
-            # Use in-memory file with proper headers to set content_type
-            file_upload = UploadFile(
-                file=io.BytesIO(content),
-                filename=filename,
-                headers=Headers({"content-type": "application/json"}),
-            )
-
-            # Call sync as in working examples and confirmed in source
-            file_item = upload_file_handler(
-                request=request, file=file_upload, metadata={}, process=False, user=user
-            )
-
-            if file_item:
-                file_id = getattr(file_item, "id", None)
-                if file_id:
-                    file_info = {"file_id": str(file_id), "name": filename}
-
-                    # 1. Update the internal list for this turn
-                    internal_files = self.metadata.get("__files__")
-                    if isinstance(internal_files, list):
-                        internal_files.append(file_info)
-
-                    # 2. Synchronize directly with the database for multi-turn persistence
-                    target_chat_id = self.metadata.get("__chat_id__") or chat_id
-                    target_msg_id = self.metadata.get("__message_id__")
-
-                    if target_chat_id and target_msg_id:
-                        async with self._files_lock:
-                            # Add to the consolidated sync list
-                            self.produced_files.append(file_info)
-                            logger.info(f"State file queued for final sync: {filename}")
-
-                        try:
-                            # Direct DB update (same method used in Doodle Paint)
-                            await asyncio.to_thread(
-                                Chats.add_message_files_by_id_and_message_id,
-                                target_chat_id,
-                                target_msg_id,
-                                [file_info],
-                            )
-                            logger.info(
-                                f"Successfully persisted state file to chat {target_chat_id} message {target_msg_id}"
-                            )
-                        except Exception as db_err:
-                            logger.error(
-                                f"Failed to synchronize state file with database: {db_err}"
-                            )
-
-                    # 3. Emit event for immediate UI feedback
-                    await emitter(
-                        {"type": "chat:message:files", "data": {"files": [file_info]}}
-                    )
-        except Exception as e:
-            logger.error(f"Failed to save state to file: {e}")
-
     async def _phase_planning(self, valves, user_valves, user_obj, body):
         """Generates the initial task list based on the user prompt."""
         await self.ui.emit_status("Planning...")
@@ -4892,9 +4911,9 @@ class PlannerEngine:
         if terminal_id and (enable_planner_terminal or not is_terminal_agent_present):
             try:
                 raw_term = await get_terminal_tools(
-                    self.metadata.get("__request__"),
+                    self.context.request,
                     terminal_id,
-                    self.metadata.get("__user_obj__"),
+                    self.context.user,
                     tmp_params,
                 )
                 _, terminal_sys = unpack_terminal_tools_result(raw_term)
@@ -4960,7 +4979,7 @@ class PlannerEngine:
                 plan_body["metadata"]["knowledge"] = self.model_knowledge
                 plan_body["metadata"]["__model_knowledge__"] = self.model_knowledge
 
-            request = self.metadata.get("__request__")
+            request = self.context.request
             app_models = getattr(request.app.state, "MODELS", {}) if request else {}
             workspace_model = merge_workspace_model_dict(
                 app_models, body.get("model", "") or ""
@@ -4971,13 +4990,13 @@ class PlannerEngine:
                 user_obj,
                 workspace_model,
                 self.metadata.get("__metadata__", {}),
-                self.metadata.get("__event_emitter__"),
+                self.context.event_emitter,
                 False,
             )
 
             plan_chunks = []
             async for event in Utils.get_streaming_completion(
-                self.metadata.get("__request__"), plan_body, user_obj
+                self.context.request, plan_body, user_obj
             ):
                 etype = event["type"]
                 if etype == "content":
@@ -5034,7 +5053,7 @@ class PlannerEngine:
             if (
                 user_valves.ENABLE_PLAN_APPROVAL
                 and not user_valves.YOLO_MODE
-                and self.metadata.get("__event_call__")
+                and self.context.event_call
             ):
                 try:
                     tasks_data = [
@@ -5112,9 +5131,9 @@ class PlannerEngine:
         if terminal_id and (enable_planner_terminal or not is_terminal_agent_present):
             try:
                 raw_term = await get_terminal_tools(
-                    self.metadata.get("__request__"),
+                    self.context.request,
                     terminal_id,
-                    self.metadata.get("__user_obj__"),
+                    self.context.user,
                     tmp_params,
                 )
                 _, terminal_sys = unpack_terminal_tools_result(raw_term)
@@ -5125,7 +5144,7 @@ class PlannerEngine:
             valves,
             user_valves,
             self.registry.get_tools_spec(
-                user_obj, user_valves, list(self.state.tasks.keys())
+                list(self.state.tasks.keys())
             ),
             metadata=self.metadata,
             mode="execute",
@@ -5151,9 +5170,7 @@ class PlannerEngine:
             )
             yield ""  # Heartbeat
 
-        external_tools_dict = await self.registry.get_planner_tools_dict(
-            body, user_valves
-        )
+        external_tools_dict = await self.registry.get_planner_tools_dict()
 
         while True:
             planner_iteration += 1
@@ -5277,7 +5294,7 @@ class PlannerEngine:
         """Prompts user if iteration limit reached."""
         if user_valves.YOLO_MODE or max_iters <= 0 or iteration <= max_iters:
             return True, max_iters
-        if self.metadata.get("__event_call__"):
+        if self.context.event_call:
             try:
                 js = self.ui.build_continue_cancel_js(
                     f"The planner has reached {iteration - 1} iterations. Continue?",
@@ -5327,7 +5344,7 @@ class PlannerEngine:
         """Performs a single LLM turn for the planner with live reasoning and clean content streaming."""
         tc_dict, content_chunks, reasoning_chunks = {}, [], []
         tools = self.registry.get_tools_spec(
-            user_obj, user_valves, list(self.state.tasks.keys())
+            list(self.state.tasks.keys())
         )
         if external_tools_dict:
             tools.extend(
@@ -5350,7 +5367,7 @@ class PlannerEngine:
             planner_body["metadata"]["knowledge"] = self.model_knowledge
             planner_body["metadata"]["__model_knowledge__"] = self.model_knowledge
 
-        request = self.metadata.get("__request__")
+        request = self.context.request
         app_models = getattr(request.app.state, "MODELS", {}) if request else {}
         workspace_model = merge_workspace_model_dict(
             app_models, body.get("model", "") or ""
@@ -5365,7 +5382,7 @@ class PlannerEngine:
             user_obj,
             workspace_model,
             self.metadata.get("__metadata__", {}),
-            self.metadata.get("__event_emitter__"),
+            self.context.event_emitter,
             has_bi,
         )
 
@@ -5383,7 +5400,7 @@ class PlannerEngine:
         TOKENS_THRESHOLD = 50
 
         async for event in Utils.get_streaming_completion(
-            self.metadata.get("__request__"), planner_body, user_obj
+            self.context.request, planner_body, user_obj
         ):
             etype = event["type"]
 
@@ -5577,9 +5594,6 @@ class PlannerEngine:
             # Parallel execution with real-time UI updates via Pydantic model
             ui_state = UIState(total_emitted=total_emitted)
 
-            # Use a simple counter to track completion for the generator
-            pending_count = len(sorted_tcs)
-
             tasks = [
                 self._execute_single_tool_call(
                     tc,
@@ -5593,18 +5607,29 @@ class PlannerEngine:
                     tc_tag_map,
                     ui_state,
                     history_lock,
+                    append_to_history=False,
                 )
                 for tc in sorted_tcs
             ]
 
             # We wait for all tasks, but we want to yield heartbeats while they run.
             # asyncio.as_completed is better here.
+            # NOTE: as_completed returns in completion order, not submission order.
+            # The subsequent sort on history_tail_start below ensures the messages
+            # are appended to the execution history in the correct tool_call order.
+            results = []
             for coro in asyncio.as_completed(tasks):
-                await coro
+                results.append(await coro)
                 yield ""  # Heartbeat whenever a tool finishes
 
-            # Re-sort the tool result messages appended during this parallel batch
-            # to match the original tool_calls order
+            # v3.15: Safe History Append for Parallel Mode
+            # We append all results in the correct order to match tool_calls
+            # to avoid the race condition where history_tail_start is stale.
+            async with history_lock:
+                for done_tag, tool_res, msg_dict in results:
+                    exec_history.append(msg_dict)
+
+            # Re-sort is still useful if results came back out of order via as_completed
             call_id_order = {tc.get("id"): i for i, tc in enumerate(tool_calls)}
             history_tail_start = len(exec_history) - len(tool_calls)
             tool_tail = exec_history[history_tail_start:]
@@ -5618,7 +5643,7 @@ class PlannerEngine:
             # Sequential execution (original behavior)
             for tc in sorted_tcs:
                 call_id = tc.get("id")
-                done_tag, _ = await self._execute_single_tool_call(
+                done_tag, _, _ = await self._execute_single_tool_call(
                     tc,
                     exec_history,
                     external_tools_dict,
@@ -5658,7 +5683,8 @@ class PlannerEngine:
         tc_tag_map: dict,
         ui_state: Optional[UIState] = None,
         history_lock: Optional[asyncio.Lock] = None,
-    ) -> tuple[str, str]:
+        append_to_history: bool = True,
+    ) -> tuple[str, str, dict]:
         """Helper to execute a single tool call and return the UI tag and tool result."""
         func_name, args_str, call_id = (
             tc["function"]["name"],
@@ -5676,6 +5702,7 @@ class PlannerEngine:
 
         tool_res = ""
         tc_files = []
+        tc_embeds = [] # v3.15: Initialise to avoid locals() check failure on exception
         try:
             match func_name:
                 case "update_state":
@@ -5691,7 +5718,7 @@ class PlannerEngine:
                 case "read_task_result":
                     tool_res = self.tools.read_task_result(resolved_args)
                 case "review_tasks":
-                    tool_res = self.tools.review_tasks(
+                    tool_res = await self.tools.review_tasks(
                         resolved_args, valves, body, user_obj
                     )
                 case name if name in external_tools_dict:
@@ -5710,13 +5737,13 @@ class PlannerEngine:
                     # We inject special context variables if requested by the tool signature,
                     # bypassing the JSON schema (allowed_keys) which often excludes them.
                     context_vars = {
-                        "__request__": self.metadata.get("__request__"),
+                        "__request__": self.context.request,
                         "__user__": self.metadata.get("__user__"),
                         "__event_emitter__": self.ui.emitter,
-                        "__event_call__": self.metadata.get("__event_call__"),
-                        "__chat_id__": self.metadata.get("__chat_id__")
+                        "__event_call__": self.context.event_call,
+                        "__chat_id__": self.context.chat_id
                         or self.metadata.get("chat_id"),
-                        "__message_id__": self.metadata.get("__message_id__")
+                        "__message_id__": self.context.message_id
                         or self.metadata.get("message_id"),
                         "__files__": self.metadata.get("__files__"),
                         "__metadata__": self.metadata.get("__metadata__"),
@@ -5737,7 +5764,7 @@ class PlannerEngine:
 
                     res = await tool_data["callable"](**filtered_args)
                     tc_return = process_tool_result(
-                        self.metadata.get("__request__"),
+                        self.context.request,
                         name,
                         res,
                         tool_data.get("type", ""),
@@ -5748,7 +5775,7 @@ class PlannerEngine:
 
                     # Handle multiple return values (tuple: str/dict, files, embeds) (v3.15)
                     res_str = ""
-                    tc_embeds = []
+                    # tc_embeds already initialized at top of try block
                     r_val = tc_return
                     if isinstance(tc_return, tuple):
                         r_val, tc_files, tc_embeds = tc_return
@@ -5768,8 +5795,8 @@ class PlannerEngine:
 
                     # Persistence & Visibility (v3.5)
                     if tc_files:
-                        target_chat_id = self.metadata.get("__chat_id__") or chat_id
-                        target_msg_id = self.metadata.get("__message_id__")
+                        target_chat_id = self.context.chat_id or chat_id
+                        target_msg_id = self.context.message_id
                         if target_chat_id and target_msg_id:
                             try:
                                 # Synchronize with DB for multi-turn persistence
@@ -5811,17 +5838,15 @@ class PlannerEngine:
             tool_res = f"Error: {e}"
 
         # Maintain global history - ordering is critical for KV caching and model consistency.
-        # We append as they finish (with lock), and the caller (_handle_tool_calls)
-        # re-sorts the history tail to match the original tool_calls order after completion.
-        async with history_lock or asyncio.Lock():
-            exec_history.append(
-                {
-                    "role": "tool",
-                    "content": tool_res,
-                    "tool_call_id": call_id,
-                    "name": func_name,
-                }
-            )
+        msg_dict = {
+            "role": "tool",
+            "content": tool_res,
+            "tool_call_id": call_id,
+            "name": func_name,
+        }
+        if append_to_history:
+            async with history_lock or asyncio.Lock():
+                exec_history.append(msg_dict)
 
         # Update UI to "Done" status for THIS tool call
         # v3.15: Include embeds derived from process_tool_result to match Plan pattern.
@@ -5832,7 +5857,7 @@ class PlannerEngine:
             done=True,
             result=tool_res,
             files=tc_files,
-            embeds=tc_embeds if "tc_embeds" in locals() else None,
+            embeds=tc_embeds,
         )
 
         # Real-time UI updates for parallel mode
@@ -5849,7 +5874,7 @@ class PlannerEngine:
             # Release lock before slow streaming emission
             await self._emit_replace(current_total)
 
-        return done_tag, tool_res
+        return done_tag, tool_res, msg_dict
 
     async def _phase_verification(
         self,
@@ -5971,7 +5996,7 @@ class PlannerEngine:
             reasoning_start_time = time.monotonic()
 
             async for ev in Utils.get_streaming_completion(
-                self.metadata.get("__request__"), judge_body, user_obj
+                self.context.request, judge_body, user_obj
             ):
                 etype = ev["type"]
                 if etype == "reasoning":
@@ -6220,8 +6245,8 @@ Your goal is to fulfill the user's request.""",
         while True:
             event = await queue.get()
             try:
-                # v3.6.5: Sequential emission with high-speed 2.0s watchdog to prevent client-hangs from blocking the worker
-                async with asyncio.timeout(2.0):
+                # v3.15: Increased watchdog timeout to 5.0s to accommodate large HTML plan blocks/replacements.
+                async with asyncio.timeout(5.0):
                     await emitter(event)
             except (asyncio.TimeoutError, Exception) as e:
                 pass  # Drop failed/timed-out emissions (client disconnected or pipe saturated)
@@ -6319,54 +6344,52 @@ Your goal is to fulfill the user's request.""",
         # Subagent Token Handling
         # Extraction and substitution are handled internally during subagent context preparation.
 
-        # Life cycle: Step 1: Create engine shell (without subagents/registry yet)
-        engine = PlannerEngine(
-            ui,
-            state=None,
-            subagents=None,
-            registry=None,
+        # Life cycle: Step 0: Create Planner Context
+        context = PlannerContext(
+            request=__request__,
+            user=user_obj,
             metadata=metadata,
+            event_emitter=__event_emitter__,
+            event_call=__event_call__,
             valves=self.valves,
+            user_valves=self.user_valves,
+            body=body,
             model_knowledge=model_knowledge,
+            chat_id=chat_id,
+            message_id=message_id,
         )
 
-        # Wire the engine reference back into the QueueEmitter for tool event interception
-        if hasattr(ui.emitter, "engine"):
-            ui.emitter.engine = engine
-
-        # Life cycle: Step 2: Create state and registry (using engine tracker)
+        # Life cycle: Step 1: Create state and UI
         state = PlannerState()
-        registry = ToolRegistry(
-            self.valves,
-            user_obj,
-            __request__,
-            pipe_metadata,
-            model_knowledge=model_knowledge,
-            planner_info=planner_info,
-            mcp_handler=engine.get_or_create_mcp_client,
-            user_skills=accessible_skills,
+        ui = UIRenderer(__event_emitter__, __event_call__, ui_queue=ui_queue)
+
+        # Life cycle: Step 2: Create registry (requires engine for MCPHub)
+        registry = ToolRegistry(context)
+
+        # Life cycle: Step 3: Create subagent manager
+        subagents = SubagentManager(
+            context=context,
+            ui=ui,
+            state=state,
+            registry=registry,
         )
 
-        # Life cycle: Step 3: Create subagents (using engine tracker)
-        subagents = SubagentManager(
-            ui,
-            state,
-            metadata,
-            self.valves,
-            base_url=base_url,
-            model_knowledge=model_knowledge,
-            mcp_handler=engine.get_or_create_mcp_client,
+        # Life cycle: Step 4: Create engine and link all components
+        engine = PlannerEngine(
+            context=context,
+            ui=ui,
+            state=state,
+            subagents=subagents,
             registry=registry,
-            engine=engine,
         )
+
+        # Link components together
+        registry.engine = engine
+        subagents.engine = engine
 
         # Life cycle: Step 3.1: Start Background Consumption Workers
         ui_worker = asyncio.create_task(self._ui_worker(ui_queue, __event_emitter__))
 
-        # Life cycle: Step 4: Link components
-        engine.subagents = subagents
-        engine.registry = registry
-        engine.state = state
 
         # Use a generator to keep the SSE stream active and the "Exploring" status valid
         try:
