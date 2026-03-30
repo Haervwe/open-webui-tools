@@ -3851,15 +3851,16 @@ class SubagentManager:
                 "__files__": self.metadata.get("__files__"),
                 "__metadata__": self.metadata.get("__metadata__"),
             }
-            # We add them to filtered_args if the tool needs them
-            # (BUILTIN tools often look for these specific keys)
-            filtered_args.update(
-                {
-                    k: v
-                    for k, v in context_vars.items()
-                    if v is not None and k in allowed_keys
-                }
-            )
+            # v3.15: Safe Signature-based Injection
+            # We inject special context variables only if they are in the tool's signature.
+            try:
+                import inspect
+                sig = inspect.signature(target_tool["callable"])
+                for k, v in context_vars.items():
+                    if v is not None and k in sig.parameters and k not in filtered_args:
+                        filtered_args[k] = v
+            except Exception as e:
+                logger.warning(f"Signature inspection failed for subagent tool {name}: {e}")
 
             # Execute tool: configurable timeout (default 1200s)
             logger.debug(f"[Subagent: {model_id}] Calling tool {name}...")
@@ -3880,9 +3881,11 @@ class SubagentManager:
             )
 
             tc_files = []
+            tc_embeds = []
             # Handle multiple return values (tuple: str/dict, files, embeds)
-            if isinstance(tc_return, tuple) and len(tc_return) >= 2:
-                r_val, tuple_files = tc_return[:2]
+            if isinstance(tc_return, tuple):
+                # process_tool_result is guaranteed to return (result, files, embeds)
+                r_val, tuple_files, tc_embeds = tc_return
                 if tuple_files:
                     tc_files.extend(tuple_files)
                 if isinstance(r_val, dict):
@@ -3902,6 +3905,17 @@ class SubagentManager:
                     )
                 else:
                     res_content = str(tc_return) if tc_return is not None else ""
+
+            # Emit embeds via the specialized queue emitter for subagents (v3.15)
+            if tc_embeds and self.queue_emitter:
+                await self.queue_emitter(
+                    {
+                        "type": "embeds",
+                        "data": {
+                            "embeds": tc_embeds,
+                        },
+                    }
+                )
 
             # Accumulate files for final consolidated persistence sync at the end of engine.run()
             if tc_files and self.engine:
@@ -5683,6 +5697,36 @@ class PlannerEngine:
                     filtered_args = {
                         k: v for k, v in resolved_args.items() if k in allowed_keys
                     }
+
+                    # v3.15: Main Planner Tool Context Injection (Parity with subagents)
+                    # We inject special context variables if requested by the tool signature,
+                    # bypassing the JSON schema (allowed_keys) which often excludes them.
+                    context_vars = {
+                        "__request__": self.metadata.get("__request__"),
+                        "__user__": self.metadata.get("__user__"),
+                        "__event_emitter__": self.ui.emitter,
+                        "__event_call__": self.metadata.get("__event_call__"),
+                        "__chat_id__": self.metadata.get("__chat_id__")
+                        or self.metadata.get("chat_id"),
+                        "__message_id__": self.metadata.get("__message_id__")
+                        or self.metadata.get("message_id"),
+                        "__files__": self.metadata.get("__files__"),
+                        "__metadata__": self.metadata.get("__metadata__"),
+                    }
+
+                    # v3.15: Main Planner Tool Context Injection (Parity with subagents)
+                    # We inject special context variables only if they are in the tool's signature.
+                    # We use self.ui.emitter (the structural QueueEmitter) to ensure
+                    # events are properly queued and synchronized with the UI.
+                    try:
+                        import inspect
+                        sig = inspect.signature(tool_data["callable"])
+                        for k, v in context_vars.items():
+                            if v is not None and k in sig.parameters and k not in filtered_args:
+                                filtered_args[k] = v
+                    except Exception as e:
+                        logger.warning(f"Signature inspection failed for main planner tool {name}: {e}")
+
                     res = await tool_data["callable"](**filtered_args)
                     tc_return = process_tool_result(
                         self.metadata.get("__request__"),
@@ -5693,14 +5737,28 @@ class PlannerEngine:
                         self.metadata.get("__metadata__"),
                         user_obj,
                     )
-                    # Handle multiple return values (str, files, embeds)
+
+                    # Handle multiple return values (tuple: str/dict, files, embeds)
                     res_str = ""
+                    tc_embeds = []
                     if isinstance(tc_return, tuple):
-                        if len(tc_return) >= 2:
-                            r_val, tc_files = tc_return[:2]
-                            res_str = str(r_val) if r_val is not None else ""
+                        # process_tool_result is guaranteed to return (result, files, embeds)
+                        r_val, tc_files, tc_embeds = tc_return
+                        res_str = str(r_val) if r_val is not None else ""
                     else:
                         res_str = str(tc_return) if tc_return is not None else ""
+
+                    # Emit embeds via the direct UI emitter for main planner (v3.15)
+                    emitter = self.ui.emitter
+                    if tc_embeds and emitter:
+                        await emitter(
+                            {
+                                "type": "embeds",
+                                "data": {
+                                    "embeds": tc_embeds,
+                                },
+                            }
+                        )
 
                     # Persistence & Visibility (v3.5)
                     if tc_files:
