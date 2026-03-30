@@ -3,8 +3,24 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.7.0
+version: 3.8.0
 required_open_webui_version: 0.8.12
+
+Features:
+- **Autonomous Multi-Agent Orchestration**: Dynamic task decomposition and delegation to specialized subagents.
+- **Agentic Planning & Self-Correction**: Iterative planning with user-in-the-loop approval and feedback cycles.
+- **Parallel Execution (v3.15+)**: Concurrent execution of tool calls and subagent tasks using `asyncio.gather` for significantly faster performance.
+- **Native Open WebUI Integration**:
+    - **Skills Support**: Automatic resolution and inclusion of user skills in the system prompt.
+    - **Terminal Integration**: Direct interactive terminal access via `terminal_agent`.
+    - **Native Tool Parity**: Mirrors Open WebUI's logic for built-in tools (web search, image gen, knowledge, code interpreter).
+- **Specialized Virtual Subagents**: `web_search_agent`, `image_gen_agent`, `knowledge_agent`, `code_interpreter_agent`, and `terminal_agent`.
+- **Interactive UI Components**:
+    - **Plan Approval Modal**: Review and modify plans before execution.
+    - **Real-time Progress Tracker**: High-fidelity HTML/JS visualization of the execution state.
+    - **Step-by-Step User Interaction**: `ask_user` and `give_options` tools for middle-of-turn feedback.
+- **Robust State Persistence**: Automatic saving/recovery of task states and history across chat turns via JSON attachments.
+- **High-Performance Architecture**: `QueueEmitter` for non-blocking, throttled UI updates and MCP resilience patches.
 
 Requirements (Open WebUI parity):
 - Native function calling only: models must use OpenAI-style ``tools`` on the API body.
@@ -15,6 +31,12 @@ Requirements (Open WebUI parity):
 - Models listed in SUBAGENT_MODELS / workspace terminal lists use the same tool
   surface as their saved workspace model (toolIds, MCP, terminal, and builtins only
   when native FC and meta.capabilities.builtin_tools allow).
+
+Known Issues:
+- Filter for subagents are not tested.
+- Parallel subagents in the same environment that manage files on the same environment (Code intepreter / terminal agents)
+  concurrently may inherently cause issues.
+- Parallel subagents in local environments that require loading and unloading another external models (Local LLMs + Comfyui)risk OOM errors.
 """
 import ast
 import asyncio
@@ -6108,6 +6130,10 @@ class Pipe:
             default="",
             description="Comma-separated list of model IDs available to be queried as subagents works best with Workspace Model presets | only native tool calling is supported",
         )
+        WORKSPACE_TERMINAL_MODELS: str = Field(
+            default="",
+            description="Comma-separated list of model IDs available to be queried as subagents with terminal access. These will override the default virtual terminal agent check.",
+        )
         TEMPERATURE: float = Field(
             default=0.7, description="Temperature for the planner agent"
         )
@@ -6159,10 +6185,6 @@ Your goal is to fulfill the user's request.""",
         TERMINAL_AGENT_MODEL: str = Field(
             default="",
             description="Model for the terminal agent, works Best with a Base Model (not workspace presets) | (leave blank to use the planner model)",
-        )
-        WORKSPACE_TERMINAL_MODELS: str = Field(
-            default="",
-            description="Comma-separated list of model IDs available to be queried as subagents with terminal access. These will override the default virtual terminal agent check.",
         )
         ENABLE_IMAGE_GENERATION_AGENT: bool = Field(
             default=True, description="Enable built-in image generation subagent"

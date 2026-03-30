@@ -521,17 +521,6 @@ AI-powered web search using Perplexica with streaming responses, intelligent cit
 
 ![Perplexica Pipe Example](img/Perplexica_pipe.png)
 *Example of Perplexica pipe search results with citations in Open WebUI*
-
-### Parallel Execution (New)
-
-Planner Agent v3 now supports parallel execution of tool calls and subagent calls via `asyncio.gather`. This significantly improves performance when multiple independent tasks can be performed simultaneously.
-
-- **`PARALLEL_TOOL_EXECUTION`**: When enabled, the planner executes all identified tool calls (including subagent calls) in parallel.
-- **`PARALLEL_SUBAGENT_EXECUTION`**: When enabled, subagents execute their internal tool calls (search, code interpreter, etc.) in parallel.
-
-> [!WARNING]
-> Parallel execution may lead to race conditions if tools have stateful dependencies within the same turn (e.g., one tool depends on a file created by another tool in the same turn). Use with caution for complex, inter-dependent workflows. Most standard search and generation tasks are independent and safe for parallelism.
-
 ---
 
 ### ComfyUI Image-to-Image Tool (Qwen Image Edit 2509)
@@ -961,18 +950,25 @@ The Planner Agent v3 is a state-of-the-art autonomous system designed for Open W
 
 ### 🚀 Key Features
 
-* **🧠 Agentic Planning:** Automatically decomposes high-level goals into a dependency-aware task tree.
-* **📂 Thread-Persistent Subagents:** Delegates tasks to specialized models while maintaining conversation history for follow-ups and complex iterations.
-* **🌐 Built-in Virtual Agents:**
-    - **Web Search Agent**: Real-time research and information synthesis.
-    - **Image Gen Agent**: High-quality image generation and AI-powered editing.
-    - **Knowledge Agent**: Instant retrieval from your documents, notes, and user memory.
-    - **Code Interpreter Agent**: Sandboxed Python execution and multi-language content generation.
-    - **Terminal Agent**: Direct system terminal access for file manipulation and environment management.
-* **📊 Live Execution State:** A beautiful, real-time HTML interface (brain icon) showing current task status (Pending, In-Progress, Completed, Failed).
-* **🎭 Interactive User Guidance:** Special tools like `ask_user` and `give_options` allow the agent to pause and request clarification or choices through native UI modals.
-* **🔗 Result Injection (@task_id):** Seamlessly inject large subagent outputs into any prompt or final response using simple text macros.
-* **🔍 Cross-Task Review:** Spawn "Reviewer" subagents to evaluate and synthesize data across multiple completed tasks.
+* **🧠 Agentic Planning & Self-Correction:** Automatically decomposes high-level goals into a dependency-aware task tree with user-in-the-loop approval and adaptive rescheduling.
+* **⚡ Parallel Execution (v15+):** Blazing fast performance via concurrent execution of tool calls and subagent tasks using `asyncio.gather`. This allows multiple independent tasks to be performed simultaneously.
+* **📂 Robust State Persistence:** Automatically saves and recovers task states, results, and subagent histories across chat turns via attached JSON files.
+* **🔌 Native OWUI Integration:**
+    - **User Skills**: Automatically resolves and injects available skills for the model (Planner and Custom Workspace models) for it to query them.
+    - **Knowledge Bases & RAG**: Direct integration with OWUI knowledge bases, notes, and user memory via the `knowledge_agent`.
+    - **Custom Functions & Tools**: Full support for user-created Python tools, imported tools, and external OpenAPI/DB tools.
+    - **MCP Servers**: Extended support for Model Context Protocol (MCP) servers with connection deduplication and resilience.
+    - **Terminal Integration**: Full interactive terminal access for shell-based tasks and file management (requires `terminal_agent`).
+    - **Native Tool Parity**: Intelligently inherits built-in tool capabilities (Web Search, Image Gen, etc.) when specialized subagents are disabled.
+* **🌐 Specialized Built-in Subagents:**
+    - **Web Search Agent**: Autonomous research with source synthesis and citation handling.
+    - **Image Gen Agent**: High-quality creation using OWUI's native image middleware.
+    - **Knowledge Agent**: Context-aware RAG from your documents and user memory.
+    - **Code Interpreter Agent**: Secure Python execution for data science and automation.
+    - **Terminal Agent**: Direct system access for technical task execution.
+* **🛠️ MCP Resilience System:** Full Model Context Protocol (MCP) support with built-in parallelism patches and connection deduplication to prevent deadlocks.
+* **🎭 Interactive UI Modals:** Native UI components for `ask_user`, `give_options`, and `plan_approval` allow the agent to request clarification or confirmation.
+* **📊 Visual Execution Tracker:** Real-time HTML interface showing live task status (Pending, In-Progress, Completed, Failed).
 
 ### ⚙️ Configuration (Valves)
 
@@ -982,25 +978,33 @@ The Planner Agent v3 is a state-of-the-art autonomous system designed for Open W
 >     - **Essential for**: `PLANNER_MODEL` (Mandatory).
 >     - **Fallback Support**: `REVIEW_MODEL`, `TERMINAL_AGENT_MODEL`, and all **Virtual Agent Models** will fallback to the `PLANNER_MODEL` if left blank. However, if specified, they **must** be Base Models (not workspace presets).
 > - **Workspace Models (Presets)**: Found in **Workspace > Models**. These are custom presets with specific personas and settings.
->     - **Used for**: `SUBAGENT_MODELS`. This is where you configure specific **Knowledge Base access**, custom tool features, and specialized system prompts for your subagents.
+>     - **Used for**: `SUBAGENT_MODELS`. This is where you configure specific **Knowledge Base access**, custom tool features, skills, and specialized system prompts for your subagents.
+
+#### Parallel Execution (New)
+Planner Agent v3 supports parallel execution of tool calls and subagent calls. This significantly improves performance when multiple independent tasks can be performed simultaneously.
+
+- **`PARALLEL_TOOL_EXECUTION`**: When enabled, the planner executes all identified tool calls (including subagent calls) in parallel.
+- **`PARALLEL_SUBAGENT_EXECUTION`**: When enabled, subagents execute their internal tool calls (search, code interpreter, etc.) in parallel.
+
+> [!WARNING]
+> Parallel execution may lead to race conditions if tools have stateful dependencies within the same turn (e.g., one tool depends on a file created by another tool in the same turn). Use with caution for complex, inter-dependent workflows. Most standard search and generation tasks are independent and safe for parallelism.
+
+#### Model & Subagent Setup
+- **`PLANNER_MODEL`**: The primary "brain" model for planning and orchestration (Mandatory).
+- **`SUBAGENT_MODELS`**: Comma-separated list of specialized models or **Workspace Model presets** for delegation. Best for Knowledge Base access and custom personas.
+- **`WORKSPACE_TERMINAL_MODELS`**: List of model IDs allowed to use the local terminal environment, overriding the default virtual terminal agent check.
+- **`SUBAGENT_TIMEOUT`**: Global timeout for subagent and MCP tool calls to prevent bottlenecks.
+
+#### Interaction & Control
+- **`ENABLE_PLAN_APPROVAL`**: Pause for user review before starting any tasks.
+- **`YOLO_MODE`**: Fully autonomous mode: disables iteration limits and confirmation gates.
+- **`TASK_ITERATION_LIMIT`**: Global safety cap to prevent infinite agentic loops.
+- **`ENABLE_USER_INPUT_TOOLS`**: Toggle availability of interactive UI modals (`ask_user`, `give_options`).
 
 #### 🔄 Tool Inheritance & Virtual Agents
 The Planner V3 features a smart tool inheritance logic:
 - **Delegation Mode**: If a Virtual Agent (e.g., `web_search_agent`) is **enabled** in the Planner Valves, the planner will delegate tasks to that specialized subagent using its own configuration.
 - **Inherent Mode**: If a Virtual Agent is **disabled**, the Planner itself "inherits" those capabilities (if the Planner's Base Model/Admin tool settings allow it) and performs the task directly without delegation.
-
-**Core Valves:**
-- `PLANNER_MODEL`: The "brain" driving the planning and delegation logic.
-- `SUBAGENT_MODELS`: A comma-separated list of model IDs available for delegation.
-- `OPEN_WEBUI_URL`: Required for subagents (like Code Interpreter or Terminal) to access hosted files in the Open WebUI backend (e.g., via `curl`) when operating in non-local environments.
-- `TASK_RESULT_LIMIT`: Maximum character length for subagent results before they are middle-truncated (if truncation is enabled).
-
-**User-Level Controls (User Valves):**
-- `PLAN_MODE`: Whether to use the structured planning phase with visual task tracking. When disabled, the agent delegates directly to subagents without creating a formal plan.
-- `ENABLE_PLAN_APPROVAL`: When enabled, the planner pauses after generating a plan and waits for user approval/feedback before starting execution.
-- `TASK_RESULT_TRUNCATION`: Toggle whether subagent outputs should be truncated in the chat to save context and UI space. (Full results always available via `@task_id` or `read_task_result`).
-- `YOLO_MODE`: Disables all iteration limits and confirmation prompts for fully autonomous, long-running agentic workflows.
-- `ENABLE_USER_INPUT_TOOLS`: Enable/Disable the interactive `ask_user` and `give_options` modals.
 
 ### 💡 Visual Walkthrough
 
