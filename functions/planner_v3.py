@@ -2190,7 +2190,8 @@ class ToolRegistry:
         self.valves = context.valves
         self.user = context.user
         self.request = context.request
-        self.pipe_metadata = context.metadata
+        self.wide_metadata = context.metadata
+        self.pipe_metadata = context.metadata.get("__metadata__", {})
         self.model_knowledge = context.model_knowledge
         self.planner_info = context.planner_info
         self.planner_features = (
@@ -2627,7 +2628,7 @@ class ToolRegistry:
             self.request,
             self.user,
             ordered_tool_ids,
-            self.context.metadata,
+            self.pipe_metadata,
             extra_mcp,
             None,
             self.engine.mcp_hub.get_or_create_client,
@@ -2704,7 +2705,7 @@ class ToolRegistry:
                         )
                     else:
                         # Deep fallback: attempt to extract from pipe_metadata or request state if available
-                        extra_params["__user__"] = self.pipe_metadata.get(
+                        extra_params["__user__"] = self.wide_metadata.get(
                             "__user__"
                         ) or getattr(self.request.state, "user", {})
 
