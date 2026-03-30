@@ -115,7 +115,7 @@ try:
         new_headers = dict(headers) if headers else {}
         uid = uuid.uuid4().hex[:8]
         new_headers.setdefault("X-MCP-Client-ID", f"planner_{uid}")
-        
+
         # Some SSE/HTTP implementations use User-Agent or custom headers for pinning.
         orig_ua = new_headers.get("User-Agent", "OpenWebUI-MCP-Client")
         new_headers["User-Agent"] = f"{orig_ua} (Planner-{uid})"
@@ -129,6 +129,37 @@ try:
 except Exception as e:
     logging.error(f"Failed to apply MCP parallelism patch: {e}")
 
+# v3.6: Suppress extremely noisy MCP validation warnings that can saturate the logs and block the receive loop.
+# The mcp library uses loguru, so standard logging.getLogger doesn't work.
+try:
+    from loguru import logger as loguru_logger
+    import sys
+
+    # Add a custom filter to handle 'Failed to validate notification' errors from the MCP SDK
+    # These are caused by non-standard notifications (like notifications/message) from some servers.
+    def _mcp_log_filter(record):
+        if (
+            "mcp.shared.session" in record.get("name", "")
+            and "Failed to validate notification" in record["message"]
+        ):
+            return False
+        return True
+
+    # Note: Accessing loguru's global state is invasive, but necessary for the 'Function' environment.
+    # OpenWebUI usually has its own loguru config; we attempt to add our filter if it exists.
+    if hasattr(loguru_logger, "remove") and hasattr(loguru_logger, "add"):
+        # v3.6.8: Use remove() + add() instead of configure() to avoid wiping existing OWUI handlers.
+        # We try to find any existing stderr handler to replace, or just add ours.
+        try:
+            loguru_logger.add(sys.stderr, filter=_mcp_log_filter, level="DEBUG")
+        except Exception:
+            # Fallback if add fails
+            if hasattr(loguru_logger, "configure"):
+                loguru_logger.configure(
+                    handlers=[{"sink": sys.stderr, "filter": _mcp_log_filter}]
+                )
+except Exception as e:
+    logging.debug(f"Failed to apply loguru filter: {e}")
 
 
 # --- Pydantic Models ---
@@ -175,18 +206,69 @@ class SubagentTaskResponse(BaseModel):
 
 
 # --- New Helper Classes ---
-class LockedEmitter:
-    """Thread-safe proxy for the event emitter to prevent concurrent DB writes in Open WebUI event handlers."""
+class QueueEmitter:
+    """Non-blocking event emitter that pushes to an asyncio.Queue for background processing."""
 
-    def __init__(self, emitter: Optional[Callable[[dict], Awaitable[None]]]):
-        self.emitter = emitter
-        self.lock = asyncio.Lock()
+    def __init__(self, queue: asyncio.Queue, engine=None):
+        self.queue = queue
+        self.engine = engine
+        self.last_emit_time = 0.0
+        self._lock = asyncio.Lock()  # v3.6.8: Protect shared mutable state
+        self.throttle_interval = 0.05  # 50ms (20fps)
 
     async def __call__(self, event: dict) -> None:
-        if not self.emitter:
-            return
-        async with self.lock:
-            await self.emitter(event)
+        # v3.15: Intercept native Open WebUI tool file events to populate the engine state trackers dynamically.
+        # This allows built-in tools (like generate_image) to survive replace wipes and stream termination.
+        if event.get("type") == "chat:message:files" and self.engine:
+            files = event.get("data", {}).get("files", [])
+            if files:
+                # 1. Protect against local emit replace wipes
+                async with self.engine._files_lock:
+                    self.engine.produced_files.extend(files)
+
+                # 2. Mutate global metadata context to securely write state into the Open WebUI core backend DB at exit
+                metadata_files = self.engine.metadata.get("__files__")
+                if isinstance(metadata_files, list):
+                    existing_urls = {
+                        f.get("url") for f in metadata_files if isinstance(f, dict)
+                    }
+                    for f in files:
+                        if isinstance(f, dict) and f.get("url") not in existing_urls:
+                            metadata_files.append(f)
+
+                    # v3.15: CRITICAL FIX. `__files__` is sometimes a detached list instantiated loosely by
+                    # Open WebUI's `functions.py`. We MUST forcibly inject it back into `__metadata__["files"]`
+                    # so the main router saves it during the websocket stream clean-up phase.
+                    raw_metadata_obj = self.engine.metadata.get("__metadata__")
+                    if isinstance(raw_metadata_obj, dict):
+                        raw_metadata_obj["files"] = metadata_files
+
+        # v3.6: Aggressive throttling for status updates in the producer phase.
+        # This keeps the queue from bloating with redundant progress messages.
+        is_status = event.get("type") == "status"
+        # v3.6.11: Exempt 'done=True' status updates from throttling to ensure
+        # UI state consistency (especially for grouped tool calls).
+        is_done_status = is_status and event.get("data", {}).get("done") is True
+
+        if is_status and not is_done_status:
+            async with self._lock:
+                now = time.monotonic()
+                if now - self.last_emit_time < self.throttle_interval:
+                    return
+                self.last_emit_time = now
+
+        # Non-blocking fire-and-forget (put_nowait is safe as long as queue isn't full)
+        try:
+            self.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            # Under extreme pressure, drop status updates to protect event loop
+            if not is_status:
+                await self.queue.put(event)  # Block for important events (content)
+            else:
+                pass
+
+    async def emit_status(self, text: str, done: bool = False):
+        await self({"type": "status", "data": {"description": text, "done": done}})
 
 
 class UIState(BaseModel):
@@ -216,34 +298,15 @@ def setup_logger():
 logger = setup_logger()
 
 
-def merge_workspace_model_dict(app_models: dict[str, Any], model_id: str) -> dict[str, Any]:
+def merge_workspace_model_dict(
+    app_models: dict[str, Any], model_id: str
+) -> dict[str, Any]:
     """Merge app.state.MODELS entry with DB model for OWUI-shaped workspace config (tool + builtin parity)."""
+    # v3.15: Rely on app_models (app.state.MODELS) which already contains merged workspace state.
+    # ELIMINATE synchronous DB hit for Models.get_model_by_id.
     m = copy.deepcopy(app_models.get(model_id) or {"id": model_id, "info": {}})
     if "info" not in m:
         m["info"] = {}
-    meta = m["info"].setdefault("meta", {})
-    params = m["info"].setdefault("params", {})
-    db = Models.get_model_by_id(model_id)
-    if not db:
-        return m
-    db_meta = (
-        db.meta.model_dump()
-        if hasattr(db.meta, "model_dump")
-        else (dict(db.meta) if db.meta else {})
-    )
-    db_params = (
-        db.params.model_dump()
-        if hasattr(db.params, "model_dump")
-        else (dict(db.params) if db.params else {})
-    )
-    if isinstance(db_meta, dict):
-        for k, v in db_meta.items():
-            if k not in meta or meta.get(k) in (None, {}, []):
-                meta[k] = copy.deepcopy(v)
-    if isinstance(db_params, dict):
-        for k, v in db_params.items():
-            if k not in params or params.get(k) in (None, {}, []):
-                params[k] = copy.deepcopy(v)
     return m
 
 
@@ -269,7 +332,6 @@ async def planner_merge_mcp_tools_from_ids(
     mcp_handler: Optional[Callable] = None,
 ) -> dict[str, Any]:
     """
-    Resolve server:mcp:* tool IDs like open_webui.utils.middleware.process_chat_payload
     (get_tools in OWUI does not implement MCP).
     """
     out: dict[str, Any] = {}
@@ -282,10 +344,11 @@ async def planner_merge_mcp_tools_from_ids(
     except Exception:
         pass
 
+    resolved_servers = set()
     for tool_id in tool_ids:
         if not isinstance(tool_id, str):
             continue
-        
+
         # v15: Improve resolution to handle unprefixed IDs or mcp: prefix
         server_id = None
         if tool_id.startswith("server:mcp:"):
@@ -293,8 +356,11 @@ async def planner_merge_mcp_tools_from_ids(
         elif tool_id.startswith("mcp:"):
             server_id = tool_id[len("mcp:") :]
         else:
-            # v15: Check if this ID matches any known MCP server directly (unprefixed) OR is a prefixed tool name
-            for server_connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
+            # v3.6.8: Optimize by skipping unknown IDs faster if we have many connections
+            mcp_connections = getattr(
+                request.app.state.config, "TOOL_SERVER_CONNECTIONS", []
+            )
+            for server_connection in mcp_connections:
                 if server_connection.get("type", "") == "mcp":
                     sid = server_connection.get("info", {}).get("id")
                     if not sid:
@@ -302,11 +368,17 @@ async def planner_merge_mcp_tools_from_ids(
                     if tool_id == sid or tool_id.startswith(f"{sid}_"):
                         server_id = sid
                         break
-        
+
         if not server_id:
-            logger.debug(f"[Planner] tool_id '{tool_id}' not resolved as MCP. Prefix check failed.")
+            logger.debug(
+                f"[Planner] tool_id '{tool_id}' not resolved as MCP. Prefix check failed."
+            )
             continue
-            
+
+        if server_id in resolved_servers:
+            continue
+        resolved_servers.add(server_id)
+
         try:
             mcp_server_connection = None
             for server_connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
@@ -318,19 +390,31 @@ async def planner_merge_mcp_tools_from_ids(
                     break
 
             if not mcp_server_connection:
-                logger.error("MCP server with id %s not found in connections. Available server IDs: %s", 
-                             server_id, 
-                             [s.get("info", {}).get("id") for s in request.app.state.config.TOOL_SERVER_CONNECTIONS if s.get("type") == "mcp"])
+                logger.error(
+                    "MCP server with id %s not found in connections. Available server IDs: %s",
+                    server_id,
+                    [
+                        s.get("info", {}).get("id")
+                        for s in request.app.state.config.TOOL_SERVER_CONNECTIONS
+                        if s.get("type") == "mcp"
+                    ],
+                )
                 continue
 
             if not has_connection_access(user, mcp_server_connection):
-                logger.warning("Access denied to MCP server %s for user %s", server_id, getattr(user, "id", ""))
+                logger.warning(
+                    "Access denied to MCP server %s for user %s",
+                    server_id,
+                    getattr(user, "id", ""),
+                )
                 continue
 
             auth_type = mcp_server_connection.get("auth_type", "")
             headers: dict[str, str] = {}
             if auth_type == "bearer":
-                headers["Authorization"] = f"Bearer {mcp_server_connection.get('key', '')}"
+                headers["Authorization"] = (
+                    f"Bearer {mcp_server_connection.get('key', '')}"
+                )
             elif auth_type == "none":
                 pass
             elif auth_type == "session":
@@ -340,7 +424,9 @@ async def planner_merge_mcp_tools_from_ids(
                     headers["Authorization"] = f"Bearer {creds}"
             elif auth_type == "system_oauth":
                 if oauth_token:
-                    headers["Authorization"] = f"Bearer {oauth_token.get('access_token', '')}"
+                    headers["Authorization"] = (
+                        f"Bearer {oauth_token.get('access_token', '')}"
+                    )
             elif auth_type == "oauth_2.1":
                 try:
                     splits = server_id.split(":")
@@ -349,7 +435,9 @@ async def planner_merge_mcp_tools_from_ids(
                     if mgr:
                         ot = await mgr.get_oauth_token(user.id, f"mcp:{sid}")
                         if ot:
-                            headers["Authorization"] = f"Bearer {ot.get('access_token', '')}"
+                            headers["Authorization"] = (
+                                f"Bearer {ot.get('access_token', '')}"
+                            )
                 except Exception as e:
                     logger.error("OAuth token for MCP: %s", e)
 
@@ -361,9 +449,13 @@ async def planner_merge_mcp_tools_from_ids(
             if ENABLE_FORWARD_USER_INFO_HEADERS and user:
                 headers = include_user_info_headers(headers, user)
                 if metadata and metadata.get("chat_id"):
-                    headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata.get("chat_id")
+                    headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata.get(
+                        "chat_id"
+                    )
                 if metadata and metadata.get("message_id"):
-                    headers[FORWARD_SESSION_INFO_HEADER_MESSAGE_ID] = metadata.get("message_id")
+                    headers[FORWARD_SESSION_INFO_HEADER_MESSAGE_ID] = metadata.get(
+                        "message_id"
+                    )
 
             if mcp_handler is not None:
                 client = await mcp_handler(
@@ -378,24 +470,38 @@ async def planner_merge_mcp_tools_from_ids(
                     headers=headers if headers else None,
                 )
 
+            # v3.6: Ensure each client has a lock to prevent concurrent tool calls on the same connection,
+            # which can cause deadlocks in some MCP servers or client implementations.
+            if not hasattr(client, "_call_lock"):
+                client._call_lock = asyncio.Lock()
+
             function_name_filter_list = mcp_server_connection.get("config", {}).get(
                 "function_name_filter_list", ""
             )
             if isinstance(function_name_filter_list, str):
                 function_name_filter_list = function_name_filter_list.split(",")
 
-            tool_specs = await client.list_tool_specs()
+            # v3.6: Serialize list_tool_specs to avoid transport-level deadlocks
+            # when multiple subagents initialize tools for the same server in parallel.
+            async with client._call_lock:
+                tool_specs = await client.list_tool_specs()
 
             def make_tool_function(mcp_client, function_name, sid):
                 async def tool_function(**kwargs):
                     try:
-                        logger.debug(f"[MCP] Calling '{function_name}' on server '{sid}' with args: {kwargs}")
-                        result = await mcp_client.call_tool(
-                            function_name,
-                            function_args=kwargs,
+                        logger.debug(
+                            f"[MCP] Calling '{function_name}' on server '{sid}' with args: {kwargs}"
                         )
-                        logger.debug(f"[MCP] Raw result from '{function_name}' on '{sid}': {result}")
-                        
+                        # v3.6: Use the per-client lock to serialize calls to this server.
+                        async with mcp_client._call_lock:
+                            result = await mcp_client.call_tool(
+                                function_name,
+                                function_args=kwargs,
+                            )
+                        logger.debug(
+                            f"[MCP] Raw result from '{function_name}' on '{sid}': {result}"
+                        )
+
                         # MCP returns CallToolResult with 'content' list
                         if hasattr(result, "content") and result.content:
                             texts = []
@@ -403,27 +509,38 @@ async def planner_merge_mcp_tools_from_ids(
                                 if hasattr(c, "text") and c.text:
                                     texts.append(c.text)
                                 elif hasattr(c, "image"):
-                                    texts.append(f"[Image Content: {c.image[:50]}...]" if isinstance(c.image, str) else "[Image Content]")
+                                    texts.append(
+                                        f"[Image Content: {c.image[:50]}...]"
+                                        if isinstance(c.image, str)
+                                        else "[Image Content]"
+                                    )
                                 else:
                                     texts.append(str(c))
-                            
+
                             final_res = "\n".join(texts)
-                            logger.debug(f"[MCP] Unpacked result (len {len(final_res)}): {final_res[:100]}...")
+                            logger.debug(
+                                f"[MCP] Unpacked result (len {len(final_res)}): {final_res[:100]}..."
+                            )
                             return final_res
-                            
+
                         if hasattr(result, "isError") and result.isError:
                             return f"MCP Error from {sid}: {result}"
-                            
+
                         return str(result)
                     except Exception as e:
-                        logger.error(f"Failed to call MCP tool '{function_name}' on '{sid}': {e}", exc_info=True)
+                        logger.error(
+                            f"Failed to call MCP tool '{function_name}' on '{sid}': {e}",
+                            exc_info=True,
+                        )
                         return f"Error calling MCP tool: {e}"
 
                 return tool_function
 
             for tool_spec in tool_specs:
                 if function_name_filter_list:
-                    if not is_string_allowed(tool_spec["name"], function_name_filter_list):
+                    if not is_string_allowed(
+                        tool_spec["name"], function_name_filter_list
+                    ):
                         continue
                 tool_function = make_tool_function(client, tool_spec["name"], server_id)
                 out[f'{server_id}_{tool_spec["name"]}'] = {
@@ -481,12 +598,21 @@ async def apply_native_completion_file_prep(
 
     info_params = (workspace_model.get("info") or {}).get("params") or {}
     fc = info_params.get("function_calling", "native")
-    caps = ((workspace_model.get("info") or {}).get("meta") or {}).get("capabilities") or {}
+    caps = ((workspace_model.get("info") or {}).get("meta") or {}).get(
+        "capabilities"
+    ) or {}
     builtin_tools_enabled = caps.get("builtin_tools", True)
     chat_id = pipe_metadata.get("chat_id")
     msgs = body.get("messages")
-    if msgs is not None and fc == "native" and builtin_tools_enabled and body.get("tools") and has_builtin_tools_in_payload:
-        body["messages"] = add_file_context(list(msgs), chat_id, user)
+    if (
+        msgs is not None
+        and fc == "native"
+        and builtin_tools_enabled
+        and body.get("tools")
+        and has_builtin_tools_in_payload
+    ):
+        # v3.6: Copy messages to avoid mutating the caller's body dict in place
+        body["messages"] = add_file_context(copy.deepcopy(msgs), chat_id, user)
 
     file_context_enabled = caps.get("file_context", True)
     if not file_context_enabled:
@@ -620,7 +746,10 @@ class Utils:
             ).strip()
 
             if content:
-                distilled.append({"role": role, "content": content})
+                # v3.6: Robustly clean any stray reasoning tags or prefixes from history to avoid confusion
+                distilled.append(
+                    {"role": role, "content": Utils.clean_thinking(content)}
+                )
             elif msg.get("tool_calls"):
                 # Always preserve assistant turns with tool_calls even if content is empty
                 distilled.append(
@@ -700,22 +829,25 @@ class Utils:
         """
         Remove ALL thinking/reasoning content and tags from text.
         Intended for the final USER-FACING CONTENT area.
+        Handles both XML-style tags and common text prefixes (Thinking:, etc.).
         """
         if not text:
             return ""
-        # 1. Remove complete pairs
-        pattern = re.compile(
-            r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>"
-            r"|"
-            r"\|begin_of_thought\|.*?\|end_of_thought\|",
-            re.DOTALL | re.IGNORECASE,
+        # 1. Remove complete pairs (case-insensitive)
+        text = re.sub(
+            r"<(think|thinking|reason|reasoning|thought|Thought)>.*?</\1>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
         )
-        text = re.sub(pattern, "", text)
+        text = re.sub(
+            r"\|begin_of_thought\|.*?\|end_of_thought\|",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
 
-        # 2. Hide tool calls from display
-        text = Utils.hide_tool_calls(text)
-
-        # 3. Handle unclosed tags (usually at start of stream)
+        # 2. Handle unclosed tags but PROTECT tool calls (stop before them)
         text = re.sub(
             r"<(?:think|thinking|reason|reasoning|thought|Thought)>.*?(?=<tool_call>|$)",
             "",
@@ -727,6 +859,18 @@ class Utils:
             "",
             text,
             flags=re.DOTALL | re.IGNORECASE,
+        )
+
+        # 2. Hide tool calls from display
+        text = Utils.hide_tool_calls(text)
+
+        # 3. Robustly remove reasoning prefixes (v3.6: handles common "Thinking: " style outputs)
+        # We use a regex to ensure we don't leave stray colons, dots, or spaces.
+        text = re.sub(
+            r"(?i)^(?:Thinking|Thought|Reasoning|Analysis)[:\s.*-]*\s*",
+            "",
+            text,
+            flags=re.MULTILINE,
         )
 
         # 4. Remove any stray tags
@@ -1113,14 +1257,78 @@ class PlannerState:
         self._results[task_id] = result
 
     def get_history(self, chat_id: str, sub_task_id: str, model_id: str) -> list[Any]:
-        key = (chat_id, sub_task_id, model_id)
+        # v3.6.8: Standardize on string keys for JSON serialization stability
+        key = f"{chat_id}:{sub_task_id}:{model_id}"
         return self._subagent_history.get(key, [])
 
     def set_history(
         self, chat_id: str, sub_task_id: str, model_id: str, messages: list[Any]
     ) -> None:
-        key = (chat_id, sub_task_id, model_id)
+        # v3.6.8: Standardize on string keys
+        key = f"{chat_id}:{sub_task_id}:{model_id}"
         self._subagent_history[key] = messages
+
+
+class StreamableHTTPMCPClient:
+    """
+    Per-server MCP client for Streamable HTTP transport.
+    Each call is an independent cancellable task — no worker queue.
+    """
+
+    def __init__(self, url: str, headers: Optional[dict], timeout: int = 120):
+        self.url = url
+        self.headers = headers or {}
+        self.timeout = timeout
+        self._client: Optional[MCPClient] = None
+        self._call_lock = asyncio.Lock()  # kept for ToolRegistry compatibility
+
+    async def connect(self):
+        async with asyncio.timeout(60.0):
+            self._client = MCPClient()
+            await self._client.connect(url=self.url, headers=self.headers)
+
+    async def list_tool_specs(self) -> list[dict]:
+        return await self._call_with_timeout(self._client.list_tool_specs)
+
+    async def call_tool(self, name: str, function_args: Optional[dict] = None) -> Any:
+        return await self._call_with_timeout(
+            self._client.call_tool, name, function_args=function_args or {}
+        )
+
+    async def _call_with_timeout(self, coro_fn, *args, **kwargs):
+        """
+        Wraps each call in an explicit Task so task.cancel() propagates
+        correctly through anyio checkpoints, bypassing asyncio.timeout
+        unreliability on SSE receive loops.
+        """
+
+        async def _inner():
+            return await coro_fn(*args, **kwargs)
+
+        task = asyncio.create_task(_inner())
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=self.timeout)
+        except asyncio.TimeoutError:
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=3.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+            raise asyncio.TimeoutError(
+                f"MCP call to {self.url} timed out after {self.timeout}s"
+            )
+        except Exception:
+            if not task.done():
+                task.cancel()
+            raise
+
+    async def disconnect(self):
+        if self._client:
+            try:
+                async with asyncio.timeout(3.0):
+                    await self._client.disconnect()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -1133,8 +1341,16 @@ class UIRenderer:
         self,
         event_emitter: Callable[[dict[str, Any]], Awaitable[None]],
         event_call: Optional[Callable[[dict[str, Any]], Awaitable[Any]]] = None,
+        ui_queue: Optional[asyncio.Queue] = None,
     ):
-        self.emitter = event_emitter
+        self._real_emitter = event_emitter
+        # v3.6.8 Structural Overhaul: Use QueueEmitter if queue provided, else fallback to direct emitter.
+        if ui_queue is not None:
+            self.emitter = QueueEmitter(ui_queue)
+        else:
+            # Fallback (direct emission via provided event_emitter)
+            # If no queue is provided, QueueEmitter would orphaned. We wrap the original emitter instead.
+            self.emitter = event_emitter
         self.call = event_call
 
     @staticmethod
@@ -1405,9 +1621,19 @@ class UIRenderer:
     }})()"""
 
     async def emit_status(self, message: str, done: bool = False) -> None:
-        await self.emitter(
-            {"type": "status", "data": {"description": message, "done": done}}
-        )
+        event = {"type": "status", "data": {"description": message, "done": done}}
+        # v3.6.12 Handle terminal events synchronously to avoid pending drops if the worker cancels instantly
+        if done and hasattr(self, "_real_emitter") and self._real_emitter:
+            await self._real_emitter(event)
+        else:
+            await self.emitter(event)
+
+    async def emit_files(self, files: list) -> None:
+        event = {"type": "chat:message:files", "data": {"files": files}}
+        if hasattr(self, "_real_emitter") and self._real_emitter:
+            await self._real_emitter(event)
+        else:
+            await self.emitter(event)
 
     async def emit_replace(self, content: str) -> None:
         await self.emitter({"type": "replace", "data": {"content": content}})
@@ -1431,9 +1657,6 @@ class UIRenderer:
                 if isinstance(result, str)
                 else json.dumps(result or "", ensure_ascii=False)
             )
-            result_escaped = html_module.escape(
-                json.dumps(result_text, ensure_ascii=False)
-            )
         result_str = str(result) if result is not None else ""
         res_escaped = html_module.escape(result_str)
 
@@ -1442,9 +1665,9 @@ class UIRenderer:
         embeds_json = json.dumps(embeds) if embeds else ""
 
         # Default summary for the expanded view
-        default_summary = f"View Result from {name}"
+        default_summary = "Tool Executed"
         if not done:
-            default_summary = f"Executing {name}..."
+            default_summary = "Executing\u2026"
 
         return (
             f'<details type="tool_calls" done="{"true" if done else "false"}" id="{call_id}" '
@@ -1607,6 +1830,7 @@ class ToolRegistry:
         model_knowledge: Optional[list[dict]] = None,
         planner_info: Optional[dict[str, Any]] = None,
         mcp_handler: Optional[Callable] = None,
+        user_skills: dict[str, Any] = None,
     ):
         self.valves = valves
         self.user = user
@@ -1614,35 +1838,39 @@ class ToolRegistry:
         self.pipe_metadata = pipe_metadata or {}
         self.model_knowledge = model_knowledge
         self.planner_info = planner_info or {}
-        self.planner_features = self.planner_info.get("info", {}).get("meta", {}).get("features", {})
+        self.planner_features = (
+            self.planner_info.get("info", {}).get("meta", {}).get("features", {})
+        )
         self.subagent_tools_cache = {}
         self.mcp_handler = mcp_handler
+        self.user_skills = user_skills or {}
+        self._resolution_lock = asyncio.Lock()
 
     async def _resolve_model_skills(
-        self, model_db_info: Any, extra_params: dict
+        self, model_info: Any, extra_params: dict
     ) -> tuple[list[str], str]:
         """
-        Replicate Open WebUI skill discovery logic.
+        Replicate Open WebUI skill discovery logic using cached user skills.
         Returns a list of skill IDs and a formatted system prompt fragment.
         """
         skill_ids = []
         skill_prompt = ""
 
-        if not model_db_info:
+        if not model_info:
             return [], ""
 
-        # Handle both DB models and raw dictionaries (like pipe_metadata or app_models info)
-        if isinstance(model_db_info, dict):
+        # v3.15: Handle model info (dict/BaseModel) consistently with cached skills
+        if isinstance(model_info, dict):
             # Try to resolve skillIds from either top-level or info.meta
-            meta = model_db_info.get("info", {}).get("meta", {})
+            meta = model_info.get("info", {}).get("meta", {})
             if not meta:
-                meta = model_db_info # Direct metadata dict
+                meta = model_info  # Direct metadata dict
             model_skill_ids = meta.get("skillIds", [])
         else:
             meta = (
-                model_db_info.meta.model_dump()
-                if hasattr(model_db_info.meta, "model_dump")
-                else model_db_info.meta
+                model_info.meta.model_dump()
+                if hasattr(model_info.meta, "model_dump")
+                else model_info.meta
             )
             model_skill_ids = meta.get("skillIds", []) if isinstance(meta, dict) else []
 
@@ -1650,19 +1878,14 @@ class ToolRegistry:
             return [], ""
 
         try:
-            # Check user access to these skills
-            user_id = self.user.id
-            accessible_skill_ids = {
-                s.id for s in Skills.get_skills_by_user_id(user_id, "read")
-            }
-
+            # v3.15: Optimized skill resolution.
+            # Use pre-fetched self.user_skills (id -> skill) to eliminate DB hits.
             available_skills = []
             for sid in model_skill_ids:
-                if sid in accessible_skill_ids:
-                    skill = Skills.get_skill_by_id(sid)
-                    if skill and skill.is_active:
-                        available_skills.append(skill)
-                        skill_ids.append(sid)
+                skill = self.user_skills.get(sid)
+                if skill:
+                    available_skills.append(skill)
+                    skill_ids.append(sid)
 
             if available_skills:
                 skill_descriptions = ""
@@ -1670,7 +1893,9 @@ class ToolRegistry:
                     skill_descriptions += f"<skill>\n<name>{skill.name}</name>\n<description>{skill.description or ''}</description>\n</skill>\n"
 
                 if skill_descriptions:
-                    skill_prompt = f"<available_skills>\n{skill_descriptions}</available_skills>"
+                    skill_prompt = (
+                        f"<available_skills>\n{skill_descriptions}</available_skills>"
+                    )
 
         except Exception as e:
             logger.error(f"Error resolving skills: {e}")
@@ -1734,23 +1959,21 @@ class ToolRegistry:
             if self.model_knowledge:
                 mk = self.model_knowledge
                 meta["knowledge"] = (
-                    copy.deepcopy(mk)
-                    if isinstance(mk, list)
-                    else [copy.deepcopy(mk)]
+                    copy.deepcopy(mk) if isinstance(mk, list) else [copy.deepcopy(mk)]
                 )
             elif isinstance(model_info, dict):
                 pipe_meta = model_info.get("info", {}).get("meta", {})
                 if pipe_meta.get("knowledge") is not None:
-                    meta.setdefault(
-                        "knowledge", copy.deepcopy(pipe_meta["knowledge"])
-                    )
+                    meta.setdefault("knowledge", copy.deepcopy(pipe_meta["knowledge"]))
 
             # Start by disabling everything, then enable only active features and skills
             builtin_tools_config = {
                 "time": False,
                 "knowledge": active_features.get("knowledge", False),
                 "chats": False,
-                "memory": active_features.get("memory", False), # Usually handled by OWUI, but for parity
+                "memory": active_features.get(
+                    "memory", False
+                ),  # Usually handled by OWUI, but for parity
                 "web_search": active_features.get("web_search", False),
                 "image_generation": active_features.get("image_generation", False),
                 "code_interpreter": active_features.get("code_interpreter", False),
@@ -2006,12 +2229,22 @@ class ToolRegistry:
         self, body: dict[str, Any], user_valves: Any
     ) -> dict[str, Any]:
         """Resolve external tools and filtered built-in tools for the planner."""
-        tool_ids = self.pipe_metadata.get("toolIds") or self.pipe_metadata.get("tool_ids") or []
-        logger.debug(f"[Planner] Resolving tools for planner. pipe_metadata keys: {list(self.pipe_metadata.keys())}, tool_ids: {tool_ids}")
+        tool_ids = (
+            self.pipe_metadata.get("toolIds")
+            or self.pipe_metadata.get("tool_ids")
+            or []
+        )
+        logger.debug(
+            f"[Planner] Resolving tools for planner. pipe_metadata keys: {list(self.pipe_metadata.keys())}, tool_ids: {tool_ids}"
+        )
         extra_params = {
             "chat_id": self.pipe_metadata.get("chat_id") or body.get("chat_id"),
             "tool_ids": tool_ids,
-            "__user__": self.user.model_dump() if hasattr(self.user, "model_dump") else (self.user.__dict__ if self.user else {}),
+            "__user__": (
+                self.user.model_dump()
+                if hasattr(self.user, "model_dump")
+                else (self.user.__dict__ if self.user else {})
+            ),
             "__metadata__": self.pipe_metadata,
         }
 
@@ -2029,9 +2262,7 @@ class ToolRegistry:
                 self.request, ordered_tool_ids, self.user, extra_params
             )
         app_models = getattr(self.request.app.state, "MODELS", {})
-        model_ws = merge_workspace_model_dict(
-            app_models, body.get("model", "") or ""
-        )
+        model_ws = merge_workspace_model_dict(app_models, body.get("model", "") or "")
         extra_mcp = {
             **extra_params,
             "__model__": model_ws,
@@ -2067,8 +2298,10 @@ class ToolRegistry:
 
         # Terminal fallback for Planner
         enable_planner_terminal = user_valves.ENABLE_PLANNER_TERMINAL_ACCESS
-        is_terminal_agent_present = self.valves.ENABLE_TERMINAL_AGENT or self.valves.WORKSPACE_TERMINAL_MODELS
-        
+        is_terminal_agent_present = (
+            self.valves.ENABLE_TERMINAL_AGENT or self.valves.WORKSPACE_TERMINAL_MODELS
+        )
+
         terminal_id = self.pipe_metadata.get("terminal_id")
         if terminal_id and (enable_planner_terminal or not is_terminal_agent_present):
             try:
@@ -2091,250 +2324,288 @@ class ToolRegistry:
         extra_params: dict[str, Any],
     ) -> dict[str, Any]:
         """Fetches tools for subagents, ensuring builtin tools (image gen, search, etc.) are loaded for virtual agents."""
+        # v3.6: Lazy-init resolution lock for robustness against stale instances
+        if not hasattr(self, "_resolution_lock"):
+            self._resolution_lock = asyncio.Lock()
+
+        # v3.6.8: Double-checked locking. If cache hit, return immediately without lock.
         if model_id in self.subagent_tools_cache:
             return self.subagent_tools_cache[model_id]
 
-        # Ensure __user__ is present and non-empty for view_skill/builtin tools parity
-        if not extra_params.get("__user__") and self.user:
-             extra_params["__user__"] = self.user.model_dump() if hasattr(self.user, "model_dump") else (self.user.__dict__ if self.user else {})
-        
-        # If still empty, try fallback to pipe metadata or internal metadata
-        if not extra_params.get("__user__"):
-            extra_params["__user__"] = self.pipe_metadata.get("__user__") or {}
+        async with self._resolution_lock:
+            # Re-check after acquiring lock
+            if model_id in self.subagent_tools_cache:
+                return self.subagent_tools_cache[model_id]
 
-        # 1. Virtual Agents Handling
-        if model_id in virtual_agents:
-            va = virtual_agents[model_id]
-            va_model_id = va.model_id
-
-            # Object resolution: Dict-first, then DB-fallback (parity with v3 better robustness)
-            va_runtime_info = app_models.get(va_model_id)
-            va_db_info = Models.get_model_by_id(va_model_id)
-
-            va_model_obj = va_runtime_info or va_db_info
-
-            s_tools_dict = {}
-            terminal_sys = ""
-            if va.type == "terminal":
-                try:
-                    terminal_id = self.pipe_metadata.get("terminal_id")
-                    raw_term = await get_terminal_tools(
-                        self.request, terminal_id, self.user, extra_params
-                    )
-                    s_tools_dict, terminal_sys = unpack_terminal_tools_result(raw_term)
-                except Exception as e:
-                    logger.error(f"Failed to load terminal tools for {model_id}: {e}")
-            elif va.type == "builtin":
-                if va.builtin_model_override:
-                    builtin_model = copy.deepcopy(va.builtin_model_override)
-                elif isinstance(va_model_obj, dict):
-                    builtin_model = copy.deepcopy(va_model_obj)
-                else:
-                    builtin_model = merge_workspace_model_dict(
-                        app_models, va_model_id
-                    )
-                if va.builtin_model_override and va_model_obj:
-                    if hasattr(va_model_obj, "id"):
-                        builtin_model["id"] = va_model_obj.id
-                    elif isinstance(va_model_obj, dict):
-                        builtin_model["id"] = va_model_obj.get("id", va_model_id)
-
-                if model_id == "knowledge_agent" and self.model_knowledge:
-                    bm_info = builtin_model.setdefault("info", {})
-                    bm_meta = bm_info.setdefault("meta", {})
-                    mk = self.model_knowledge
-                    bm_meta["knowledge"] = (
-                        copy.deepcopy(mk)
-                        if isinstance(mk, list)
-                        else [copy.deepcopy(mk)]
-                    )
-
-                try:
-                    # Use features from va config and the merged model
-                    s_tools_dict = get_builtin_tools(
-                        self.request,
-                        extra_params,
-                        features=va.features,
-                        model=builtin_model,
-                    )
-                    logger.info(
-                        f"Loaded {len(s_tools_dict)} builtin tools for subagent {model_id}"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to load builtin tools for {model_id}: {e}")
-
-            s_tools = (
-                [
-                    {"type": "function", "function": t["spec"]}
-                    for t in s_tools_dict.values()
-                ]
-                if s_tools_dict
-                else None
-            )
-
-            final_sys = va.system_message or ""
-            if terminal_sys:
-                final_sys = f"{final_sys.rstrip()}\n\n{terminal_sys}"
-
-            result = {
-                "dict": s_tools_dict,
-                "specs": s_tools,
-                "system_message": final_sys,
-                "actual_model": va_model_id,
-                "temperature_override": va.temperature,
-            }
-            self.subagent_tools_cache[model_id] = result
-            return result
-
-        # Regular subagent: workspace model + exact toolIds/MCP, then builtins only per OWUI gates
-        model_ws = merge_workspace_model_dict(app_models, model_id)
-        model_db_info = Models.get_model_by_id(model_id)
-        model_system_message = ""
-        subagent_tool_ids: list[str] = []
-        logger.debug(f"[Planner] Resolving subagent tools for {model_id}. Registry tracker: {self.mcp_handler is not None}")
-
-        if model_db_info:
-            meta = (
-                model_db_info.meta.model_dump()
-                if hasattr(model_db_info.meta, "model_dump")
-                else model_db_info.meta
-            )
-            params = (
-                model_db_info.params.model_dump()
-                if hasattr(model_db_info.params, "model_dump")
-                else model_db_info.params
-            )
-
-            if isinstance(meta, dict):
-                subagent_tool_ids.extend(meta.get("toolIds") or meta.get("tool_ids") or [])
-
-            if isinstance(params, dict):
-                subagent_tool_ids.extend(
-                    params.get("toolIds") or params.get("tool_ids") or params.get("tools") or []
-                )
-                model_system_message = params.get("system", "") or ""
-
-        info_meta = model_ws.get("info", {}).get("meta", {})
-        info_params = model_ws.get("info", {}).get("params", {})
-        subagent_tool_ids.extend(info_meta.get("toolIds") or info_meta.get("tool_ids") or [])
-        subagent_tool_ids.extend(
-            info_params.get("toolIds") or info_params.get("tool_ids") or info_params.get("tools") or []
-        )
-        if not model_system_message:
-            model_system_message = info_params.get("system", "") or ""
-
-        seen_sub: set[str] = set()
-        ordered_sub_ids: list[str] = []
-        for tid in subagent_tool_ids:
-            if tid and tid not in seen_sub:
-                seen_sub.add(tid)
-                ordered_sub_ids.append(tid)
-
-        s_tools_dict: dict[str, Any] = {}
-        if ordered_sub_ids:
-            try:
-                assigned_tools = await get_tools(
-                    self.request, ordered_sub_ids, self.user, extra_params
-                )
-                if assigned_tools:
-                    s_tools_dict.update(assigned_tools)
-            except Exception as e:
-                logger.error(f"Failed to load assigned tools for subagent {model_id}: {e}")
-
-        extra_mcp_sub = {
-            **extra_params,
-            "__model__": model_ws,
-            "__messages__": [],
-            "__files__": self.pipe_metadata.get("files") or [],
-        }
-        mcp_sub = await planner_merge_mcp_tools_from_ids(
-            self.request,
-            self.user,
-            ordered_sub_ids,
-            self.pipe_metadata,
-            extra_mcp_sub,
-            extra_params.get("__event_emitter__"),
-            self.mcp_handler,
-        )
-        if mcp_sub:
-            s_tools_dict.update(mcp_sub)
-
-        skill_ids, skill_prompt = await self._resolve_model_skills(
-            model_db_info, extra_params
-        )
-        if skill_prompt:
-            model_system_message = (
-                f"{model_system_message}\n\n{skill_prompt}"
-                if model_system_message
-                else skill_prompt
-            )
-            extra_params["__skill_ids__"] = skill_ids
-
-        workspace_terminal_models = [
-            m.strip()
-            for m in self.valves.WORKSPACE_TERMINAL_MODELS.split(",")
-            if m.strip()
-        ]
-        if model_id in workspace_terminal_models:
-            terminal_id = self.pipe_metadata.get("terminal_id")
-            if terminal_id:
-                try:
-                    raw_term = await get_terminal_tools(
-                        self.request, terminal_id, self.user, extra_params
-                    )
-                    terminal_tools, terminal_sys = unpack_terminal_tools_result(raw_term)
-                    if terminal_tools:
-                        s_tools_dict.update(terminal_tools)
-                    if terminal_sys:
-                        model_system_message = (
-                            f"{model_system_message}\n\n{terminal_sys}"
-                            if model_system_message
-                            else terminal_sys
+            # v3.6.8: Use SUBAGENT_TIMEOUT valve (default 1200s).
+            # Separate lock wait from resolution timeout to avoid cascading timeouts.
+            async with asyncio.timeout(float(self.valves.SUBAGENT_TIMEOUT)):
+                # Ensure __user__ is present and non-empty for view_skill/builtin tools parity
+                if not extra_params.get("__user__"):
+                    if self.user:
+                        extra_params["__user__"] = (
+                            self.user.model_dump()
+                            if hasattr(self.user, "model_dump")
+                            else (self.user.__dict__ if self.user else {})
                         )
-                except Exception as e:
-                    logger.error(
-                        f"Failed to load terminal tools for subagent {model_id}: {e}"
+                    else:
+                        # Deep fallback: attempt to extract from pipe_metadata or request state if available
+                        extra_params["__user__"] = self.pipe_metadata.get(
+                            "__user__"
+                        ) or getattr(self.request.state, "user", {})
+
+                # Ensure __user__ is a dict (standard Open WebUI requirement for parity)
+                if not isinstance(extra_params.get("__user__"), dict):
+                    extra_params["__user__"] = {}
+
+                # 1. Virtual Agents Handling
+                if model_id in virtual_agents:
+                    va = virtual_agents[model_id]
+                    va_model_id = va.model_id
+
+                    # Object resolution: Dict-first, then app_models fallback (ELIMINATE direct DB hit)
+                    va_runtime_info = app_models.get(va_model_id)
+                    va_model_obj = va_runtime_info or {"id": va_model_id}
+
+                    s_tools_dict = {}
+                    terminal_sys = ""
+                    if va.type == "terminal":
+                        try:
+                            terminal_id = self.pipe_metadata.get("terminal_id")
+                            raw_term = await get_terminal_tools(
+                                self.request, terminal_id, self.user, extra_params
+                            )
+                            s_tools_dict, terminal_sys = unpack_terminal_tools_result(
+                                raw_term
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to load terminal tools for {model_id}: {e}"
+                            )
+                    elif va.type == "builtin":
+                        if va.builtin_model_override:
+                            builtin_model = copy.deepcopy(va.builtin_model_override)
+                        elif isinstance(va_model_obj, dict):
+                            builtin_model = copy.deepcopy(va_model_obj)
+                        else:
+                            builtin_model = merge_workspace_model_dict(
+                                app_models, va_model_id
+                            )
+                        if va.builtin_model_override and va_model_obj:
+                            if hasattr(va_model_obj, "id"):
+                                builtin_model["id"] = va_model_obj.id
+                            elif isinstance(va_model_obj, dict):
+                                builtin_model["id"] = va_model_obj.get(
+                                    "id", va_model_id
+                                )
+
+                        if model_id == "knowledge_agent" and self.model_knowledge:
+                            bm_info = builtin_model.setdefault("info", {})
+                            bm_meta = bm_info.setdefault("meta", {})
+                            mk = self.model_knowledge
+                            bm_meta["knowledge"] = (
+                                copy.deepcopy(mk)
+                                if isinstance(mk, list)
+                                else [copy.deepcopy(mk)]
+                            )
+
+                        try:
+                            # Use features from va config and the merged model
+                            s_tools_dict = get_builtin_tools(
+                                self.request,
+                                extra_params,
+                                features=va.features,
+                                model=builtin_model,
+                            )
+                            logger.info(
+                                f"Loaded {len(s_tools_dict)} builtin tools for subagent {model_id}"
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to load builtin tools for {model_id}: {e}"
+                            )
+
+                    s_tools = (
+                        [
+                            {"type": "function", "function": t["spec"]}
+                            for t in s_tools_dict.values()
+                        ]
+                        if s_tools_dict
+                        else None
                     )
 
-        info_params_ws = model_ws.get("info", {}).get("params") or {}
-        function_calling = info_params_ws.get("function_calling", "native")
-        caps_ws = (model_ws.get("info", {}).get("meta") or {}).get("capabilities") or {}
-        builtin_tools_enabled = caps_ws.get("builtin_tools", True)
-        features_ws = workspace_feature_flags(model_ws)
+                    final_sys = va.system_message or ""
+                    if terminal_sys:
+                        final_sys = f"{final_sys.rstrip()}\n\n{terminal_sys}"
 
-        if function_calling == "native" and builtin_tools_enabled:
-            try:
-                builtin_tools = get_builtin_tools(
+                    result = {
+                        "dict": s_tools_dict,
+                        "specs": s_tools,
+                        "system_message": final_sys,
+                        "actual_model": va_model_id,
+                        "temperature_override": va.temperature,
+                    }
+                    self.subagent_tools_cache[model_id] = result
+                    return result
+
+                # Regular subagent: workspace model + exact toolIds/MCP, then builtins only per OWUI gates
+                model_ws = merge_workspace_model_dict(app_models, model_id)
+                model_system_message = ""
+                subagent_tool_ids: list[str] = []
+                logger.debug(
+                    f"[Planner] Resolving subagent tools for {model_id}. Registry tracker: {self.mcp_handler is not None}"
+                )
+
+                # v3.15: Optimized metadata extraction from model_ws (no DB model_db_info)
+                meta = model_ws.get("info", {}).get("meta", {})
+                params = model_ws.get("info", {}).get("params", {})
+                if isinstance(meta, dict):
+                    subagent_tool_ids.extend(
+                        meta.get("toolIds") or meta.get("tool_ids") or []
+                    )
+                if isinstance(params, dict):
+                    subagent_tool_ids.extend(
+                        params.get("toolIds")
+                        or params.get("tool_ids")
+                        or params.get("tools")
+                        or []
+                    )
+                    model_system_message = params.get("system", "") or ""
+
+                info_meta = model_ws.get("info", {}).get("meta", {})
+                info_params = model_ws.get("info", {}).get("params", {})
+                subagent_tool_ids.extend(
+                    info_meta.get("toolIds") or info_meta.get("tool_ids") or []
+                )
+                subagent_tool_ids.extend(
+                    info_params.get("toolIds")
+                    or info_params.get("tool_ids")
+                    or info_params.get("tools")
+                    or []
+                )
+                if not model_system_message:
+                    model_system_message = info_params.get("system", "") or ""
+
+                seen_sub: set[str] = set()
+                ordered_sub_ids: list[str] = []
+                for tid in subagent_tool_ids:
+                    if tid and tid not in seen_sub:
+                        seen_sub.add(tid)
+                        ordered_sub_ids.append(tid)
+
+                s_tools_dict: dict[str, Any] = {}
+                if ordered_sub_ids:
+                    try:
+                        assigned_tools = await get_tools(
+                            self.request, ordered_sub_ids, self.user, extra_params
+                        )
+                        if assigned_tools:
+                            s_tools_dict.update(assigned_tools)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to load assigned tools for subagent {model_id}: {e}"
+                        )
+
+                extra_mcp_sub = {
+                    **extra_params,
+                    "__model__": model_ws,
+                    "__messages__": [],
+                    "__files__": self.pipe_metadata.get("files") or [],
+                }
+                mcp_sub = await planner_merge_mcp_tools_from_ids(
                     self.request,
-                    extra_params,
-                    features=features_ws,
-                    model=model_ws,
+                    self.user,
+                    ordered_sub_ids,
+                    self.pipe_metadata,
+                    extra_mcp_sub,
+                    extra_params.get("__event_emitter__"),
+                    self.mcp_handler,
                 )
-                for name, td in builtin_tools.items():
-                    if name not in s_tools_dict:
-                        s_tools_dict[name] = td
-            except Exception as e:
-                logger.error(
-                    f"Failed to load built-in tools for subagent {model_id}: {e}"
-                )
-        elif function_calling != "native":
-            logger.warning(
-                "Subagent model %s has non-native function_calling; builtins skipped (planner requires native FC).",
-                model_id,
-            )
+                if mcp_sub:
+                    s_tools_dict.update(mcp_sub)
 
-        result = {
-            "dict": s_tools_dict,
-            "specs": [
-                {"type": "function", "function": t["spec"]}
-                for t in s_tools_dict.values()
-            ]
-            if s_tools_dict
-            else None,
-            "system_message": model_system_message,
-        }
-        self.subagent_tools_cache[model_id] = result
-        return result
+                skill_ids, skill_prompt = await self._resolve_model_skills(
+                    model_ws, extra_params
+                )
+                if skill_prompt:
+                    model_system_message = (
+                        f"{model_system_message}\n\n{skill_prompt}"
+                        if model_system_message
+                        else skill_prompt
+                    )
+                    extra_params["__skill_ids__"] = skill_ids
+
+                workspace_terminal_models = [
+                    m.strip()
+                    for m in self.valves.WORKSPACE_TERMINAL_MODELS.split(",")
+                    if m.strip()
+                ]
+                if model_id in workspace_terminal_models:
+                    terminal_id = self.pipe_metadata.get("terminal_id")
+                    if terminal_id:
+                        try:
+                            raw_term = await get_terminal_tools(
+                                self.request, terminal_id, self.user, extra_params
+                            )
+                            terminal_tools, terminal_sys = unpack_terminal_tools_result(
+                                raw_term
+                            )
+                            if terminal_tools:
+                                s_tools_dict.update(terminal_tools)
+                            if terminal_sys:
+                                model_system_message = (
+                                    f"{model_system_message}\n\n{terminal_sys}"
+                                    if model_system_message
+                                    else terminal_sys
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to load terminal tools for subagent {model_id}: {e}"
+                            )
+
+                info_params_ws = model_ws.get("info", {}).get("params") or {}
+                function_calling = info_params_ws.get("function_calling", "native")
+                caps_ws = (model_ws.get("info", {}).get("meta") or {}).get(
+                    "capabilities"
+                ) or {}
+                builtin_tools_enabled = caps_ws.get("builtin_tools", True)
+                features_ws = workspace_feature_flags(model_ws)
+
+                if function_calling == "native" and builtin_tools_enabled:
+                    try:
+                        builtin_tools = get_builtin_tools(
+                            self.request,
+                            extra_params,
+                            features=features_ws,
+                            model=model_ws,
+                        )
+                        for name, td in builtin_tools.items():
+                            if name not in s_tools_dict:
+                                s_tools_dict[name] = td
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to load built-in tools for subagent {model_id}: {e}"
+                        )
+                elif function_calling != "native":
+                    logger.warning(
+                        "Subagent model %s has non-native function_calling; builtins skipped (planner requires native FC).",
+                        model_id,
+                    )
+
+                result = {
+                    "dict": s_tools_dict,
+                    "specs": (
+                        [
+                            {"type": "function", "function": t["spec"]}
+                            for t in s_tools_dict.values()
+                        ]
+                        if s_tools_dict
+                        else None
+                    ),
+                    "system_message": model_system_message,
+                }
+                self.subagent_tools_cache[model_id] = result
+                return result
 
 
 class PromptBuilder:
@@ -2396,9 +2667,7 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
         )
         # Inclusion of workspace terminal agents in descriptions
         workspace_terminal_models = [
-            m.strip()
-            for m in valves.WORKSPACE_TERMINAL_MODELS.split(",")
-            if m.strip()
+            m.strip() for m in valves.WORKSPACE_TERMINAL_MODELS.split(",") if m.strip()
         ]
         for mid in workspace_terminal_models:
             if mid and mid not in subagents_list:
@@ -2453,12 +2722,53 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
                 desc_list.append(va_descs[m])
             else:
                 label = ""
+                name = ""
+                desc = ""
+
+                # v3.6.10: Fetch model name and description from Open WebUI state/DB
+                request = (metadata or {}).get("__request__")
+                if request:
+                    app_models = getattr(request.app.state, "MODELS", {})
+                    m_info = app_models.get(m)
+                    if m_info:
+                        name = m_info.get("name", "")
+                        info = m_info.get("info", {})
+                        desc = info.get("meta", {}).get("description", "") or info.get(
+                            "description", ""
+                        )
+
+                # Fallback to DB if not in app state (e.g. workspace presets not yet loaded)
+                if not name or not desc:
+                    try:
+                        db_model = Models.get_model_by_id(m)
+                        if db_model:
+                            if not name:
+                                name = db_model.name
+                            if not desc:
+                                meta = db_model.meta
+                                if isinstance(meta, dict):
+                                    desc = meta.get("description", "")
+                                elif hasattr(meta, "description"):
+                                    desc = meta.description
+                                elif hasattr(meta, "model_dump"):
+                                    desc = meta.model_dump().get("description", "")
+                    except Exception:
+                        pass  # Ignore DB failures during prompt construction
+
                 workspace_terminal_models = [
-                    v.strip() for v in valves.WORKSPACE_TERMINAL_MODELS.split(",") if v.strip()
+                    v.strip()
+                    for v in valves.WORKSPACE_TERMINAL_MODELS.split(",")
+                    if v.strip()
                 ]
                 if m in workspace_terminal_models:
                     label = " (Terminal Access)"
-                desc_list.append(f"- ID: {m}{label}")
+
+                entry = f"- ID: {m}{label}"
+                if name:
+                    entry += f" (Name: {name})"
+                if desc:
+                    entry += f"\n  Description: {desc}"
+                desc_list.append(entry)
 
         if desc_list:
             subagent_descriptions = "\n".join(desc_list)
@@ -2752,6 +3062,8 @@ class SubagentManager:
         base_url: str = "",
         model_knowledge: Optional[list[dict]] = None,
         mcp_handler: Optional[Callable] = None,
+        registry: ToolRegistry = None,
+        engine: "PlannerEngine" = None,
     ):
         self.ui = ui
         self.state = state
@@ -2759,9 +3071,12 @@ class SubagentManager:
         self.valves = valves
         self.base_url = base_url
         self.model_knowledge = model_knowledge
-        self.result_lock = asyncio.Lock()
-        self.locked_emitter = LockedEmitter(ui.emitter)
+        self.queue_emitter = ui.emitter  # Already a QueueEmitter in structural overhaul
         self.mcp_handler = mcp_handler
+        self.registry = registry
+        self.engine = engine
+        # We use the subagent_tools_cache from the registry if available
+        self.subagent_tools_cache = {}
 
         # Resolve virtual agents with fallback model and valve overrides
         AGENT_MODEL_VALVES = {
@@ -2945,7 +3260,7 @@ class SubagentManager:
     ) -> dict[str, Any]:
         """Resolves model info, tools, and constructs the system prompt and initial history."""
         user_obj = self.metadata.get("__user_obj__")
-        registry = ToolRegistry(
+        registry = self.registry or ToolRegistry(
             valves,
             user_obj,
             self.metadata.get("__request__"),
@@ -3009,12 +3324,13 @@ class SubagentManager:
 
         # Sticky Related Tasks (v3.5 extension):
         # Once a task is linked to a session, we track its version (hash) and re-inject if updated.
-        session_key = (chat_id, task_id, model_id)
+        # v3.6.8: Standardize on string keys for metadata session tracking
+        session_key = f"{chat_id}:{task_id}:{model_id}"
         if session_key not in self.state.subagent_metadata:
             self.state.subagent_metadata[session_key] = {"linked_tasks": {}}
-        
+
         linked_tasks = self.state.subagent_metadata[session_key]["linked_tasks"]
-        
+
         # Current batch + Persisted batch
         task_set = set([rt.lstrip("@:") for rt in (related_tasks or []) if rt])
         task_set.update(linked_tasks.keys())
@@ -3024,14 +3340,14 @@ class SubagentManager:
             if rid in self.state.results:
                 raw_res = self.state.results[rid]
                 res_hash = hashlib.md5(raw_res.encode("utf-8")).hexdigest()
-                
+
                 # Check if we should inject: new task OR updated result
                 if linked_tasks.get(rid) != res_hash:
                     # Provide updated context
                     header = f"--- UPDATED RESULTS FROM TASK {rid} ---"
                     if linked_tasks.get(rid) is None:
                         header = f"--- RESULTS FROM RELATED TASK {rid} ---"
-                        
+
                     results_injection.append(
                         f"\n\n{header}\n{raw_res}\n--- END OF {rid} ---\n"
                     )
@@ -3086,6 +3402,9 @@ class SubagentManager:
 
         while True:
             sub_iteration += 1
+            logger.debug(
+                f"[Subagent: {model_id}] Entering loop iteration {sub_iteration}..."
+            )
 
             # (A) Iteration Limit Check
             can_continue, new_max = await self._handle_subagent_iteration_limit(
@@ -3142,10 +3461,9 @@ class SubagentManager:
                             continue
 
                 # Reasoning Promotion (v3 parity): Only if NO content AND NO tool calls
-                if not "".join(sub_final_answer_chunks).strip() and turn_result.get(
-                    "reasoning"
-                ):
-                    reasoning_text = f"Thinking: {turn_result['reasoning']}"
+                if not sub_content.strip() and turn_result.get("reasoning"):
+                    # v3.6: Clean promoted reasoning to avoid leaking tags or prefixes into the UI content area
+                    reasoning_text = Utils.clean_thinking(turn_result["reasoning"])
                     sub_final_answer_chunks.append(reasoning_text)
                     sub_content = reasoning_text
 
@@ -3182,13 +3500,14 @@ class SubagentManager:
                     )
                     for stc in tool_calls_list
                 ]
+                # v3.6: Capture anchor BEFORE gather to avoid race condition if history grows
+                history_tail_start = len(history)
                 await asyncio.gather(*tasks)
 
                 # Re-sort the history tail to match original tool_calls order
                 call_id_order = {
                     tc.get("id"): i for i, tc in enumerate(tool_calls_list)
                 }
-                history_tail_start = len(history) - len(tool_calls_list)
                 tool_tail = history[history_tail_start:]
                 tool_tail.sort(
                     key=lambda m: call_id_order.get(m.get("tool_call_id", ""), 999)
@@ -3365,8 +3684,7 @@ class SubagentManager:
         app_models = getattr(request.app.state, "MODELS", {}) if request else {}
         workspace_model = merge_workspace_model_dict(app_models, actual_model)
         has_bi = any(
-            (v.get("type") == "builtin")
-            for v in context.get("tools_dict", {}).values()
+            (v.get("type") == "builtin") for v in context.get("tools_dict", {}).values()
         )
         await apply_native_completion_file_prep(
             request,
@@ -3382,52 +3700,92 @@ class SubagentManager:
         reasoning_buffer = ""
         reasoning_start_time = None
 
-        async for event in Utils.get_streaming_completion(
-            self.metadata.get("__request__"), sub_body, user_obj
-        ):
-            etype = event["type"]
-            if etype == "error":
-                err = f"Agent Error: {event.get('text', 'Unknown stream error')}"
-                content_chunks.append(f"\n\n> [!CAUTION]\n> {err}\n\n")
-                logger.error(err)
-                error_occurred = True
-                break
-            elif etype == "reasoning":
-                piece = event.get("text", "")
-                if piece:
-                    if reasoning_start_time is None:
-                        reasoning_start_time = time.monotonic()
-                    reasoning_chunks.append(piece)
-                    reasoning_buffer += piece
-            elif etype == "content":
-                if reasoning_buffer:
-                    reasoning_buffer = ""
-                text = event["text"]
-                content_chunks.append(text)
-            elif etype == "tool_calls":
-                if reasoning_buffer:
-                    reasoning_buffer = ""
-                for tc in event["data"]:
-                    idx = tc["index"]
-                    if idx not in tc_dict:
-                        tc_dict[idx] = {
-                            "id": tc.get("id") or f"call_{uuid4().hex[:12]}",
-                            "type": "function",
-                            "function": {
-                                "name": tc["function"].get("name", ""),
-                                "arguments": "",
-                            },
-                        }
-                    if "name" in tc["function"] and tc["function"]["name"]:
-                        tc_dict[idx]["function"]["name"] = tc["function"]["name"]
-                    if "arguments" in tc["function"]:
-                        tc_dict[idx]["function"]["arguments"] += tc["function"][
-                            "arguments"
-                        ]
+        # v3.6: Add heartbeat and trace logging for LLM turn
+        turn_start = time.monotonic()
+        logger.debug(
+            f"[Subagent: {model_id}] Starting streaming LLM turn. Model: {actual_model}"
+        )
+
+        try:
+            chunk_count = 0
+            last_heartbeat = turn_start
+            # v3.6.8: Wrap the entire iterator to ensure it's closed even on CancelledError/TimeoutError.
+            stream_gen = Utils.get_streaming_completion(
+                self.metadata.get("__request__"), sub_body, user_obj
+            )
+            try:
+                # v3.6.8: Use SUBAGENT_TIMEOUT valve (default 1200s) for long reasoning models.
+                async with asyncio.timeout(float(self.valves.SUBAGENT_TIMEOUT)):
+                    async for event in stream_gen:
+                        chunk_count += 1
+                        now = time.monotonic()
+                        if now - last_heartbeat >= 10.0:
+                            logger.debug(
+                                f"[Subagent: {model_id}] Alive... ({chunk_count} chunks received, {now-turn_start:.1f}s elapsed)"
+                            )
+                            last_heartbeat = now
+                        etype = event["type"]
+                        if etype == "error":
+                            err = f"Agent Error: {event.get('text', 'Unknown stream error')}"
+                            content_chunks.append(f"\n\n> [!CAUTION]\n> {err}\n\n")
+                            logger.error(err)
+                            error_occurred = True
+                            break
+                        elif etype == "reasoning":
+                            piece = event.get("text", "")
+                            if piece:
+                                if reasoning_start_time is None:
+                                    reasoning_start_time = time.monotonic()
+                                reasoning_chunks.append(piece)
+                                reasoning_buffer += piece
+                        elif etype == "content":
+                            if reasoning_buffer:
+                                reasoning_buffer = ""
+                            text = event["text"]
+                            content_chunks.append(text)
+                        elif etype == "tool_calls":
+                            if reasoning_buffer:
+                                reasoning_buffer = ""
+                            for tc in event["data"]:
+                                idx = tc["index"]
+                                if idx not in tc_dict:
+                                    tc_dict[idx] = {
+                                        "id": tc.get("id")
+                                        or f"call_{uuid4().hex[:12]}",
+                                        "type": "function",
+                                        "function": {
+                                            "name": tc["function"].get("name", ""),
+                                            "arguments": "",
+                                        },
+                                    }
+                                if "name" in tc["function"] and tc["function"]["name"]:
+                                    tc_dict[idx]["function"]["name"] = tc["function"][
+                                        "name"
+                                    ]
+                                if "arguments" in tc["function"]:
+                                    tc_dict[idx]["function"]["arguments"] += tc[
+                                        "function"
+                                    ]["arguments"]
+            finally:
+                # v3.6.8: Explicitly close the generator to avoid connection leaks on timeout/cancel
+                if hasattr(stream_gen, "aclose"):
+                    await stream_gen.aclose()
+        except asyncio.TimeoutError:
+            logger.error(
+                f"[Subagent: {model_id}] LLM Turn timed out after 300s. Potential provider hang."
+            )
+            error_occurred = True
+        except Exception as e:
+            logger.error(f"[Subagent: {model_id}] Error during LLM turn: {e}")
+            error_occurred = True
 
         raw_content = "".join(content_chunks)
         content = Utils.clean_thinking(raw_content)
         reasoning = "".join(reasoning_chunks)
+
+        logger.debug(
+            f"[Subagent: {model_id}] LLM turn completed in {time.monotonic()-turn_start:.1f}s. Content len: {len(content)}"
+        )
 
         # Intercept hallucinated XML <tool_call> in both content and reasoning (v3 parity)
         if not tc_dict:
@@ -3461,6 +3819,9 @@ class SubagentManager:
     ) -> None:
         """Executes a single subagent tool call and updates history/states."""
         target_tool = context["tools_dict"].get(name)
+        user_obj = self.metadata.get("__user_obj__")
+        tc_files = []
+        res_content = ""
         try:
             # UI Parity: Emit status and tool call details
             await self.ui.emit_status(f"[Subagent: {model_id}] Executing {name}...")
@@ -3481,7 +3842,7 @@ class SubagentManager:
             context_vars = {
                 "__request__": self.metadata.get("__request__"),
                 "__user__": self.metadata.get("__user__"),
-                "__event_emitter__": self.locked_emitter,
+                "__event_emitter__": self.queue_emitter,
                 "__event_call__": self.metadata.get("__event_call__"),
                 "__chat_id__": self.metadata.get("__chat_id__")
                 or self.metadata.get("chat_id"),
@@ -3500,64 +3861,93 @@ class SubagentManager:
                 }
             )
 
-            # Execute tool in parallel (Monkeypatch fixes ComfyUI clientId deadlocks)
-            tc_res = await target_tool["callable"](**filtered_args)
+            # Execute tool: configurable timeout (default 1200s)
+            logger.debug(f"[Subagent: {model_id}] Calling tool {name}...")
+            async with asyncio.timeout(float(self.valves.SUBAGENT_TIMEOUT)):
+                res = await target_tool["callable"](**filtered_args)
 
-            # Serialize only the DB-intensive result processing to prevent race conditions
-            async with self.result_lock:
-                tc_return = process_tool_result(
-                    self.metadata.get("__request__"),
-                    name,
-                    tc_res,
-                    target_tool.get("type", ""),
-                    False,
-                    self.metadata.get("__metadata__"),
-                    context["user_obj"],
-                )
+            # v3.15: Robust tool result processing parity with main planner engine.
+            # We use process_tool_result to handle file uploads, base64 conversion,
+            # and rich object decomposition.
+            tc_return = process_tool_result(
+                self.metadata.get("__request__"),
+                name,
+                res,
+                target_tool.get("type", ""),
+                False,
+                self.metadata.get("__metadata__"),
+                user_obj,
+            )
 
-                # Unpack result components
-                res_str = ""
-                tc_files = []
-                tc_embeds = []
-
-                if isinstance(tc_return, tuple):
-                    if len(tc_return) >= 3:
-                        res_str, tc_files, tc_embeds = tc_return[:3]
-                    elif len(tc_return) == 2:
-                        res_str, tc_files = tc_return
+            tc_files = []
+            # Handle multiple return values (tuple: str/dict, files, embeds)
+            if isinstance(tc_return, tuple) and len(tc_return) >= 2:
+                r_val, tuple_files = tc_return[:2]
+                if tuple_files:
+                    tc_files.extend(tuple_files)
+                if isinstance(r_val, dict):
+                    res_content = (
+                        json.dumps(r_val, ensure_ascii=False)
+                        if len(str(r_val)) < 1000
+                        else r_val.get("description", str(r_val))
+                    )
                 else:
-                    res_str = str(tc_return)
+                    res_content = str(r_val) if r_val is not None else ""
+            else:
+                if isinstance(tc_return, dict):
+                    res_content = (
+                        json.dumps(tc_return, ensure_ascii=False)
+                        if len(str(tc_return)) < 1000
+                        else tc_return.get("description", str(tc_return))
+                    )
+                else:
+                    res_content = str(tc_return) if tc_return is not None else ""
 
-                # v3.5 robustness: ensure generated assets are linked in history and persisted to DB
-                if tc_files:
-                    target_chat_id = self.metadata.get(
-                        "__chat_id__"
-                    ) or self.metadata.get("chat_id")
-                    target_msg_id = self.metadata.get(
-                        "__message_id__"
-                    ) or self.metadata.get("message_id")
+            # Accumulate files for final consolidated persistence sync at the end of engine.run()
+            if tc_files and self.engine:
+                async with self.engine._files_lock:
+                    self.engine.produced_files.extend(tc_files)
+
+                    # Update internal metadata list for this turn immediately (consistency for macros/fallbacks)
+                    current_files = self.metadata.get("__files__")
+                    if isinstance(current_files, list):
+                        # Avoid duplicates in the local metadata list. Handle both 'id', 'file_id', and 'url'.
+                        existing_ids = {
+                            f.get("id") or f.get("file_id") or f.get("url")
+                            for f in current_files
+                            if isinstance(f, dict)
+                        }
+                        for f in tc_files:
+                            if isinstance(f, dict):
+                                fid = f.get("id") or f.get("file_id") or f.get("url")
+                                if fid and fid not in existing_ids:
+                                    current_files.append(f)
+
+                    # v3.15: Continuous persistence (v3 parity).
+                    # Synchronize with the database immediately to ensure assets (especially images)
+                    # are correctly associated with the message even if the turn is long or interrupted.
+                    target_chat_id = self.metadata.get("__chat_id__")
+                    target_msg_id = self.metadata.get("__message_id__")
                     if target_chat_id and target_msg_id:
                         try:
-                            # Synchronize with DB for multi-turn persistence
-                            Chats.add_message_files_by_id_and_message_id(
-                                target_chat_id, target_msg_id, tc_files
+                            await asyncio.to_thread(
+                                Chats.add_message_files_by_id_and_message_id,
+                                target_chat_id,
+                                target_msg_id,
+                                tc_files,
                             )
-                            # Update internal metadata list for this turn
-                            current_files = self.metadata.get("__files__")
-                            if isinstance(current_files, list):
-                                current_files.extend(tc_files)
                         except Exception as e:
-                            logger.error(
-                                f"Failed to persist subagent tool files to DB: {e}"
-                            )
+                            logger.error(f"Subagent tool file sync failed: {e}")
 
-            # Optional: Strip internal UI reasoning/tags if needed (user prefers keeping reasoning)
-            # res_str = Utils.clean_ui_artifacts(res_str)
+                    logger.debug(
+                        f"[Subagent: {model_id}] Tool {name} returned {len(tc_files)} files. Synced immediately."
+                    )
 
-            truncated_args = {
-                k: (str(v)[:80] + "..." if len(str(v)) > 80 else str(v))
-                for k, v in args_obj.items()
-            }
+            # Update UI to "Done" status for THIS tool call (For logs/potential future use)
+            done_tag = self.ui.build_tool_call_details(
+                call_id, name, args_str, done=True, result=res_content, files=tc_files
+            )
+
             async with history_lock or asyncio.Lock():
                 sub_called_tools[name] = sub_called_tools.get(name, 0) + 1
                 history.append(
@@ -3565,7 +3955,7 @@ class SubagentManager:
                         "role": "tool",
                         "tool_call_id": call_id,
                         "name": name,
-                        "content": str(res_str),
+                        "content": res_content,
                     }
                 )
         except Exception as e:
@@ -3752,13 +4142,36 @@ class InternalToolExecutor:
             )
         )
         self.engine.active_tasks.append(sub_task)
-        
+
         try:
             res_dict = await sub_task
         finally:
             if sub_task in self.engine.active_tasks:
                 self.engine.active_tasks.remove(sub_task)
-                
+
+        # v3.15: Intermediate persistence sync.
+        # Committing subagent-produced files to the DB immediately after the subagent task finishes
+        # ensures they persist even if the main execution loop is interrupted later.
+        target_chat_id = self.metadata.get("__chat_id__")
+        target_msg_id = self.metadata.get("__message_id__")
+        if target_chat_id and target_msg_id:
+            async with self.engine._files_lock:
+                if self.engine.produced_files:
+                    try:
+                        await asyncio.to_thread(
+                            Chats.add_message_files_by_id_and_message_id,
+                            target_chat_id,
+                            target_msg_id,
+                            self.engine.produced_files,
+                        )
+                        logger.debug(
+                            f"Intermediate sync: Committed {len(self.engine.produced_files)} files to DB after {task_id}."
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed intermediate file sync for {task_id}: {e}"
+                        )
+
         self.state.update_task(task_id, "completed")
         if user_valves.PLAN_MODE:
             self.engine.current_plan_html = self.ui.get_html_status_block(
@@ -3854,7 +4267,7 @@ class InternalToolExecutor:
             return "Error: must specify task_ids and prompt."
 
         await self.ui.emit_status("Reviewing tasks cross-reference...")
-        
+
         # Track the review call as an active task
         async def run_review():
             review_sys = "You are a specialized review subagent. Synthesize the following task results logically."
@@ -3884,7 +4297,7 @@ class InternalToolExecutor:
 
         review_task = asyncio.create_task(run_review())
         self.engine.active_tasks.append(review_task)
-        
+
         try:
             final_review = await review_task
         finally:
@@ -3914,134 +4327,114 @@ class PlannerEngine:
         subagents: SubagentManager,
         registry: ToolRegistry,
         metadata: dict[str, Any],
+        valves: Any = None,
         model_knowledge: Optional[list[dict]] = None,
     ):
         self.ui = ui
         self.state = state
         self.subagents = subagents
         self.registry = registry
+        self.valves = valves
         self.metadata = metadata
         self.model_knowledge = model_knowledge
         self.tools = InternalToolExecutor(self)
         self.current_plan_html = ""
         self.total_emitted = ""  # Trace current Turn body only
         self.active_tasks: list[asyncio.Task] = []
-        # v3.6: MCP Connection Hub (Fix for Anyio task-mismatch)
-        # We use a dedicated worker task to own all MCP client anyio scopes.
-        self.mcp_clients: dict[str, Any] = {} # Map unique key (url + headers_hash) to client
-        self._mcp_queue: asyncio.Queue = asyncio.Queue()
-        self._mcp_worker_task: Optional[asyncio.Task] = None
+        # v3.15: Consolidated file persistence. Accumulate files and sync at the end.
+        self.produced_files = []
+        self._files_lock = asyncio.Lock()
+        # v3.6: MCP Connection Hub (Fix for Anyio task-mismatch & Parallelism)
+        # We use a fleet of worker tasks (one per connection) to own Anyio scopes.
+        self.mcp_clients: dict[str, dict[str, Any]] = (
+            {}
+        )  # Map conn_key -> {proxy, queue, task}
         self._mcp_lock: asyncio.Lock = asyncio.Lock()
+        self._connecting_mcp: dict[str, asyncio.Future] = (
+            {}
+        )  # Track in-progress connections
 
-    async def get_or_create_mcp_client(self, url: str, headers: Optional[dict] = None) -> Any:
-        """Proxies a connection request to the MCP worker task to ensure Task affinity."""
+    async def get_or_create_mcp_client(
+        self, url: str, headers: Optional[dict] = None
+    ) -> "StreamableHTTPMCPClient":
+        headers_json = json.dumps(headers, sort_keys=True) if headers else "{}"
+        conn_key = hashlib.sha256(f"{url}|{headers_json}".encode()).hexdigest()
+
         async with self._mcp_lock:
-            if not self._mcp_worker_task or self._mcp_worker_task.done():
-                self._mcp_worker_task = asyncio.create_task(self._mcp_worker_loop(), name=f"MCP-Worker-{uuid4().hex[:4]}")
-
-            # Create a unique key for the connection to allow reuse
-            headers_json = json.dumps(headers, sort_keys=True) if headers else "{}"
-            conn_key = hashlib.sha256(f"{url}|{headers_json}".encode()).hexdigest()
-
             if conn_key in self.mcp_clients:
-                return self.mcp_clients[conn_key]
+                return self.mcp_clients[conn_key]["proxy"]
 
-            # Request new connection
-            resp_fut = asyncio.get_running_loop().create_future()
-            await self._mcp_queue.put(("connect", (url, headers, conn_key), resp_fut))
-            return await resp_fut
+            if conn_key in self._connecting_mcp:
+                fut = self._connecting_mcp[conn_key]
+            else:
+                fut = asyncio.get_running_loop().create_future()
+                self._connecting_mcp[conn_key] = fut
 
-    async def _mcp_worker_loop(self) -> None:
-        """Dedicated task that 'owns' all MCP client anyio scopes."""
-        task_name = asyncio.current_task().get_name()
-        logger.debug(f"[Planner] {task_name} started.")
-        client_registry = {} # Local tracker to ensure absolute task affinity
-        
-        try:
-            while True:
-                item = await self._mcp_queue.get()
-                if item is None: # Shutdown signal
-                    break
-                
-                cmd, args, resp_fut = item
-                try:
-                    if cmd == "connect":
-                        url, headers, conn_key = args
-                        if conn_key in client_registry:
-                            resp_fut.set_result(client_registry[conn_key])
-                            continue
-                            
-                        logger.debug(f"[Planner] {task_name} connecting to {url}...")
-                        client = MCPClient()
-                        await client.connect(url=url, headers=headers)
-                        client_registry[conn_key] = client
-                        self.mcp_clients[conn_key] = client
-                        resp_fut.set_result(client)
-                        logger.debug(f"[Planner] {task_name} connected to {url} (ID: {id(client)})")
-                except Exception as e:
-                    logger.error(f"[Planner] {task_name} connect error for {args[0]}: {e}")
-                    if not resp_fut.done():
-                        resp_fut.set_result(e)
-                finally:
-                    self._mcp_queue.task_done()
-        except asyncio.CancelledError:
-            logger.debug(f"[Planner] {task_name} cancelled.")
-        finally:
-            # Cleanup all clients in the SAME task context that created them
-            if client_registry:
-                logger.debug(f"[Planner] {task_name} cleaning up {len(client_registry)} clients...")
-                # LIFO: Disconnect in REVERSE order of connection to satisfy Anyio's nested cancel scopes
-                ordered_clients = list(client_registry.items())
-                for url_key, client in reversed(ordered_clients):
+                async def _connect(ck=conn_key, f=fut):
                     try:
-                        logger.debug(f"[Planner] {task_name} disconnecting client ID: {id(client)}")
-                        # Use asyncio.timeout (Python 3.11+) to preserve task affinity.
-                        # Do NOT use wait_for as it spawns a separate Task.
-                        try:
-                            async with asyncio.timeout(3.0):
-                                await client.disconnect()
-                        except asyncio.TimeoutError:
-                            logger.debug(f"[Planner] {task_name} disconnect timed out for ID {id(client)}")
-                        
-                        logger.debug(f"[Planner] {task_name} disconnected client ID: {id(client)}")
+                        client = StreamableHTTPMCPClient(
+                            url,
+                            headers,
+                            timeout=int(self.valves.SUBAGENT_TIMEOUT),
+                        )
+                        await client.connect()
+                        async with self._mcp_lock:
+                            self.mcp_clients[ck] = {"proxy": client}
+                            self._connecting_mcp.pop(ck, None)
+                        if not f.done():
+                            f.set_result(True)
                     except Exception as e:
-                        logger.debug(f"[Planner] {task_name} disconnect error for ID {id(client)}: {e}")
-                client_registry.clear()
-                self.mcp_clients.clear()
-            logger.debug(f"[Planner] {task_name} exited.")
+                        async with self._mcp_lock:
+                            self._connecting_mcp.pop(ck, None)
+                        if not f.done():
+                            f.set_exception(e)
+
+                asyncio.create_task(_connect(), name=f"MCP-Connect-{conn_key[:8]}")
+
+        await fut
+        return self.mcp_clients[conn_key]["proxy"]
 
     async def stop(self) -> None:
-        """Forcefully stops all active subagent tasks and disconnects MCP clients."""
-        # 1. Cancel all active tasks
         if self.active_tasks:
             logger.info(f"Cancelling {len(self.active_tasks)} active subagent tasks...")
             for task in self.active_tasks:
                 if not task.done():
                     task.cancel()
-            
-            # Wait briefly for cancellation to propagate, but with timeout to avoid hanging
             try:
                 await asyncio.wait(self.active_tasks, timeout=2.0)
             except Exception as e:
-                logger.error(f"Error during subagent task cancellation wait: {e}")
+                logger.error(f"Error during subagent task cancellation: {e}")
             self.active_tasks.clear()
 
-        # 2. Shutdown MCP Connection Hub
-        if self._mcp_worker_task and not self._mcp_worker_task.done():
-            logger.info("Signaling MCP Connection Hub to shutdown...")
-            try:
-                # Send poison pill and wait for worker to cleanup and exit
-                await self._mcp_queue.put(None)
-                await asyncio.wait_for(self._mcp_worker_task, timeout=5.0)
-            except Exception as e:
-                logger.debug(f"Error during MCP worker shutdown: {e}")
-                # Fallback: force cancel if it didn't stop
-                if not self._mcp_worker_task.done():
-                    self._mcp_worker_task.cancel()
+        if self.mcp_clients:
+            logger.info(f"Disconnecting {len(self.mcp_clients)} MCP clients...")
+            for info in self.mcp_clients.values():
+                await info["proxy"].disconnect()
+            self.mcp_clients.clear()
+
+    def get_current_files(self) -> list:
+        files_map = {}
+        for f in self.metadata.get("__files__", []):
+            if isinstance(f, dict):
+                fid = f.get("id") or f.get("file_id") or f.get("url")
+                if fid:
+                    files_map[fid] = f
+        for f in getattr(self, "produced_files", []):
+            if isinstance(f, dict):
+                fid = f.get("id") or f.get("file_id") or f.get("url")
+                if fid:
+                    files_map[fid] = f
+        return list(files_map.values()) if files_map else None
 
     async def _emit_replace(self, content: str) -> None:
-        """Helper to emit an inline replace event with the current plan prepended."""
-        await self.ui.emit_replace(self.current_plan_html + content)
+        """Helper to emit an inline replace event with the current plan prepended.
+        v3.15: CRITICAL. We MUST include 'files' in the replace payload if we want them to persist
+        during structural DOM refreshes. Otherwise, Svelte will unmount the FileList component.
+        """
+        data = {"content": self.current_plan_html + content}
+        if self.produced_files:
+            data["files"] = self.produced_files
+        await self.ui.emitter({"type": "replace", "data": data})
 
     async def _emit_message(self, delta: str) -> None:
         """Helper to emit an append-only message event (efficient for content deltas)."""
@@ -4072,41 +4465,132 @@ class PlannerEngine:
             yield ""  # Heartbeat
 
         # 2. Phase 2: Execution & Verification Loop
-        # We use an async generator for the loop to keep the stream alive
-        final_answer = ""
+        # v3.5: Execution Loop Phase with real-time UI streaming
         async for delta in self._phase_execution_loop(
             chat_id, valves, user_valves, user_obj, body
         ):
             if isinstance(delta, str):
-                final_answer = delta  # Final string returned at the end of generator
-                yield ""  # Heartbeat token
+                final_answer = (
+                    delta  # Final string returned at the end of generator turn
+                )
+                # v3.6: Yield heartbeat to keep the SSE stream alive
+                yield ""
+            else:
+                # Handle non-string deltas if any (future-proofing)
+                yield ""
 
-        # 3. State Persistence (v3.3)
+        # v3.3: Final State Persistence
+        # Save state to file and attach to response. This adds a state file to produced_files.
         await self._save_state_to_file(chat_id)
 
-        # v3.5: Final response and asset persistence sync
-        full_content = self.current_plan_html + final_answer
-
-        final_files = []
-        target_chat_id = self.metadata.get("__chat_id__")
+        # v3.15: Final consolidated file persistence sync.
+        # Performs a single DB update for ALL produced files from tools and state saving.
+        # We ensure target chat/message IDs are resolved from session metadata.
+        target_chat_id = self.metadata.get("__chat_id__") or chat_id
         target_msg_id = self.metadata.get("__message_id__")
 
         if target_chat_id and target_msg_id:
+            async with self._files_lock:
+                if self.produced_files:
+                    try:
+                        # Convert to pure IDs if necessary for robust DB insertion
+                        sync_files = []
+                        for f in self.produced_files:
+                            fid = (
+                                f.get("id") or f.get("file_id")
+                                if isinstance(f, dict)
+                                else None
+                            )
+                            if fid:
+                                # Ensure we have the full structure if possible
+                                sync_files.append(f)
+                            elif isinstance(f, str):
+                                # If it's just an ID string
+                                sync_files.append({"id": f})
+
+                        if sync_files:
+                            await asyncio.to_thread(
+                                Chats.add_message_files_by_id_and_message_id,
+                                target_chat_id,
+                                target_msg_id,
+                                sync_files,
+                            )
+                            logger.info(
+                                f"[Planner] Final sync: Committed {len(sync_files)} files to DB."
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed consolidated file sync: {e}")
+
+        # v3.5: Final response and asset persistence sync
+        full_content = self.current_plan_html + (final_answer or "")
+
+        # v3.15: Robust asset synchronization.
+        # We merge files from the DB (canonical), our internal `produced_files` accumulator,
+        # and the session metadata to ensure the UI local store is fully synchronized
+        # even if the DB fetch is delayed or incomplete.
+        final_files_map = {}
+
+        # 1. Start with metadata files (from initial load or tool calls in this turn)
+        for f in self.metadata.get("__files__", []):
+            if isinstance(f, dict):
+                fid = f.get("id") or f.get("file_id") or f.get("url")
+                if fid:
+                    final_files_map[fid] = f
+
+        # 2. Add produced files from this turn (state files, subagent tool outputs)
+        async with self._files_lock:
+            for f in self.produced_files:
+                if isinstance(f, dict):
+                    fid = f.get("id") or f.get("file_id") or f.get("url")
+                    if fid:
+                        final_files_map[fid] = f
+
+        # 3. Pull latest from DB as the ultimate source of truth
+        if target_chat_id and target_msg_id:
             try:
-                # Query the actual state of the message in DB to include all files (from state and tools)
-                full_message = Chats.get_message_by_id_and_message_id(
-                    target_chat_id, target_msg_id
+                full_message = await asyncio.to_thread(
+                    Chats.get_message_by_id_and_message_id,
+                    target_chat_id,
+                    target_msg_id,
                 )
                 if full_message:
-                    final_files = full_message.get("files", [])
+                    for f in full_message.get("files", []):
+                        if isinstance(f, dict):
+                            fid = f.get("id") or f.get("file_id") or f.get("url")
+                            if fid:
+                                final_files_map[fid] = f
+                        elif isinstance(f, str):
+                            final_files_map[f] = {"id": f}
             except Exception as e:
                 logger.error(f"Failed to fetch final files from DB: {e}")
-                # Fallback to metadata list if DB query fails
-                final_files = self.metadata.get("__files__", [])
+
+        final_files = list(final_files_map.values())
 
         # v3.6: Explicitly emit the final files list one last time to sync the UI local store.
         if final_files and self.ui:
-            await self.ui.emitter({"type": "files", "data": {"files": final_files}})
+            await self.ui.emit_files(final_files)
+
+        # To prevent Open WebUI's native completion handler from overwriting our files
+        # when it saves the final message state, we spawn a background task that sleeps
+        # briefly and then enforces the true file list.
+        if final_files and target_chat_id and target_msg_id:
+
+            async def _delayed_sync():
+                await asyncio.sleep(2.0)
+                try:
+                    await asyncio.to_thread(
+                        Chats.add_message_files_by_id_and_message_id,
+                        target_chat_id,
+                        target_msg_id,
+                        final_files,
+                    )
+                    logger.info(
+                        f"[Planner] Delayed final sync: Restored {len(final_files)} files to DB."
+                    )
+                except Exception as e:
+                    logger.error(f"[Planner] Delayed sync failed: {e}")
+
+            asyncio.create_task(_delayed_sync())
 
         # We yield the final content as the last token
         # For Pipes, this is the most stable way to ensure the final save includes all text.
@@ -4137,7 +4621,7 @@ class PlannerEngine:
                 logger.info(
                     f"Performing deep history scan for chat {chat_id} via database..."
                 )
-                chat_obj = Chats.get_chat_by_id(chat_id)
+                chat_obj = await asyncio.to_thread(Chats.get_chat_by_id, chat_id)
                 if chat_obj and hasattr(chat_obj, "chat"):
                     messages_map = chat_obj.chat.get("history", {}).get("messages", {})
                     # Standard Open WebUI history traversal
@@ -4199,7 +4683,7 @@ class PlannerEngine:
                 )
                 return
 
-            file_obj = Files.get_file_by_id(file_id)
+            file_obj = await asyncio.to_thread(Files.get_file_by_id, file_id)
             if not file_obj:
                 logger.warning(f"State file with ID {file_id} not found in database.")
                 return
@@ -4231,37 +4715,52 @@ class PlannerEngine:
                 if "subagent_history" in data:
                     self.state.subagent_history.clear()
                     for key_str, history in data["subagent_history"].items():
+                        # v3.6.8: Support both legacy [JSON-list] and new colon:separated keys
                         try:
-                            # Reconstruct tuple key (chat_id, sub_task_id, model_id)
-                            try:
-                                parts = json.loads(key_str)
-                                if isinstance(parts, list) and len(parts) == 3:
-                                    tuple_key = tuple(parts)
-                                    self.state.subagent_history[tuple_key] = history
-                            except (json.JSONDecodeError, TypeError):
-                                # Discard invalid keys (per user request)
-                                logger.warning(
-                                    f"Discarding invalid subagent history key: {key_str}"
+                            if ":" in key_str:
+                                parts = key_str.split(":", 2)
+                            else:
+                                parts = (
+                                    ast.literal_eval(key_str)
+                                    if isinstance(key_str, str)
+                                    else key_str
                                 )
-                        except Exception as parse_err:
+
+                            if isinstance(parts, (list, tuple)) and len(parts) == 3:
+                                # Normalize chat_id to current session if it matched legacy pattern
+                                norm_key = f"{chat_id}:{parts[1]}:{parts[2]}"
+                                self.state.subagent_history[norm_key] = history
+                            else:
+                                # Direct string key storage
+                                self.state.subagent_history[str(key_str)] = history
+                        except Exception as e:
                             logger.error(
-                                f"Failed to parse subagent history key {key_str}: {parse_err}"
+                                f"Failed to reconstruct history key {key_str}: {e}"
                             )
-                    logger.info(
-                        f"Restored {len(self.state.subagent_history)} sub-conversation threads."
-                    )
 
                 # Restore subagent metadata
                 if "subagent_metadata" in data:
                     self.state.subagent_metadata.clear()
                     for key_str, metadata in data["subagent_metadata"].items():
                         try:
-                            parts = json.loads(key_str)
-                            if isinstance(parts, list) and len(parts) == 3:
-                                tuple_key = tuple(parts)
-                                self.state.subagent_metadata[tuple_key] = metadata
-                        except:
-                            continue
+                            if ":" in key_str:
+                                parts = key_str.split(":", 2)
+                            else:
+                                parts = (
+                                    ast.literal_eval(key_str)
+                                    if isinstance(key_str, str)
+                                    else key_str
+                                )
+
+                            if isinstance(parts, (list, tuple)) and len(parts) == 3:
+                                norm_key = f"{chat_id}:{parts[1]}:{parts[2]}"
+                                self.state.subagent_metadata[norm_key] = metadata
+                            else:
+                                self.state.subagent_metadata[str(key_str)] = metadata
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to reconstruct metadata key {key_str}: {e}"
+                            )
 
                 status_msg = (
                     f"Recovered state from {state_file.get('name', 'latest file')}"
@@ -4283,25 +4782,14 @@ class PlannerEngine:
             return
 
         try:
-            # Convert tuple keys (chat_id, sub_task_id, model_id) to strings for JSON
-            serialized_history = {}
-            for tuple_key, history in self.state.subagent_history.items():
-                if isinstance(tuple_key, (list, tuple)) and len(tuple_key) == 3:
-                    key_str = json.dumps(list(tuple_key))
-                    serialized_history[key_str] = history
-
             state_data = {
                 "tasks": {
                     tid: {"status": t.status, "description": t.description}
                     for tid, t in self.state.tasks.items()
                 },
                 "results": self.state.results,
-                "subagent_history": serialized_history,
-                "subagent_metadata": {
-                    json.dumps(list(k)): v
-                    for k, v in self.state.subagent_metadata.items()
-                    if isinstance(k, (list, tuple)) and len(k) == 3
-                },
+                "subagent_history": self.state.subagent_history,
+                "subagent_metadata": self.state.subagent_metadata,
             }
 
             filename = f"planner_state_{chat_id}.json"
@@ -4334,10 +4822,18 @@ class PlannerEngine:
                     target_msg_id = self.metadata.get("__message_id__")
 
                     if target_chat_id and target_msg_id:
+                        async with self._files_lock:
+                            # Add to the consolidated sync list
+                            self.produced_files.append(file_info)
+                            logger.info(f"State file queued for final sync: {filename}")
+
                         try:
                             # Direct DB update (same method used in Doodle Paint)
-                            Chats.add_message_files_by_id_and_message_id(
-                                target_chat_id, target_msg_id, [file_info]
+                            await asyncio.to_thread(
+                                Chats.add_message_files_by_id_and_message_id,
+                                target_chat_id,
+                                target_msg_id,
+                                [file_info],
                             )
                             logger.info(
                                 f"Successfully persisted state file to chat {target_chat_id} message {target_msg_id}"
@@ -4348,7 +4844,9 @@ class PlannerEngine:
                             )
 
                     # 3. Emit event for immediate UI feedback
-                    await emitter({"type": "files", "data": {"files": [file_info]}})
+                    await emitter(
+                        {"type": "chat:message:files", "data": {"files": [file_info]}}
+                    )
         except Exception as e:
             logger.error(f"Failed to save state to file: {e}")
 
@@ -4369,10 +4867,12 @@ class PlannerEngine:
         skill_ids, skill_prompt = await self.registry._resolve_model_skills(
             self.registry.pipe_metadata, tmp_params
         )
-        
+
         terminal_sys = ""
         enable_planner_terminal = user_valves.ENABLE_PLANNER_TERMINAL_ACCESS
-        is_terminal_agent_present = valves.ENABLE_TERMINAL_AGENT or valves.WORKSPACE_TERMINAL_MODELS
+        is_terminal_agent_present = (
+            valves.ENABLE_TERMINAL_AGENT or valves.WORKSPACE_TERMINAL_MODELS
+        )
         terminal_id = self.metadata.get("__metadata__", {}).get("terminal_id")
 
         if terminal_id and (enable_planner_terminal or not is_terminal_agent_present):
@@ -4651,6 +5151,13 @@ class PlannerEngine:
             )
             max_planner_iters = new_max
             if not can_continue:
+                # If we break due to limit, ensure final macros are resolved
+                total_emitted = Utils.resolve_references(
+                    total_emitted, self.state.results
+                )
+                self.total_emitted = total_emitted
+                await self._emit_replace(total_emitted)
+                yield total_emitted
                 break
 
             # (B) Execute Turn
@@ -4663,6 +5170,7 @@ class PlannerEngine:
                 user_valves,
                 external_tools_dict,
             )
+
             content, tc_dict, turn_emitted = (
                 turn_result["content"],
                 turn_result["tool_calls"],
@@ -4673,15 +5181,16 @@ class PlannerEngine:
 
             # Reasoning Promotion (v3 parity): Only if NO content AND NO tool calls (prevent double content)
             if not content and not tc_dict and turn_result.get("reasoning"):
-                content = f"Thinking: {turn_result['reasoning']}"
+                # v3.6: Clean promoted reasoning to avoid leaking tags or prefixes into the UI content area
+                reasoning_text = Utils.clean_thinking(turn_result["reasoning"])
+                content = reasoning_text
                 # Revert to turn_start_base to delete the thinking block from UI (v3 parity)
-                total_emitted = turn_start_base + content
+                total_emitted = turn_start_base + reasoning_text
                 self.total_emitted = total_emitted
-                await self._emit_replace(total_emitted)
-                yield ""  # Heartbeat
             elif content or tc_dict or turn_result.get("reasoning"):
-                # Ensure total_emitted is updated even if content is empty (v3 parity fix for reasoning stripping)
+                # v3.6: Ensure total_emitted is always synced from the turn's final state
                 total_emitted = turn_emitted
+                self.total_emitted = total_emitted
                 yield ""  # Heartbeat
 
             if not tc_dict:
@@ -4705,19 +5214,14 @@ class PlannerEngine:
                         judge_retries += 1
                         continue
 
-                # Final completion: resolve references in the last content, emit and return full process history
-                resolved_content = Utils.resolve_references(content, self.state.results)
-                # Replace only the last content segment in total_emitted with the resolved version
-                if content and resolved_content != content:
-                    # Replace the last occurrence of content in total_emitted
-                    idx = total_emitted.rfind(content)
-                    if idx != -1:
-                        total_emitted = (
-                            total_emitted[:idx]
-                            + resolved_content
-                            + total_emitted[idx + len(content) :]
-                        )
+                # Final completion: resolve references in the accumulated UI text
+                # v3.6: Resolve macros directly on total_emitted to avoid rfind failures due to chunk-based cleaning.
+                total_emitted = Utils.resolve_references(
+                    total_emitted, self.state.results
+                )
+
                 await self.ui.emit_status("Completed", True)
+
                 self.total_emitted = total_emitted
                 await self._emit_replace(total_emitted)
 
@@ -4789,7 +5293,10 @@ class PlannerEngine:
                 await self.ui.emit_status("Planner stopped by user.", True)
             except Exception as e:
                 logger.error(f"Iteration limit modal error: {e}")
+                await self.ui.emit_status("Planner stopped by iteration limit.", True)
                 return False, max_iters
+
+        await self.ui.emit_status("Planner reached iteration limit.", True)
         return False, max_iters
 
     async def _execute_planner_turn(
@@ -4835,9 +5342,7 @@ class PlannerEngine:
         )
         has_bi = bool(
             external_tools_dict
-            and any(
-                v.get("type") == "builtin" for v in external_tools_dict.values()
-            )
+            and any(v.get("type") == "builtin" for v in external_tools_dict.values())
         )
         await apply_native_completion_file_prep(
             request,
@@ -4886,15 +5391,13 @@ class PlannerEngine:
                         # Clean tool calls and stray tags from reasoning display
                         display = Utils.hide_tool_calls(reasoning_buffer)
                         display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
-                        display = "\n".join(
+                        display_quoted = "\n".join(
                             f"> {l}" if not l.startswith(">") else l
                             for l in display.splitlines()
                         )
                         self.total_emitted = (
                             total_emitted_base
-                            + '\n\n<details type="reasoning" done="false">\n<summary>Thinking...</summary>\n'
-                            + display
-                            + "\n</details>\n\n"
+                            + f'<details type="reasoning" done="false">\n<summary>Thinking\u2026</summary>\n{display_quoted}\n</details>\n'
                         )
                         await self._emit_replace(self.total_emitted)
 
@@ -4908,20 +5411,19 @@ class PlannerEngine:
                     )
                     display = Utils.hide_tool_calls(reasoning_buffer)
                     display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
-                    if display.strip():
-                        display = "\n".join(
-                            f"> {l}" if not l.startswith(">") else l
-                            for l in display.splitlines()
-                        )
-                        total_emitted_base += (
-                            f'\n\n<details type="reasoning" done="true" duration="{dur}">\n<summary>Thought for {dur} seconds</summary>\n'
-                            + display
-                            + "\n</details>\n\n"
-                        )
+                    display_quoted = "\n".join(
+                        f"> {l}" if not l.startswith(">") else l
+                        for l in display.splitlines()
+                    )
+                    sealed_reasoning = f'<details type="reasoning" done="true" duration="{dur}">\n<summary>Thought for {dur} seconds</summary>\n{display_quoted}\n</details>\n'
+                    total_emitted_base += sealed_reasoning
                     reasoning_buffer = ""
                     self.total_emitted = total_emitted_base + "".join(content_chunks)
-                    # Use replace to transition from reasoning block to content
-                    await self._emit_replace(self.total_emitted)
+
+                    # v3.15: Reasoning Seal. We MUST issue a structural 'replace' exactly once to seal the block.
+                    # If we're entering content, we skip this and bundle the seal into the first chunk below.
+                    if etype != "content":
+                        await self._emit_replace(self.total_emitted)
 
                 if etype == "content":
                     text = event["text"]
@@ -4932,17 +5434,21 @@ class PlannerEngine:
                     new_total = total_emitted_base + display_content
 
                     if new_total != self.total_emitted:
-                        # Only emit if the visible content actually changed
-                        delta = new_total[len(self.total_emitted) :]
-                        if delta and not Utils.THINKING_TAG_CLEANER_PATTERN.search(
-                            text
-                        ):
-                            # Efficient delta append
-                            await self._emit_message(delta)
-                        else:
-                            # Something complex happened (e.g. tag closed/opened), use replace
+                        # v3.6/v3.15 Optimized Streaming: Determine if we need a full replace (structural change) 
+                        # or can use a silent append delta (performance).
+                        delta = new_total[len(self.total_emitted):]
+                        
+                        # Use replace for FIRST chunk after reasoning seal OR if we detect complex thinking tags
+                        is_transition = total_emitted_base in new_total and total_emitted_base not in self.total_emitted
+                        is_complex = Utils.THINKING_TAG_CLEANER_PATTERN.search(text)
+                        
+                        if is_transition or is_complex:
+                            self.total_emitted = new_total
                             await self._emit_replace(new_total)
-                        self.total_emitted = new_total
+                        else:
+                            # Efficient append-only delta
+                            self.total_emitted = new_total
+                            await self._emit_message(delta)
                 elif etype == "tool_calls":
                     for tc in event["data"]:
                         idx = tc["index"]
@@ -4978,16 +5484,11 @@ class PlannerEngine:
             )
             display = Utils.hide_tool_calls(reasoning_buffer)
             display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
-            if display.strip():
-                display = "\n".join(
-                    f"> {l}" if not l.startswith(">") else l
-                    for l in display.splitlines()
-                )
-                total_emitted_base += (
-                    f'\n\n<details type="reasoning" done="true" duration="{dur}">\n<summary>Thought for {dur} seconds</summary>\n'
-                    + display
-                    + "\n</details>\n\n"
-                )
+            display_quoted = "\n".join(
+                f"> {l}" if not l.startswith(">") else l for l in display.splitlines()
+            )
+            sealed_reasoning = f'<details type="reasoning" done="true" duration="{dur}">\n<summary>Thought for {dur} seconds</summary>\n{display_quoted}\n</details>\n'
+            total_emitted_base += sealed_reasoning
 
         content, reasoning = "".join(content_chunks), "".join(reasoning_chunks)
 
@@ -5003,8 +5504,8 @@ class PlannerEngine:
             "tool_calls": tc_dict,
             "reasoning": reasoning,
             "raw_content": "".join(content_chunks),
-            "total_emitted": total_emitted_base + content,
-            "turn_start_base": total_emitted,
+            "total_emitted": self.total_emitted,
+            "turn_start_base": total_emitted_base,
             "error": error_occurred,
         }
 
@@ -5152,6 +5653,7 @@ class PlannerEngine:
         )
 
         tool_res = ""
+        tc_files = []
         try:
             match func_name:
                 case "update_state":
@@ -5167,7 +5669,7 @@ class PlannerEngine:
                 case "read_task_result":
                     tool_res = self.tools.read_task_result(resolved_args)
                 case "review_tasks":
-                    tool_res = await self.tools.review_tasks(
+                    tool_res = self.tools.review_tasks(
                         resolved_args, valves, body, user_obj
                     )
                 case name if name in external_tools_dict:
@@ -5193,7 +5695,6 @@ class PlannerEngine:
                     )
                     # Handle multiple return values (str, files, embeds)
                     res_str = ""
-                    tc_files = []
                     if isinstance(tc_return, tuple):
                         if len(tc_return) >= 2:
                             r_val, tc_files = tc_return[:2]
@@ -5260,7 +5761,7 @@ class PlannerEngine:
 
         # Update UI to "Done" status for THIS tool call
         done_tag = self.ui.build_tool_call_details(
-            call_id, func_name, args_str, done=True, result=tool_res
+            call_id, func_name, args_str, done=True, result=tool_res, files=tc_files
         )
 
         # Real-time UI updates for parallel mode
@@ -5318,6 +5819,7 @@ class PlannerEngine:
             preview = result[:300] + "..." if len(result) > 300 else result
             results_summary.append(f"  @{tid}: {preview}")
 
+        appended_summary = False
         results_block = ""
         if results_summary:
             results_block = (
@@ -5325,6 +5827,8 @@ class PlannerEngine:
                 + "\n".join(results_summary)
                 + "\n\n"
             )
+            exec_history.append({"role": "system", "content": results_block})
+            appended_summary = True
 
         judge_msg = (
             f"{results_block}"
@@ -5338,13 +5842,21 @@ class PlannerEngine:
             f"Respond with a JSON object following the schema exactly."
         )
 
-        if not exec_history or exec_history[-1].get("content") != content:
-            exec_history.append({"role": "assistant", "content": content})
+        # v3.6.8: Use a copy to avoid mutating the core execution history in place
+        # and prevent 'assistant' -> 'assistant' invariant violations if retrying.
+        msgs = copy.deepcopy(exec_history)
+        if not msgs or msgs[-1].get("role") != "assistant":
+            msgs.append({"role": "assistant", "content": content})
+        else:
+            # If the last message is already assistant, update the copy's content
+            if msgs[-1].get("content") != content:
+                msgs[-1]["content"] = content
 
+        # v3.6.8: Use msgs for the judge call
         judge_body = {
             **body,
             "model": valves.REVIEW_MODEL or valves.PLANNER_MODEL,
-            "messages": exec_history + [{"role": "user", "content": judge_msg}],
+            "messages": msgs + [{"role": "user", "content": judge_msg}],
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -5438,19 +5950,17 @@ class PlannerEngine:
                         # If judge proposed a follow-up, show its reasoning as a "Thought" block (v3/v4 hybrid)
                         if reasoning.strip():
                             dur = round(time.monotonic() - reasoning_start_time)
-                            display = "\n".join(
+                            display_quoted = "\n".join(
                                 f"> {l}" if not l.startswith(">") else l
                                 for l in reasoning.splitlines()
                             )
-                            total_emitted += (
-                                f'\n\n<details type="reasoning" done="true" duration="{dur}">\n<summary>Judge Verification Feedback</summary>\n'
-                                + display
-                                + "\n</details>\n\n"
-                            )
+                            total_emitted += f'<details type="reasoning" done="true" duration="{dur}">\n<summary>Judge Verification Feedback</summary>\n{display_quoted}\n</details>\n'
 
                         await self.ui.emit_status(
                             "Continuing based on judge feedback..."
                         )
+                        if appended_summary and exec_history:
+                            exec_history.pop()
                         return True, total_emitted
                     break
                 else:
@@ -5475,11 +5985,7 @@ class PlannerEngine:
                     logger.warning(f"Judge verification failed after retries: {e}")
                     break
 
-        if (
-            exec_history
-            and exec_history[-1]["role"] == "assistant"
-            and not exec_history[-1].get("tool_calls")
-        ):
+        if appended_summary and exec_history:
             exec_history.pop()
 
         # Revert: Don't prepend here; let PlannerEngine.run handle it once.
@@ -5592,8 +6098,12 @@ Your goal is to fulfill the user's request.""",
             description="Model for the code interpreter agent, works best with a Base Model (not workspace presets) | (leave blank to use the planner model)",
         )
         CODE_INTERPRETER_TEMPERATURE: float = Field(
-            default=0.1,
+            default=0.3,
             description="Temperature for the code interpreter subagent. Low values (0.0-0.2) produce more deterministic, accurate code.",
+        )
+        SUBAGENT_TIMEOUT: int = Field(
+            default=1200,
+            description="Timeout in seconds for subagent turns, tool calls, and resolution. Increase for extremely long reasoning models (DeepSeek-R1, Kimi k2.5).",
         )
 
     class UserValves(BaseModel):
@@ -5634,6 +6144,19 @@ Your goal is to fulfill the user's request.""",
     def pipes(self) -> list[dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
 
+    async def _ui_worker(self, queue: asyncio.Queue, emitter: Callable):
+        """Processes UI events and emits them sequentially to the real emitter."""
+        while True:
+            event = await queue.get()
+            try:
+                # v3.6.5: Sequential emission with high-speed 2.0s watchdog to prevent client-hangs from blocking the worker
+                async with asyncio.timeout(2.0):
+                    await emitter(event)
+            except (asyncio.TimeoutError, Exception) as e:
+                pass  # Drop failed/timed-out emissions (client disconnected or pipe saturated)
+            finally:
+                queue.task_done()
+
     async def pipe(
         self,
         body: dict,
@@ -5665,7 +6188,10 @@ Your goal is to fulfill the user's request.""",
             if isinstance(__user__, dict)
             else getattr(__user__, "valves", None)
         ) or self.UserValves()
-        ui = UIRenderer(__event_emitter__, __event_call__)
+        # v3.6.5 Structural Overhaul: Initialize Producer-Consumer Queues
+        ui_queue = asyncio.Queue()
+
+        ui = UIRenderer(__event_emitter__, __event_call__, ui_queue=ui_queue)
         # Ensure __files__ is a list to handle new attachments during the turn
         if __files__ is None:
             __files__ = []
@@ -5681,8 +6207,14 @@ Your goal is to fulfill the user's request.""",
         )
         message_id = __message_id__ or pipe_metadata.get("message_id")
 
-        # Resolve full user object (v3 parity)
-        user_obj = Users.get_user_by_id(__user__.get("id"))
+        # 1. Resolve full user object and pre-fetch accessible skills (v3.15 optimization)
+        # Fetch skills once here to avoid redundant synchronous DB hits in the loop.
+        user_id = __user__.get("id")
+        user_obj, user_skills = await asyncio.gather(
+            asyncio.to_thread(Users.get_user_by_id, user_id),
+            asyncio.to_thread(Skills.get_skills_by_user_id, user_id, "read"),
+        )
+        accessible_skills = {s.id: s for s in user_skills if s.is_active}
 
         # Comprehensive metadata for engine components (v3 parity + internal objects)
         metadata = {
@@ -5692,6 +6224,7 @@ Your goal is to fulfill the user's request.""",
             "__event_emitter__": __event_emitter__,
             "__event_call__": __event_call__,
             "__user_obj__": user_obj,
+            "__user_skills__": accessible_skills,
             "__files__": __files__,
             "__chat_id__": chat_id,
             "__message_id__": message_id,
@@ -5717,8 +6250,18 @@ Your goal is to fulfill the user's request.""",
 
         # Life cycle: Step 1: Create engine shell (without subagents/registry yet)
         engine = PlannerEngine(
-            ui, state=None, subagents=None, registry=None, metadata=metadata, model_knowledge=model_knowledge
+            ui,
+            state=None,
+            subagents=None,
+            registry=None,
+            metadata=metadata,
+            valves=self.valves,
+            model_knowledge=model_knowledge,
         )
+
+        # Wire the engine reference back into the QueueEmitter for tool event interception
+        if hasattr(ui.emitter, "engine"):
+            ui.emitter.engine = engine
 
         # Life cycle: Step 2: Create state and registry (using engine tracker)
         state = PlannerState()
@@ -5730,6 +6273,7 @@ Your goal is to fulfill the user's request.""",
             model_knowledge=model_knowledge,
             planner_info=planner_info,
             mcp_handler=engine.get_or_create_mcp_client,
+            user_skills=accessible_skills,
         )
 
         # Life cycle: Step 3: Create subagents (using engine tracker)
@@ -5741,8 +6285,13 @@ Your goal is to fulfill the user's request.""",
             base_url=base_url,
             model_knowledge=model_knowledge,
             mcp_handler=engine.get_or_create_mcp_client,
+            registry=registry,
+            engine=engine,
         )
-        
+
+        # Life cycle: Step 3.1: Start Background Consumption Workers
+        ui_worker = asyncio.create_task(self._ui_worker(ui_queue, __event_emitter__))
+
         # Life cycle: Step 4: Link components
         engine.subagents = subagents
         engine.registry = registry
@@ -5750,6 +6299,8 @@ Your goal is to fulfill the user's request.""",
 
         # Use a generator to keep the SSE stream active and the "Exploring" status valid
         try:
+            # v3.6: Add a background "Keep-Alive" task to ensure the generator yields periodically
+            # even if complex tools are running in the background.
             async for delta in engine.run(
                 chat_id, self.valves, self.user_valves, body, __files__
             ):
@@ -5758,6 +6309,9 @@ Your goal is to fulfill the user's request.""",
             # Lifecycle cleanup: Ensure all subagents and MCP connections are terminated
             # when the pipe generator is stopped/cancelled.
             try:
+                # 1. Stop workers
+                ui_worker.cancel()
+
                 await engine.stop()
             except Exception as e:
                 logger.debug(f"Error during engine.stop() in pipe finally: {e}")
