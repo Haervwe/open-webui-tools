@@ -3222,8 +3222,8 @@ class SubagentManager:
         Main entry point for subagent execution.
         Resolves task persistence, prepares context, and runs the tool-calling loop.
         """
-        # UI Parity: Emit "Consulting..." immediately upon entry to subagent phase
-        await self.ui.emit_status(f"Consulting {model_id}...")
+        # UI Parity: Removed individual "Consulting..." here as requested by user.
+        # It's now handled by consolidation in the parent or by tool-specific status below.
 
         # 1. Prepare Context
         context = await self._prepare_subagent_context(
@@ -3492,6 +3492,7 @@ class SubagentManager:
                         history,
                         sub_called_tools,
                         model_id,
+                        task_id,
                         sub_history_lock,
                     )
                     for stc in tool_calls_list
@@ -3518,11 +3519,11 @@ class SubagentManager:
                         history,
                         sub_called_tools,
                         model_id,
+                        task_id,
                         sub_history_lock,
                     )
 
-                # Clear status after tool execution to avoid "hang"
-                await self.ui.emit_status(f"Consulting {model_id}...")
+        await self.ui.emit_status(f"Agent {model_id} completed {task_id}.")
 
         final_result = "\n".join(sub_final_answer_chunks).strip()
         self.state.store_result(task_id, final_result)
@@ -3563,6 +3564,7 @@ class SubagentManager:
         history: list,
         sub_called_tools: dict[str, int],
         model_id: str,
+        task_id: str,
         history_lock: Optional[asyncio.Lock] = None,
     ) -> None:
         """Helper to execute a single subagent tool call."""
@@ -3583,6 +3585,7 @@ class SubagentManager:
                 history,
                 sub_called_tools,
                 model_id,
+                task_id,
                 history_lock,
             )
         else:
@@ -3811,6 +3814,7 @@ class SubagentManager:
         history: list,
         sub_called_tools: dict[str, int],
         model_id: str,
+        task_id: str,
         history_lock: Optional[asyncio.Lock] = None,
     ) -> None:
         """Executes a single subagent tool call and updates history/states."""
@@ -3820,9 +3824,7 @@ class SubagentManager:
         res_content = ""
         try:
             # UI Parity: Emit status and tool call details
-            await self.ui.emit_status(f"[Subagent: {model_id}] Executing {name}...")
-            # We don't strictly need tc_tag here as in planner,
-            # but we follow v3's internal logging/status pattern.
+            await self.ui.emit_status(f"[{task_id}] Executing {name}...")
 
             # Inject metadata variables for tools that support them (v3.5 robustness)
             # This ensures builtin tools like generate_image can emit files/status.
@@ -4469,6 +4471,9 @@ class PlannerEngine:
             yield ""  # Heartbeat
 
         # 2. Phase 2: Execution & Verification Loop
+        if not user_valves.PLAN_MODE:
+            await self.ui.emit_status("Working...")
+
         # v3.5: Execution Loop Phase with real-time UI streaming
         async for delta in self._phase_execution_loop(
             chat_id, valves, user_valves, user_obj, body
@@ -4595,6 +4600,11 @@ class PlannerEngine:
                     logger.error(f"[Planner] Delayed sync failed: {e}")
 
             asyncio.create_task(_delayed_sync())
+
+        # We yield the final content as the last token
+        # v3.15: Terminal status emission. 
+        # We call this BEFORE yielding the final content to ensure the UI captures it.
+        await self.ui.emit_status("Task completed.", done=True)
 
         # We yield the final content as the last token
         # For Pipes, this is the most stable way to ensure the final save includes all text.
@@ -5224,7 +5234,8 @@ class PlannerEngine:
                     total_emitted, self.state.results
                 )
 
-                await self.ui.emit_status("Completed", True)
+                # Ensure UI continues spinning until the entire PlannerEngine.run finishes
+                await self.ui.emit_status("Working...")
 
                 self.total_emitted = total_emitted
                 await self._emit_replace(total_emitted)
@@ -5557,6 +5568,11 @@ class PlannerEngine:
         yield ""  # Heartbeat
 
         # 2. Sequential or Parallel execution
+        subagent_calls = [tc for tc in tool_calls if tc["function"]["name"] == "call_subagent"]
+        self.metadata["__consolidated__"] = valves.PARALLEL_TOOL_EXECUTION and len(subagent_calls) > 1
+        if self.metadata["__consolidated__"]:
+            await self.ui.emit_status(f"Consulting {len(subagent_calls)} agents...")
+
         if valves.PARALLEL_TOOL_EXECUTION:
             # Parallel execution with real-time UI updates via Pydantic model
             ui_state = UIState(total_emitted=total_emitted)
@@ -5623,7 +5639,9 @@ class PlannerEngine:
                 await self._emit_replace(total_emitted)
                 yield ""  # Heartbeat
 
-        await self.ui.emit_status("Planner evaluating...")
+        # Clear the consolidation flag after the tool batch completes
+        self.metadata.pop("__consolidated__", None)
+        await self.ui.emit_status("Working...")
         yield total_emitted
         return
 
