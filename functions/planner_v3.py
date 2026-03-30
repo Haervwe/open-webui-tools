@@ -1651,18 +1651,14 @@ class UIRenderer:
     ) -> str:
         """Constructs the HTML for a tool call to be embedded in the chat message (v3 parity)."""
         args_escaped = html_module.escape(arguments)
-        if done:
-            result_text = (
-                result
-                if isinstance(result, str)
-                else json.dumps(result or "", ensure_ascii=False)
-            )
         result_str = str(result) if result is not None else ""
         res_escaped = html_module.escape(result_str)
 
-        # Format files/embeds as JSON if present
-        files_json = json.dumps(files) if files else ""
-        embeds_json = json.dumps(embeds) if embeds else ""
+        # v3.15: CRITICAL FIX. We must escape JSON strings for HTML attributes (parity with plan block).
+        files_escaped = html_module.escape(json.dumps(files)) if files else ""
+        embeds_escaped = (
+            html_module.escape(json.dumps(embeds, ensure_ascii=False)) if embeds else ""
+        )
 
         # Default summary for the expanded view
         default_summary = "Tool Executed"
@@ -1672,7 +1668,7 @@ class UIRenderer:
         return (
             f'<details type="tool_calls" done="{"true" if done else "false"}" id="{call_id}" '
             f'name="{name}" arguments="{args_escaped}" result="{res_escaped}" '
-            f"files='{files_json}' embeds='{embeds_json}' duration=\"{duration}\">\n"
+            f'files="{files_escaped}" embeds="{embeds_escaped}" duration="{duration}">\n'
             f"<summary>{default_summary}</summary>\n</details>\n"
         )
 
@@ -3880,33 +3876,27 @@ class SubagentManager:
                 user_obj,
             )
 
+            # Step 1: Unpack result, files, and embeds
             tc_files = []
             tc_embeds = []
-            # Handle multiple return values (tuple: str/dict, files, embeds)
+            r_val = tc_return
             if isinstance(tc_return, tuple):
-                # process_tool_result is guaranteed to return (result, files, embeds)
                 r_val, tuple_files, tc_embeds = tc_return
                 if tuple_files:
                     tc_files.extend(tuple_files)
-                if isinstance(r_val, dict):
-                    res_content = (
-                        json.dumps(r_val, ensure_ascii=False)
-                        if len(str(r_val)) < 1000
-                        else r_val.get("description", str(r_val))
-                    )
-                else:
-                    res_content = str(r_val) if r_val is not None else ""
-            else:
-                if isinstance(tc_return, dict):
-                    res_content = (
-                        json.dumps(tc_return, ensure_ascii=False)
-                        if len(str(tc_return)) < 1000
-                        else tc_return.get("description", str(tc_return))
-                    )
-                else:
-                    res_content = str(tc_return) if tc_return is not None else ""
 
-            # Emit embeds via the specialized queue emitter for subagents (v3.15)
+            # Step 2: Extract clean history content for the LLM (v3.15)
+            # We respect UI components by extracting the 'message' field.
+            if isinstance(r_val, dict):
+                res_content = (
+                    r_val.get("message")
+                    or r_val.get("description")
+                    or json.dumps(r_val, ensure_ascii=False)
+                )
+            else:
+                res_content = str(r_val) if r_val is not None else ""
+
+            # Step 3: Emit embeds to the UI (v3.15 parity: Metadata-based only if not part of main UI)
             if tc_embeds and self.queue_emitter:
                 await self.queue_emitter(
                     {
@@ -3917,7 +3907,7 @@ class SubagentManager:
                     }
                 )
 
-            # Accumulate files for final consolidated persistence sync at the end of engine.run()
+            # Accumulate files for final consolidated persistence sync
             if tc_files and self.engine:
                 async with self.engine._files_lock:
                     self.engine.produced_files.extend(tc_files)
@@ -5738,27 +5728,25 @@ class PlannerEngine:
                         user_obj,
                     )
 
-                    # Handle multiple return values (tuple: str/dict, files, embeds)
+                    # Handle multiple return values (tuple: str/dict, files, embeds) (v3.15)
                     res_str = ""
                     tc_embeds = []
+                    r_val = tc_return
                     if isinstance(tc_return, tuple):
-                        # process_tool_result is guaranteed to return (result, files, embeds)
                         r_val, tc_files, tc_embeds = tc_return
-                        res_str = str(r_val) if r_val is not None else ""
-                    else:
-                        res_str = str(tc_return) if tc_return is not None else ""
 
-                    # Emit embeds via the direct UI emitter for main planner (v3.15)
-                    emitter = self.ui.emitter
-                    if tc_embeds and emitter:
-                        await emitter(
-                            {
-                                "type": "embeds",
-                                "data": {
-                                    "embeds": tc_embeds,
-                                },
-                            }
+                    # Extract clean history content for the LLM (v3.15 parity with subagents)
+                    if isinstance(r_val, dict):
+                        res_str = (
+                            r_val.get("message")
+                            or r_val.get("description")
+                            or json.dumps(r_val, ensure_ascii=False)
                         )
+                    else:
+                        res_str = str(r_val) if r_val is not None else ""
+
+                    # v3.15: Embed emission is handled via the HTML tool_calls tag (done_tag) below.
+                    # This ensures consistency with the "Execution Plan" UI pattern.
 
                     # Persistence & Visibility (v3.5)
                     if tc_files:
@@ -5818,8 +5806,15 @@ class PlannerEngine:
             )
 
         # Update UI to "Done" status for THIS tool call
+        # v3.15: Include embeds derived from process_tool_result to match Plan pattern.
         done_tag = self.ui.build_tool_call_details(
-            call_id, func_name, args_str, done=True, result=tool_res, files=tc_files
+            call_id,
+            func_name,
+            args_str,
+            done=True,
+            result=tool_res,
+            files=tc_files,
+            embeds=tc_embeds if "tc_embeds" in locals() else None,
         )
 
         # Real-time UI updates for parallel mode
