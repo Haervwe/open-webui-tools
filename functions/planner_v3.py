@@ -215,6 +215,7 @@ class PlannerContext(BaseModel):
     valves: Any
     user_valves: Any
     body: dict[str, Any]
+    planner_info: dict[str, Any]
     model_knowledge: Optional[list[dict]] = None
     chat_id: str
     message_id: Optional[str] = None
@@ -2108,13 +2109,6 @@ class MCPHub:
                 await info["proxy"].disconnect()
             self.mcp_clients.clear()
 
-    def set_metadata(
-        self, chat_id: str, sub_task_id: str, model_id: str, metadata: dict[str, Any]
-    ) -> None:
-        # v3.15: Standardize on JSON array keys for robustness
-        key = json.dumps([chat_id, sub_task_id, model_id], ensure_ascii=False)
-        self._subagent_metadata[key] = metadata
-
 
 class StreamableHTTPMCPClient:
     """
@@ -2198,7 +2192,7 @@ class ToolRegistry:
         self.request = context.request
         self.pipe_metadata = context.metadata
         self.model_knowledge = context.model_knowledge
-        self.planner_info = context.metadata.get("__metadata__", {})
+        self.planner_info = context.planner_info
         self.planner_features = (
             self.planner_info.get("info", {}).get("meta", {}).get("features", {})
         )
@@ -3430,7 +3424,12 @@ class SubagentManager:
         self.request = context.request
         self.user = context.user
         self.model_knowledge = context.model_knowledge
-        self.base_url = str(context.request.url).split("/api")[0]
+        # Resolve base URL (Valve -> Env -> Request)
+        self.base_url = self.valves.OPEN_WEBUI_URL
+        if not self.base_url:
+            self.base_url = os.environ.get("WEBUI_URL", "")
+        if not self.base_url:
+            self.base_url = str(context.request.base_url).rstrip("/")
         self.queue_emitter = ui.emitter  # Already a QueueEmitter in structural overhaul
         self.registry = registry
         self.engine = engine
@@ -4664,6 +4663,7 @@ class PlannerEngine:
         self.registry = registry
         self.metadata = context.metadata
         self.valves = context.valves
+        self.model_knowledge = context.model_knowledge
 
         self.state_persistence = StatePersistence(context, state, ui)
         self.mcp_hub = MCPHub(context.valves)
@@ -6287,7 +6287,6 @@ Your goal is to fulfill the user's request.""",
         # v3.6.5 Structural Overhaul: Initialize Producer-Consumer Queues
         ui_queue = asyncio.Queue()
 
-        ui = UIRenderer(__event_emitter__, __event_call__, ui_queue=ui_queue)
         # Ensure __files__ is a list to handle new attachments during the turn
         if __files__ is None:
             __files__ = []
@@ -6354,6 +6353,7 @@ Your goal is to fulfill the user's request.""",
             valves=self.valves,
             user_valves=self.user_valves,
             body=body,
+            planner_info=planner_info,
             model_knowledge=model_knowledge,
             chat_id=chat_id,
             message_id=message_id,
@@ -6386,6 +6386,10 @@ Your goal is to fulfill the user's request.""",
         # Link components together
         registry.engine = engine
         subagents.engine = engine
+
+        # Wire engine to emitter for file tracking parity
+        if hasattr(ui.emitter, "engine"):
+            ui.emitter.engine = engine
 
         # Life cycle: Step 3.1: Start Background Consumption Workers
         ui_worker = asyncio.create_task(self._ui_worker(ui_queue, __event_emitter__))
