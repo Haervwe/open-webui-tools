@@ -402,7 +402,6 @@ async def planner_merge_mcp_tools_from_ids(
             server_id = tool_id[len("server:mcp:") :]
         elif tool_id.startswith("mcp:"):
             server_id = tool_id[len("mcp:") :]
-        else:
             # v3.6.8: Optimize by skipping unknown IDs faster if we have many connections
             mcp_connections = getattr(
                 request.app.state.config, "TOOL_SERVER_CONNECTIONS", []
@@ -495,14 +494,25 @@ async def planner_merge_mcp_tools_from_ids(
 
             if ENABLE_FORWARD_USER_INFO_HEADERS and user:
                 headers = include_user_info_headers(headers, user)
-                if metadata and metadata.get("chat_id"):
-                    headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata.get(
-                        "chat_id"
-                    )
-                if metadata and metadata.get("message_id"):
-                    headers[FORWARD_SESSION_INFO_HEADER_MESSAGE_ID] = metadata.get(
-                        "message_id"
-                    )
+                # v3.15: Support both original and double-underscore prefixed session keys
+                # Check both metadata (inner) and extra_params (wide) for resilience
+                cid = None
+                if isinstance(metadata, dict):
+                    cid = metadata.get("chat_id") or metadata.get("__chat_id__")
+                if not cid and isinstance(extra_params, dict):
+                    cid = extra_params.get("chat_id") or extra_params.get("__chat_id__")
+
+                if cid:
+                    headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = cid
+
+                mid = None
+                if isinstance(metadata, dict):
+                    mid = metadata.get("message_id") or metadata.get("__message_id__")
+                if not mid and isinstance(extra_params, dict):
+                    mid = extra_params.get("message_id") or extra_params.get("__message_id__")
+
+                if mid:
+                    headers[FORWARD_SESSION_INFO_HEADER_MESSAGE_ID] = mid
 
             if mcp_handler is not None:
                 client = await mcp_handler(
@@ -2701,6 +2711,9 @@ class ToolRegistry:
         extra_params: dict[str, Any],
     ) -> dict[str, Any]:
         """Fetches tools for subagents, ensuring builtin tools (image gen, search, etc.) are loaded for virtual agents."""
+        # v3.15: Shallow copy extra_params to prevent cross-turn / parallel side effects during resolution
+        extra_params = copy.copy(extra_params)
+
         # v3.6: Lazy-init resolution lock for robustness against stale instances
         if not hasattr(self, "_resolution_lock"):
             self._resolution_lock = asyncio.Lock()
@@ -2889,6 +2902,15 @@ class ToolRegistry:
                     "__messages__": [],
                     "__files__": self.pipe_metadata.get("files") or [],
                 }
+                # v3.15: Extra parameters for MCP: Model-specific tools and file context parity
+                extra_mcp_sub = {
+                    **extra_params,
+                    "__model__": model_ws,
+                    "__messages__": [],
+                    "__files__": self.pipe_metadata.get("files") or [],
+                }
+                # v3.15: Pass the inner metadata and the wide extra_mcp_sub context.
+                # headers will now be correctly derived in planner_merge_mcp_tools_from_ids by checking extra_mcp_sub.
                 mcp_sub = await planner_merge_mcp_tools_from_ids(
                     self.request,
                     self.user,
@@ -2896,7 +2918,7 @@ class ToolRegistry:
                     self.pipe_metadata,
                     extra_mcp_sub,
                     extra_params.get("__event_emitter__"),
-                    mcp_handler=self.engine.mcp_hub.get_or_create_client,
+                    mcp_handler=self.engine.mcp_hub.get_or_create_client if self.engine and self.engine.mcp_hub else None,
                 )
                 if mcp_sub:
                     s_tools_dict.update(mcp_sub)
