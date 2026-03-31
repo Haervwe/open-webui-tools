@@ -34,8 +34,7 @@ Requirements (Open WebUI parity):
 
 Known Issues:
 - Filter for subagents are not tested.
-- Parallel subagents in the same environment that manage files on the same environment (Code intepreter / terminal agents)
-  concurrently may inherently cause issues.
+- Parallel subagents managing files on the same environment (Code intepreter / terminal agents) concurrently may inherently cause issues.
 - Parallel subagents in local environments that require loading and unloading another external models (Local LLMs + Comfyui)risk OOM errors.
 """
 import ast
