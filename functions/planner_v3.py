@@ -1138,7 +1138,6 @@ class Utils:
         Returns:
             str: Text with references resolved.
         """
-        """Replace @task_id references with their full content, skipping matches inside <details> blocks."""
         if not text or not isinstance(text, str):
             return text
 
@@ -1172,7 +1171,6 @@ class Utils:
         Returns:
             Any: Data with references resolved.
         """
-        """Recursively resolve @task_id references in strings within a dict or list."""
         if isinstance(data, str):
             if "@" not in data:
                 return data
@@ -1188,7 +1186,6 @@ class Utils:
                 Utils.resolve_dict_references(item, results, skip_keys) for item in data
             ]
         elif isinstance(data, dict):
-            # Resolve values but skip keys that identify tasks
             return {
                 k: (
                     v
@@ -1199,6 +1196,76 @@ class Utils:
                 if v is not None
             }
         return data
+
+    @staticmethod
+    def resolve_env_placeholders(data: Any, env: dict[str, str]) -> Any:
+        """
+        Recursively resolve {PLACEHOLDER} environment variables.
+        Args:
+            data (Any): Data structure (str, list, dict).
+            env (dict): Environment placeholders for lazy replacement.
+        Returns:
+            Any: Data with placeholders resolved.
+        """
+        if not env:
+            return data
+        if isinstance(data, str):
+            if "{" not in data:
+                return data
+
+            # Special treatment for OPEN_WEBUI_URL to handle join sanitization (repeating/missing slashes + whitespaces)
+            base_url = env.get("{OPEN_WEBUI_URL}", "")
+            # Collapses {OPEN_WEBUI_URL} [spaces] [/] into [base_url]/
+            data = re.sub(r"\{OPEN_WEBUI_URL\}\s*/*", f"{base_url}/", data)
+
+            for key, val in env.items():
+                if key == "{OPEN_WEBUI_URL}":
+                    continue
+                data = data.replace(key, val)
+            return data
+        elif isinstance(data, list):
+            return [Utils.resolve_env_placeholders(item, env) for item in data]
+        elif isinstance(data, dict):
+            return {k: Utils.resolve_env_placeholders(v, env) for k, v in data.items()}
+        return data
+
+    @staticmethod
+    def get_env_placeholders(request: Request, valves: Any) -> dict[str, str]:
+        """Extracts authentication and environment info for lazy placeholder replacement."""
+        token = ""
+        if request and hasattr(request, "headers"):
+            cookie_header = request.headers.get("cookie", "")
+            token_match = re.search(r"token=([^;]+)", cookie_header)
+            if token_match:
+                token = token_match.group(1).strip()
+            if not token:
+                auth_header = request.headers.get("authorization", "")
+                if auth_header.lower().startswith("bearer "):
+                    token = auth_header[7:].strip()
+
+        base_url = valves.OPEN_WEBUI_URL
+        if not base_url:
+            base_url = os.environ.get("WEBUI_URL", "")
+        if base_url:
+            base_url = str(base_url).rstrip("/")
+        if not base_url:
+            # v3.15: Fallback to request host
+            try:
+                base_url = str(request.base_url).rstrip("/")
+            except Exception:
+                base_url = ""
+
+        curl_headers = ""
+        if token:
+            curl_headers = f'-H "Authorization: Bearer {token}" --cookie "token={token}"'
+
+        return {
+            "{OPEN_WEBUI_TOKEN}": token,
+            "{OPEN_WEBUI_URL}": base_url,
+            "{OPEN_WEBUI_HEADERS}": curl_headers,
+            "{OPENWEBUI_HEADERS}": curl_headers,
+            "{OPENWEBUI HEADERS}": curl_headers,
+        }
 
     @staticmethod
     def extract_json_array(text: str) -> list:
@@ -2380,68 +2447,29 @@ class ToolRegistry:
             logger.error(f"Failed to load filtered built-in tools: {e}")
             return {}
 
-    def get_tools_spec(
-        self, available_tasks: list[Any] = None
+    def _get_planner_internal_tool_specs(
+        self, subagents_list: list[str] = None
     ) -> list[dict[str, Any]]:
+        """Returns the function specifications for internal planner tools."""
         user_valves = self.context.user_valves
         plan_mode = user_valves.PLAN_MODE
         truncation = user_valves.TASK_RESULT_TRUNCATION
-        user_input_enabled = user_valves.ENABLE_USER_INPUT_TOOLS
-        # 1. Virtual Subagents: Always included if enabled in valves
-        virtual_model_ids = []
-        if getattr(self.valves, "ENABLE_IMAGE_GENERATION_AGENT", True):
-            virtual_model_ids.append("image_gen_agent")
-        if getattr(self.valves, "ENABLE_WEB_SEARCH_AGENT", True):
-            virtual_model_ids.append("web_search_agent")
-        if getattr(self.valves, "ENABLE_KNOWLEDGE_AGENT", True):
-            virtual_model_ids.append("knowledge_agent")
-        if getattr(self.valves, "ENABLE_CODE_INTERPRETER_AGENT", True):
-            virtual_model_ids.append("code_interpreter_agent")
-
-        # Terminal agent requires BOTH enablement and a terminal session
-        if getattr(
-            self.valves, "ENABLE_TERMINAL_AGENT", True
-        ) and self.pipe_metadata.get("terminal_id"):
-            virtual_model_ids.append("terminal_agent")
-
-        # 2. Extra Subagents: from SUBAGENT_MODELS list
-        subagents_list = (
-            self.valves.SUBAGENT_MODELS.split(",")
-            if self.valves.SUBAGENT_MODELS
-            else []
-        )
-
-        # Merge, unique, preserve order
-        final_subagents = []
-        for vid in virtual_model_ids:
-            if vid not in final_subagents:
-                final_subagents.append(vid)
-        for sid in subagents_list:
-            sid = sid.strip()
-            if sid and sid not in final_subagents:
-                final_subagents.append(sid)
-
-        # 3. Workspace Terminal Overrides: from WORKSPACE_TERMINAL_MODELS list
-        workspace_terminal_models = [
-            m.strip()
-            for m in self.valves.WORKSPACE_TERMINAL_MODELS.split(",")
-            if m.strip()
-        ]
-        for mid in workspace_terminal_models:
-            if mid and mid not in final_subagents:
-                final_subagents.append(mid)
-
-        subagents_list = final_subagents
+        user_input_enabled = user_input_enabled = user_valves.ENABLE_USER_INPUT_TOOLS
 
         tools_spec = []
 
-        # schemas for IDs (no longer using enum to allow dynamic task creation)
+        # schemas for IDs
         task_id_schema = {
             "type": "string",
             "description": "REQUIRED: Unique identifier for the task/thread (e.g. 'task_research').",
         }
+        sub_task_id_schema = {
+            "type": "string",
+            "description": "REQUIRED: Unique identifier for this subagent thread (e.g. 'task_research').",
+        }
 
         if plan_mode:
+            # update_state
             tools_spec.append(
                 {
                     "type": "function",
@@ -2473,12 +2501,7 @@ class ToolRegistry:
                 }
             )
 
-        # call_subagent: use generic task_id schema
-        sub_task_id_schema = {
-            "type": "string",
-            "description": "REQUIRED: Unique identifier for this subagent thread (e.g. 'task_research').",
-        }
-
+        # call_subagent
         tools_spec.append(
             {
                 "type": "function",
@@ -2513,6 +2536,7 @@ class ToolRegistry:
         )
 
         if truncation:
+            # read_task_result
             tools_spec.append(
                 {
                     "type": "function",
@@ -2555,6 +2579,7 @@ class ToolRegistry:
         )
 
         if user_input_enabled:
+            # ask_user
             tools_spec.append(
                 {
                     "type": "function",
@@ -2578,6 +2603,7 @@ class ToolRegistry:
                     },
                 }
             )
+            # give_options
             tools_spec.append(
                 {
                     "type": "function",
@@ -2612,6 +2638,121 @@ class ToolRegistry:
             )
 
         return tools_spec
+
+    def get_subagent_base_specs(
+        self, available_tasks: list[Any] = None
+    ) -> list[dict[str, Any]]:
+        """Returns the base function specifications for subagents. (Domain tools only)"""
+        # Currently, all domain tools (image gen, search, knowledge, etc.) are gathered via builtin_tools dict.
+        # This list can be used for extra subagent-level common utilities if needed.
+        return []
+
+    def get_filtered_builtin_tools(
+        self,
+        extra_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Resolves built-in tools for the planner, filtering out those delegated to subagents.
+        Only enables a feature if it was enabled on the planner model AND its corresponding
+        subagent is NOT active. Internal planner tools (call_subagent, update_state, etc.)
+        are excluded here — they are injected separately via get_complete_planner_specs.
+        """
+        valves = self.valves
+
+        # Fast-exit: nothing to load if the planner model has no features at all
+        if not self.planner_features and not extra_params.get("__skill_ids__"):
+            return {}
+
+        # Determine which builtin features the planner should keep.
+        # A feature is kept by the planner only if it is on the model AND
+        # the corresponding specialized subagent is disabled.
+        feature_map = {
+            "web_search": "ENABLE_WEB_SEARCH_AGENT",
+            "image_generation": "ENABLE_IMAGE_GENERATION_AGENT",
+            "code_interpreter": "ENABLE_CODE_INTERPRETER_AGENT",
+            "knowledge": "ENABLE_KNOWLEDGE_AGENT",
+        }
+        active_features: dict[str, bool] = {}
+        for feature, valve_name in feature_map.items():
+            if self.planner_features.get(feature) and not getattr(
+                valves, valve_name, True
+            ):
+                active_features[feature] = True
+
+        if not active_features and not extra_params.get("__skill_ids__"):
+            return {}
+
+        try:
+            # Deep-copy the planner model info so we can safely mutate it.
+            m_info = copy.deepcopy(self.planner_info) if self.planner_info else {}
+            m_info.setdefault("info", {}).setdefault("meta", {})
+            meta = m_info["info"]["meta"]
+
+            # Inject model knowledge so the knowledge builtin can use it.
+            if self.model_knowledge:
+                mk = self.model_knowledge
+                meta["knowledge"] = (
+                    copy.deepcopy(mk) if isinstance(mk, list) else [copy.deepcopy(mk)]
+                )
+
+            # Explicitly gate every builtin category so we don't accidentally
+            # inject time, chats, notes, etc. into the planner tool surface.
+            m_info["info"]["meta"]["builtinTools"] = {
+                "time": False,
+                "knowledge": active_features.get("knowledge", False),
+                "chats": False,
+                "memory": False,
+                "web_search": active_features.get("web_search", False),
+                "image_generation": active_features.get("image_generation", False),
+                "code_interpreter": active_features.get("code_interpreter", False),
+                "notes": False,
+                "channels": False,
+            }
+
+            return get_builtin_tools(
+                self.request,
+                extra_params,
+                features=active_features,
+                model=m_info,
+            )
+        except Exception as e:
+            logger.error(f"Failed to load filtered built-in tools: {e}")
+            return {}
+
+    def _get_subagents_list(self) -> list[str]:
+        """Helper to compute the full available subagents list."""
+        # virtual_agents
+        v_ids = []
+        if getattr(self.valves, "ENABLE_IMAGE_GENERATION_AGENT", True): v_ids.append("image_gen_agent")
+        if getattr(self.valves, "ENABLE_WEB_SEARCH_AGENT", True): v_ids.append("web_search_agent")
+        if getattr(self.valves, "ENABLE_KNOWLEDGE_AGENT", True): v_ids.append("knowledge_agent")
+        if getattr(self.valves, "ENABLE_CODE_INTERPRETER_AGENT", True): v_ids.append("code_interpreter_agent")
+        if getattr(self.valves, "ENABLE_TERMINAL_AGENT", True) and self.pipe_metadata.get("terminal_id"):
+            v_ids.append("terminal_agent")
+
+        # extra_params / valves list
+        s_list = self.valves.SUBAGENT_MODELS.split(",") if self.valves.SUBAGENT_MODELS else []
+        t_models = [m.strip() for m in self.valves.WORKSPACE_TERMINAL_MODELS.split(",") if m.strip()]
+        
+        final = []
+        for vid in v_ids:
+            if vid not in final: final.append(vid)
+        for sid in s_list:
+            sid = sid.strip()
+            if sid and sid not in final: final.append(sid)
+        for mid in t_models:
+            if mid and mid not in final: final.append(mid)
+            
+        return final
+
+    def get_complete_planner_specs(
+        self, available_tasks: list[Any] = None
+    ) -> list[dict[str, Any]]:
+        """Returns the full suite of tools for the planner (Internal + Domain)."""
+        subagents_list = self._get_subagents_list()
+        internal_specs = self._get_planner_internal_tool_specs(subagents_list)
+        base_specs = self.get_subagent_base_specs(available_tasks)
+        return internal_specs + base_specs
 
     async def get_planner_tools_dict(self) -> dict[str, Any]:
         """Resolve external tools and filtered built-in tools for the planner."""
@@ -2677,9 +2818,7 @@ class ToolRegistry:
             # For now, we set __skill_ids__ so view_skill is available.
             extra_params["__skill_ids__"] = skill_ids
 
-        builtin_tools = self.get_filtered_builtin_tools(
-            self.valves, user_valves, self.pipe_metadata, extra_params
-        )
+        builtin_tools = self.get_filtered_builtin_tools(extra_params)
         if builtin_tools:
             tools_dict.update(builtin_tools)
 
@@ -2834,6 +2973,9 @@ class ToolRegistry:
                         "system_message": final_sys,
                         "actual_model": va_model_id,
                         "temperature_override": va.temperature,
+                        "terminal_access": True
+                        if va.type == "terminal" or va.features.get("code_interpreter")
+                        else False,
                     }
                     self.subagent_tools_cache[model_id] = result
                     return result
@@ -2847,8 +2989,11 @@ class ToolRegistry:
                 )
 
                 # v3.15: Optimized metadata extraction from model_ws (no DB model_db_info)
-                meta = model_ws.get("info", {}).get("meta", {})
-                params = model_ws.get("info", {}).get("params", {})
+                # Fix: removed duplicate second extraction block — meta/params were being iterated
+                # twice, causing all tool IDs to appear doubled before seen_sub deduplication.
+                info = model_ws.get("info", {}) or {}
+                meta = info.get("meta") or {}
+                params = info.get("params") or {}
                 if isinstance(meta, dict):
                     subagent_tool_ids.extend(
                         meta.get("toolIds") or meta.get("tool_ids") or []
@@ -2861,20 +3006,6 @@ class ToolRegistry:
                         or []
                     )
                     model_system_message = params.get("system", "") or ""
-
-                info_meta = model_ws.get("info", {}).get("meta", {})
-                info_params = model_ws.get("info", {}).get("params", {})
-                subagent_tool_ids.extend(
-                    info_meta.get("toolIds") or info_meta.get("tool_ids") or []
-                )
-                subagent_tool_ids.extend(
-                    info_params.get("toolIds")
-                    or info_params.get("tool_ids")
-                    or info_params.get("tools")
-                    or []
-                )
-                if not model_system_message:
-                    model_system_message = info_params.get("system", "") or ""
 
                 seen_sub: set[str] = set()
                 ordered_sub_ids: list[str] = []
@@ -3002,6 +3133,11 @@ class ToolRegistry:
                         else None
                     ),
                     "system_message": model_system_message,
+                    "actual_model": model_id,
+                    "terminal_access": True
+                    if model_id in workspace_terminal_models
+                    or "code_interpreter" in s_tools_dict
+                    else False,
                 }
                 self.subagent_tools_cache[model_id] = result
                 return result
@@ -3381,7 +3517,9 @@ class SubagentManager:
                 "You can generate content in ANY language — HTML, CSS, JavaScript, Python, shell scripts, JSON, YAML, and more.\n"
                 "### FILE HANDLING:\n"
                 "- If the user provides a 'file:///' URI, this is the absolute local path on the backend server. Open it directly in your Python code.\n"
-                "- If you see a relative link like '/api/v1/files/uuid', and you need to access it in your environment, use 'curl --cookie \"token={OPEN_WEBUI_TOKEN}\" -O {OPEN_WEBUI_URL}/api/v1/files/uuid' (prepend the base URL and pass the token as a cookie).\n"
+                "- To download a file from the Open WebUI API you MUST include BOTH the Bearer token AND the session cookie:\n"
+                "  curl {OPEN_WEBUI_HEADERS} -O {OPEN_WEBUI_URL}/api/v1/files/<uuid>/content\n"
+                "  (The session cookie --cookie 'token=...' is required — Bearer alone may not authenticate file endpoints.)\n"
                 "- Use relative links (e.g. '/api/v1/files/uuid') when creating HTML artifacts or UI-facing references.\n"
                 "### BEST PRACTICES:\n"
                 "- For HTML/CSS/JS or any web content: output the FULL, complete, self-contained content DIRECTLY — "
@@ -3422,8 +3560,10 @@ class SubagentManager:
                 "You are a specialized terminal subagent. Your role is to execute terminal commands, read and write files, and perform system operations.\n"
                 "### FILE HANDLING:\n"
                 "- If the user provides a 'file:///' URI, this is the absolute local path on the backend server. Use it directly in your commands.\n"
-                "- If you see a relative link like '/api/v1/files/uuid', and you need to access it via <curl/wget>, prepend the base URL and pass the token as a cookie: 'curl --cookie \"token={OPEN_WEBUI_TOKEN}\" -O {OPEN_WEBUI_URL}/api/v1/files/uuid'.\n"
-                "- If you see a relative link like '/files/uuid', and you need to access it, try to find it in the current working directory or subdirectories.\n"
+                "- To download a file from the Open WebUI API you MUST include BOTH the Bearer token AND the session cookie:\n"
+                "  curl {OPEN_WEBUI_HEADERS} -O {OPEN_WEBUI_URL}/api/v1/files/<uuid>/content\n"
+                "  (The session cookie --cookie 'token=...' is required — Bearer alone may not authenticate file endpoints.)\n"
+                "- If you see a relative link like '/files/uuid', try to find it in the current working directory or subdirectories.\n"
                 "### BEST PRACTICES:\n"
                 "- Use 'ls -F' to distinguish directories from files.\n"
                 "- Use 'cat' or 'tail' to read files. Avoid 'vi' or other interactive editors.\n"
@@ -3478,6 +3618,7 @@ class SubagentManager:
         self.queue_emitter = ui.emitter  # Already a QueueEmitter in structural overhaul
         self.registry = registry
         self.engine = engine
+        self.env = Utils.get_env_placeholders(self.request, self.valves)
         # We use the subagent_tools_cache from the registry if available
         self.subagent_tools_cache = {}
 
@@ -3681,40 +3822,25 @@ class SubagentManager:
         if not sub_sys:
             sub_sys = f"You are a specialized subagent acting as {model_id}. Follow the prompt directly and accurately using your tools."
 
-        # Inject base_url into subagent instructions (Terminal/Coding agents only if they use the placeholders)
-        sub_sys = sub_sys.replace("{OPEN_WEBUI_URL}", self.base_url)
-
-        # Extract Authentication Token from Request (v3.5 extension)
-        # Support both Authorization header and Cookie: token=<JWT>
-        request = self.context.request
-        token = ""
-        if request and hasattr(request, "headers"):
-            # 1. Try Cookie header (Open WebUI backend standard)
-            cookie_header = request.headers.get("cookie", "")
-            token_match = re.search(r"token=([^;]+)", cookie_header)
-            if token_match:
-                token = token_match.group(1).strip()
-
-            # 2. Fallback to Authorization: Bearer
-            if not token:
-                auth_header = request.headers.get("authorization", "")
-                if auth_header.lower().startswith("bearer "):
-                    token = auth_header[7:].strip()
-
-        # Perform token substitution in system prompt
-        # Internal substitution intended for subagents (terminal/code interpreter)
-        # to access Open WebUI files/API via curl/wget using {OPEN_WEBUI_TOKEN}.
-        sub_sys = sub_sys.replace("{OPEN_WEBUI_TOKEN}", token)
-
-        # Subagent background execution rules (v3 parity)
+        # General subagent background execution rules (v3 parity)
         sub_sys += (
             "\n\nCRITICAL CONTEXT: You are running as a headless subagent entirely in the background. "
             "DO NOT return markdown elements that rely on Open WebUI UI embeds for tool generation output. "
             "Any tools you use (like generate_image, search, etc.) will return URLs, base64 data, or raw paths exactly as returned by tools. "
             "You MUST always return these raw HTML references, URLs, files, or images as relative or absolute paths, or direct URLs, unconditionally in your final reply so the main planner can use them. "
             "If you generate or reference any assets (images, files, data, audio, etc.), it is CRITICAL to include the correct link, path, or URL in your output. "
-            "If you are missing any required asset links or references, you MUST follow up or retry until all assets are accessible via explicit links or paths. "
         )
+
+        # Conditional Terminal/Code Interpreter instructions (v3.15 parity)
+        if sub_info.get("terminal_access"):
+            sub_sys += (
+                "\n### FILE URL & AUTH:\n"
+                "- NEVER add domain prefixes to relative '/api/files/' URLs. Return them as-is for UI references.\n"
+                "- To download a file from the Open WebUI API you MUST include BOTH the Bearer token AND the session cookie:\n"
+                "  curl {OPEN_WEBUI_HEADERS} -O {OPEN_WEBUI_URL}/api/v1/files/<uuid>/content\n"
+                "  (The session cookie --cookie 'token=...' is required — Bearer alone may not authenticate file endpoints.)\n"
+                "If you are missing any required asset links or references, follow up or retry until all assets are accessible via explicit links or paths. "
+            )
 
         history = self.state.get_history(chat_id, task_id, model_id)
 
@@ -3753,9 +3879,14 @@ class SubagentManager:
         injection_content = "".join(results_injection)
         actual_prompt = prompt + injection_content
 
-        # Perform token substitution in the actual prompt
-        # Allows user/planner to pass wildcard to subagents (terminal/code interpreter).
-        actual_prompt = actual_prompt.replace("{OPEN_WEBUI_TOKEN}", token)
+        # v3.15 fix: Resolve {OPEN_WEBUI_HEADERS}, {OPEN_WEBUI_URL}, {OPEN_WEBUI_TOKEN} in the
+        # subagent system prompt NOW, before sending to the model. Previously left as literal
+        # placeholders so the model could echo them back in tool args (where
+        # _execute_single_subagent_tool_call would resolve them). But built-in tools
+        # (code_interpreter, web_search) receive the model's generated code directly — the
+        # planner never sees those args — so the placeholders were never substituted, causing 401
+        # errors when the generated code tried to curl the API without auth headers.
+        sub_sys = Utils.resolve_env_placeholders(sub_sys, self.env)
 
         if history:
             # v3 pacing: truncating history in sub-threads is risky for OpenRouter providers
@@ -3796,6 +3927,9 @@ class SubagentManager:
         sub_iteration = 0
         max_sub_iters = valves.MAX_SUBAGENT_ITERATIONS or 100
         history = context["history"]
+        # Fix 2: Cap judge REDO retries independently of the main iteration limit.
+        judge_redo_count = 0
+        MAX_JUDGE_REDO = min(3, max_sub_iters or 3)
 
         while True:
             sub_iteration += 1
@@ -3846,16 +3980,22 @@ class SubagentManager:
                             )
                         )
                         if not is_approved:
-                            history.append(
-                                {"role": "user", "content": redo_instruction}
-                            )
-                            await self.ui.emit_status(
-                                f"Refining {model_id} response for {task_id}..."
-                            )
-                            # Reset chunks to avoid double output if the model doesn't repeat everything
-                            # but the prompt asks for FULL response, so we should clear them.
-                            sub_final_answer_chunks = []
-                            continue
+                            judge_redo_count += 1
+                            if judge_redo_count > MAX_JUDGE_REDO:
+                                logger.warning(
+                                    f"[Subagent: {model_id}] Judge REDO limit ({MAX_JUDGE_REDO}) reached for {task_id}. Accepting response."
+                                )
+                            else:
+                                history.append(
+                                    {"role": "user", "content": redo_instruction}
+                                )
+                                await self.ui.emit_status(
+                                    f"Refining {model_id} response for {task_id}..."
+                                )
+                                # Reset chunks to avoid double output if the model doesn't repeat everything
+                                # but the prompt asks for FULL response, so we should clear them.
+                                sub_final_answer_chunks = []
+                                continue
 
                 # Reasoning Promotion (v3 parity): Only if NO content AND NO tool calls
                 if not sub_content.strip() and turn_result.get("reasoning"):
@@ -3900,9 +4040,12 @@ class SubagentManager:
                 ]
                 # v3.6: Capture anchor BEFORE gather to avoid race condition if history grows
                 history_tail_start = len(history)
-                await asyncio.gather(*tasks)
+                # Fix 3: Collect bool results; check after re-sort so history is always ordered
+                # even if we break mid-batch (tasks that completed already wrote to history).
+                gather_results = await asyncio.gather(*tasks)
 
-                # Re-sort the history tail to match original tool_calls order
+                # Re-sort ALWAYS — tasks completed in arrival order, not submission order.
+                # Must happen before the break check so PlannerState persists clean history.
                 call_id_order = {
                     tc.get("id"): i for i, tc in enumerate(tool_calls_list)
                 }
@@ -3911,10 +4054,19 @@ class SubagentManager:
                     key=lambda m: call_id_order.get(m.get("tool_call_id", ""), 999)
                 )
                 history[history_tail_start:] = tool_tail
+
+                # Each element is True only if _handle_missing_tool detected ≥3 consecutive
+                # calls to the same nonexistent tool — a hard-stop signal. Normal errors return False.
+                repeated_missing_tool_failure = any(gather_results)
+                if repeated_missing_tool_failure:
+                    sub_final_answer_chunks.append("[Subagent stopped: repeated missing-tool failures.]")
+                    break
             else:
                 # Sequential subagent tool execution
+                # Fix 3: Break if repeated missing-tool failures detected.
+                _should_break = False
                 for stc in tool_calls_list:
-                    await self._execute_single_subagent_tool_call(
+                    _should_break = await self._execute_single_subagent_tool_call(
                         stc,
                         context,
                         history,
@@ -3923,6 +4075,11 @@ class SubagentManager:
                         task_id,
                         sub_history_lock,
                     )
+                    if _should_break:
+                        break
+                if _should_break:
+                    sub_final_answer_chunks.append("[Subagent stopped: repeated missing-tool failures.]")
+                    break
 
         await self.ui.emit_status(f"Agent {model_id} completed {task_id}.")
 
@@ -3967,13 +4124,16 @@ class SubagentManager:
         model_id: str,
         task_id: str,
         history_lock: Optional[asyncio.Lock] = None,
-    ) -> None:
-        """Helper to execute a single subagent tool call."""
+    ) -> bool:  # Fix 3: Returns True if the outer loop should break (repeated failures)
+        """Helper to execute a single subagent tool call. Returns True to signal loop break."""
         stc_name = stc["function"]["name"]
         stc_args_str = stc["function"]["arguments"]
         call_id = stc.get("id")
 
-        stc_args_obj = Utils.parse_tool_arguments(stc_args_str)
+        stc_args_obj = Utils.resolve_env_placeholders(
+            Utils.parse_tool_arguments(stc_args_str),
+            self.env,
+        )
 
         target_tool = context["tools_dict"].get(stc_name)
         if target_tool:
@@ -3989,8 +4149,9 @@ class SubagentManager:
                 task_id,
                 history_lock,
             )
+            return False
         else:
-            await self._handle_missing_tool(
+            return await self._handle_missing_tool(
                 stc_name,
                 stc_args_str,
                 call_id,
@@ -4504,9 +4665,24 @@ class InternalToolExecutor:
                     getattr(self.engine, "total_emitted", "")
                 )
 
+        related_tasks_input = args.get("related_tasks", [])
+        if isinstance(related_tasks_input, str):
+            try:
+                # Handle cases where it's a JSON-stringified list
+                related_tasks_input = json.loads(related_tasks_input)
+                if not isinstance(related_tasks_input, list):
+                    related_tasks_input = [related_tasks_input]
+            except Exception:
+                # Handle comma-separated strings
+                related_tasks_input = [
+                    s.strip() for s in related_tasks_input.split(",") if s.strip()
+                ]
+        elif not isinstance(related_tasks_input, list):
+            related_tasks_input = [related_tasks_input] if related_tasks_input else []
+
         sanitized_related = []
         missing_tasks = []
-        for rt in args.get("related_tasks", []):
+        for rt in related_tasks_input:
             if rt is None:
                 continue
             clean_rt = str(rt).lstrip("@:")
@@ -4554,9 +4730,11 @@ class InternalToolExecutor:
         return res_dict["result"]
 
     async def ask_user(self, args: dict, valves: Any) -> str:
+        prompt_text = args.get("prompt_text", "Input required")
+        placeholder = args.get("placeholder", "Type here...")
         js = self.ui.build_ask_user_js(
-            args.get("prompt_text"),
-            args.get("placeholder", "Type here..."),
+            prompt_text,
+            placeholder,
             valves.USER_INPUT_TIMEOUT,
         )
         raw = await self.metadata["__event_call__"](
@@ -4583,17 +4761,18 @@ class InternalToolExecutor:
                 )
             except:
                 res_json = {"action": "accept", "value": str(raw_str)}
-        return (
-            f"User: {res_json.get('value')}"
-            if res_json.get("action") == "accept"
-            else "User skipped."
-        )
+
+        if res_json.get("action") == "accept":
+            return f"User responded: {res_json.get('value', '')}"
+        return "User skipped."
 
     async def give_options(self, args: dict, valves: Any) -> str:
+        prompt_text = args.get("prompt_text", "Choose an option")
+        choices = args.get("choices", [])
         allow_custom = args.get("allow_custom", True)
         js = self.ui.build_give_options_js(
-            args.get("prompt_text"),
-            args.get("choices", []),
+            prompt_text,
+            choices,
             args.get("context", ""),
             valves.USER_INPUT_TIMEOUT,
             allow_custom=allow_custom,
@@ -4622,11 +4801,10 @@ class InternalToolExecutor:
                 )
             except:
                 res_json = {"action": "accept", "value": str(raw_str)}
-        return (
-            f"User selected: {res_json.get('value')}"
-            if res_json.get("action") == "accept"
-            else "User skipped."
-        )
+
+        if res_json.get("action") == "accept":
+            return f"User selected: {res_json.get('value', '')}"
+        return "User skipped."
 
     def read_task_result(self, args: dict) -> str:
         rid = args.get("task_id", "").lstrip("@:")
@@ -4719,6 +4897,7 @@ class PlannerEngine:
         # v3.15: Consolidated file persistence. Accumulate files and sync at the end.
         self.produced_files = []
         self._files_lock = asyncio.Lock()
+        self.env = Utils.get_env_placeholders(context.request, context.valves)
 
 
     async def stop(self) -> None:
@@ -4900,10 +5079,14 @@ class PlannerEngine:
         # when it saves the final message state, we spawn a background task that sleeps
         # briefly and then enforces the true file list.
         if final_files and target_chat_id and target_msg_id:
+            # Fix 5: Track the delayed sync task so engine.stop() can cancel it on shutdown.
+            # The primary consolidated sync already ran above; this is purely a safety net
+            # that re-asserts the final file list after OWUI's native completion handler runs.
+            _ds_task: asyncio.Task | None = None
 
             async def _delayed_sync():
-                await asyncio.sleep(2.0)
                 try:
+                    await asyncio.sleep(2.0)
                     await asyncio.to_thread(
                         Chats.add_message_files_by_id_and_message_id,
                         target_chat_id,
@@ -4913,10 +5096,16 @@ class PlannerEngine:
                     logger.info(
                         f"[Planner] Delayed final sync: Restored {len(final_files)} files to DB."
                     )
+                except asyncio.CancelledError:
+                    logger.debug("[Planner] Delayed sync cancelled during shutdown — primary sync already committed.")
                 except Exception as e:
                     logger.error(f"[Planner] Delayed sync failed: {e}")
+                finally:
+                    if _ds_task is not None and _ds_task in self.active_tasks:
+                        self.active_tasks.remove(_ds_task)
 
-            asyncio.create_task(_delayed_sync())
+            _ds_task = asyncio.ensure_future(_delayed_sync())
+            self.active_tasks.append(_ds_task)
 
         # We yield the final content as the last token
         # v3.15: Terminal status emission. 
@@ -5188,7 +5377,7 @@ class PlannerEngine:
         exec_sys = PromptBuilder.build_system_prompt(
             valves,
             user_valves,
-            self.registry.get_tools_spec(
+            self.registry.get_complete_planner_specs(
                 list(self.state.tasks.keys())
             ),
             metadata=self.metadata,
@@ -5388,7 +5577,9 @@ class PlannerEngine:
     ) -> dict:
         """Performs a single LLM turn for the planner with live reasoning and clean content streaming."""
         tc_dict, content_chunks, reasoning_chunks = {}, [], []
-        tools = self.registry.get_tools_spec(
+        
+        # Get complete planner toolset (internal + domain)
+        tools = self.registry.get_complete_planner_specs(
             list(self.state.tasks.keys())
         )
         if external_tools_dict:
@@ -5437,6 +5628,10 @@ class PlannerEngine:
         total_emitted_base = total_emitted
         self.total_emitted = total_emitted
         error_occurred = False
+        # Fix 1: Explicit flag replaces the fragile is_transition substring heuristic.
+        # Set True when a reasoning block is sealed so the very next content token
+        # always issues a structural _emit_replace rather than a cheaper delta-append.
+        _reasoning_just_sealed = False
 
         # Debounce control
         last_emit_time = 0
@@ -5481,11 +5676,7 @@ class PlannerEngine:
             elif etype in ["content", "tool_calls"]:
                 if reasoning_buffer:
                     # Seal the reasoning block with tool calls stripped
-                    dur = (
-                        round(time.monotonic() - reasoning_start_time)
-                        if reasoning_start_time
-                        else 1
-                    )
+                    dur = int(max(1, round(time.monotonic() - reasoning_start_time))) if reasoning_start_time else 1
                     display = Utils.hide_tool_calls(reasoning_buffer)
                     display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
                     display_quoted = "\n".join(
@@ -5498,9 +5689,9 @@ class PlannerEngine:
                     self.total_emitted = total_emitted_base + "".join(content_chunks)
 
                     # v3.15: Reasoning Seal. We MUST issue a structural 'replace' exactly once to seal the block.
-                    # If we're entering content, we skip this and bundle the seal into the first chunk below.
-                    if etype != "content":
-                        await self._emit_replace(self.total_emitted)
+                    await self._emit_replace(self.total_emitted)
+                    # Fix 1: Mark that reasoning was just sealed so the next content token forces a replace.
+                    _reasoning_just_sealed = True
 
                 if etype == "content":
                     text = event["text"]
@@ -5511,15 +5702,17 @@ class PlannerEngine:
                     new_total = total_emitted_base + display_content
 
                     if new_total != self.total_emitted:
-                        # v3.6/v3.15 Optimized Streaming: Determine if we need a full replace (structural change) 
+                        # v3.6/v3.15 Optimized Streaming: Determine if we need a full replace (structural change)
                         # or can use a silent append delta (performance).
                         delta = new_total[len(self.total_emitted):]
-                        
-                        # Use replace for FIRST chunk after reasoning seal OR if we detect complex thinking tags
-                        is_transition = total_emitted_base in new_total and total_emitted_base not in self.total_emitted
+
+                        # Fix 1: Use explicit _reasoning_just_sealed flag instead of the fragile
+                        # is_transition substring heuristic that could false-negative when
+                        # total_emitted_base is a suffix match of the previous total_emitted.
                         is_complex = Utils.THINKING_TAG_CLEANER_PATTERN.search(text)
-                        
-                        if is_transition or is_complex:
+
+                        if _reasoning_just_sealed or is_complex:
+                            _reasoning_just_sealed = False  # consume the flag
                             self.total_emitted = new_total
                             await self._emit_replace(new_total)
                         else:
@@ -5554,11 +5747,7 @@ class PlannerEngine:
                 break
 
         if reasoning_buffer:  # Final seal if no content/tools followed
-            dur = (
-                round(time.monotonic() - reasoning_start_time)
-                if reasoning_start_time
-                else 1
-            )
+            dur = int(max(1, round(time.monotonic() - reasoning_start_time))) if reasoning_start_time else 1
             display = Utils.hide_tool_calls(reasoning_buffer)
             display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
             display_quoted = "\n".join(
@@ -5566,6 +5755,8 @@ class PlannerEngine:
             )
             sealed_reasoning = f'<details type="reasoning" done="true" duration="{dur}">\n<summary>Thought for {dur} seconds</summary>\n{display_quoted}\n</details>\n'
             total_emitted_base += sealed_reasoning
+            self.total_emitted = total_emitted_base + "".join(content_chunks)
+            await self._emit_replace(self.total_emitted)
 
         content, reasoning = "".join(content_chunks), "".join(reasoning_chunks)
 
@@ -5674,9 +5865,11 @@ class PlannerEngine:
                 for done_tag, tool_res, msg_dict in results:
                     exec_history.append(msg_dict)
 
-            # Re-sort is still useful if results came back out of order via as_completed
-            call_id_order = {tc.get("id"): i for i, tc in enumerate(tool_calls)}
-            history_tail_start = len(exec_history) - len(tool_calls)
+            # Fix 6: Use sorted_tcs (the list actually submitted to _execute_single_tool_call)
+            # rather than the original tool_calls to build call_id_order, ensuring every
+            # tool_call_id in msg_dict has a matching key and won't fall back to position 999.
+            call_id_order = {tc.get("id"): i for i, tc in enumerate(sorted_tcs)}
+            history_tail_start = len(exec_history) - len(sorted_tcs)
             tool_tail = exec_history[history_tail_start:]
             tool_tail.sort(
                 key=lambda m: call_id_order.get(m.get("tool_call_id", ""), 999)
@@ -5739,10 +5932,13 @@ class PlannerEngine:
 
         args = Utils.parse_tool_arguments(args_str)
         # Skip macro expansion (@task_id) for prompts (W6) - we use related_tasks instead
-        resolved_args = Utils.resolve_dict_references(
-            args,
-            self.state.results,
-            skip_keys=["task_id", "task_ids", "related_tasks", "prompt"],
+        resolved_args = Utils.resolve_env_placeholders(
+            Utils.resolve_dict_references(
+                args,
+                self.state.results,
+                skip_keys=["task_id", "task_ids", "related_tasks", "prompt"],
+            ),
+            self.env,
         )
 
         tool_res = ""
@@ -6090,12 +6286,13 @@ class PlannerEngine:
 
                         # If judge proposed a follow-up, show its reasoning as a "Thought" block (v3/v4 hybrid)
                         if reasoning.strip():
-                            dur = round(time.monotonic() - reasoning_start_time)
+                            dur = int(max(1, round(time.monotonic() - reasoning_start_time)))
                             display_quoted = "\n".join(
                                 f"> {l}" if not l.startswith(">") else l
                                 for l in reasoning.splitlines()
                             )
                             total_emitted += f'<details type="reasoning" done="true" duration="{dur}">\n<summary>Judge Verification Feedback</summary>\n{display_quoted}\n</details>\n'
+                            await self._emit_replace(total_emitted)
 
                         await self.ui.emit_status(
                             "Continuing based on judge feedback..."
