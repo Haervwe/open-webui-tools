@@ -38,6 +38,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Letta Agent** - Autonomous agent integration
 - **Perplexica Pipe** - AI-powered web search with streaming responses and citations
 - **Google Veo Text-to-Video & Image-to-Video** - Generate videos from text or a single image using Google Veo (only one image supported as input)
+- **MiniMax LLM Pipe** - Route chat completions to MiniMax's OpenAI-compatible API with M2.7 and M2.7-highspeed models (204K context)
 
 ### 🔧 **Filters**
 
@@ -112,7 +113,8 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 13. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
 14. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
 15. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-16. [Planner Agent v3](#planner-agent-v3)
+16. [MiniMax LLM Pipe](#minimax-llm-pipe)
+17. [Planner Agent v3](#planner-agent-v3)
 17. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
 18. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
 19. [Resume Analyzer Pipe](#resume-analyzer-pipe)
@@ -885,6 +887,40 @@ Prompt: "Edit this image to look like a medieval fantasy king, preserving facial
 
 ![Flux Kontext Example](img/flux_kontext_without_parameters.png)
 *Example of Flux Kontext image editing output*
+
+
+---
+
+### MiniMax LLM Pipe
+
+### Description
+
+Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-compatible API (`api.minimax.io/v1`) directly from Open WebUI. This pipe exposes MiniMax-M2.7 and MiniMax-M2.7-highspeed models (both with 204K context windows) as selectable models in your Open WebUI instance.
+
+### Configuration
+
+- `MINIMAX_API_KEY` (str): Your MiniMax API key (required, get one at https://platform.minimaxi.com)
+- `ENABLED_MODELS` (list): Which MiniMax models to expose (default: all)
+- `STRIP_THINKING` (bool): Strip `<think>…</think>` blocks from responses (default: `True`)
+- `DEFAULT_TEMPERATURE` (float): Default temperature when none is specified, 0.01–1.0 (default: `0.7`)
+
+**Prerequisites**: Get a MiniMax API key from [MiniMax Platform](https://platform.minimaxi.com).
+
+### Usage
+
+1. **Install the pipe**: Copy `functions/minimax_pipe.py` into Open WebUI via Workspace > Functions
+2. **Configure**: Set your `MINIMAX_API_KEY` in the pipe's Valves settings
+3. **Select model**: Choose "MiniMax M2.7" or "MiniMax M2.7 Highspeed" from the model dropdown
+4. **Start chatting**: The pipe streams responses directly from the MiniMax API
+
+### Features
+
+- **OpenAI-Compatible Routing**: Uses MiniMax's `/v1/chat/completions` endpoint
+- **Two Models**: MiniMax-M2.7 (full) and MiniMax-M2.7-highspeed (faster) — both with 204K context
+- **Streaming**: Real-time streamed responses via `chat:message:delta` events
+- **Temperature Clamping**: Automatically clamps temperature to MiniMax's accepted range (0.01–1.0)
+- **Think-Tag Stripping**: Strips `<think>…</think>` reasoning blocks from output (configurable)
+- **Parameter Forwarding**: Passes `max_tokens`, `top_p`, and other parameters to the API
 
 
 ---
