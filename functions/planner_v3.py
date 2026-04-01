@@ -3,7 +3,7 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.8.0
+version: 3.8.1
 required_open_webui_version: 0.8.12
 
 Features:
