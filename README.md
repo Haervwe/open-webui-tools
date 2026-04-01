@@ -987,7 +987,10 @@ Planner Agent v3 supports parallel execution of tool calls and subagent calls. T
 - **`PARALLEL_SUBAGENT_EXECUTION`**: When enabled, subagents execute their internal tool calls (search, code interpreter, etc.) in parallel.
 
 > [!WARNING]
-> Parallel execution may lead to race conditions if tools have stateful dependencies within the same turn (e.g., one tool depends on a file created by another tool in the same turn). Use with caution for complex, inter-dependent workflows. Most standard search and generation tasks are independent and safe for parallelism.
+> Parallel execution may lead to external race conditions if tools have stateful dependencies within the same turn (e.g., one tool depends on a file created by another tool in the same turn). Use with caution for complex, inter-dependent workflows. Most standard search and generation tasks are independent and safe for parallelism.
+> Subagents interdependance of task and Async state for the pipe is heavily guarded and safe. but you are responsible for the effects it migh have on external services.
+> If you go for full paralellisim you might need to use an async db to avoid deadlocks and slowdowns with a large amount of SubAgents
+
 
 #### Model & Subagent Setup
 - **`PLANNER_MODEL`**: The primary "brain" model for planning and orchestration (Mandatory).

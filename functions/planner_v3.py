@@ -1749,8 +1749,8 @@ class UIRenderer:
         """Generates the inline HTML block for the execution plan (v3.5 integrated style)."""
         html_content = self._generate_html_embed(planner_state)
 
-        # Wrap in details type="tool_calls" with embeds attribute to trigger integrated UI
-        # Result attribute contains a placeholder string serialized for the frontend
+        # Wrap in details type="tool_calls" with embeds attribute to trigger integrated UI.
+        # OWUI natively hides the "Explored" chrome when the embeds attribute is present.
         embeds_json = json.dumps([html_content], ensure_ascii=False)
         embeds_escaped = html_module.escape(embeds_json)
 
@@ -1760,7 +1760,7 @@ class UIRenderer:
             f'arguments="&quot;&quot;" '
             f'result="&quot;Plan updated.&quot;" '
             f'embeds="{embeds_escaped}">\n'
-            f"<summary>Execution Plan</summary>\n</details>\n"
+            f"<summary>Execution Plan</summary>\n</details>\n\n"
         )
 
     def _generate_html_embed(self, planner_state: dict[str, Any]) -> str:
@@ -1862,13 +1862,40 @@ class UIRenderer:
 }})();
 </script>"""
 
+        # v3.16: Auto-resize script to communicate content height to the parent iframe.
+        # This prevents the embed from being cut off with a scrollbar.
+        resize_script = """<script>
+(function(){
+  function notifyHeight(){
+    var h = document.documentElement.scrollHeight || document.body.scrollHeight;
+    try {
+      if(window.frameElement){
+        window.frameElement.style.height = h + 'px';
+        window.frameElement.style.maxHeight = 'none';
+        window.frameElement.style.overflow = 'visible';
+      }
+    } catch(e){}
+    if(h && window.parent && window.parent !== window){
+      window.parent.postMessage({type:'iframe-resize', height: h}, '*');
+    }
+  }
+  notifyHeight();
+  setTimeout(notifyHeight, 100);
+  setTimeout(notifyHeight, 500);
+  setTimeout(notifyHeight, 1500);
+  var mo = new MutationObserver(notifyHeight);
+  mo.observe(document.body, {childList:true, subtree:true, attributes:true});
+  window.addEventListener('resize', notifyHeight);
+})();
+</script>"""
+
         html = (
-            "<style>html,body{margin:0;padding:0;background:transparent!important}</style>\n"
+            "<style>html,body{margin:0;padding:0;background:transparent!important;overflow:hidden!important}</style>\n"
             f'<div id="{embed_id}" style="background:#1e293b;border:1px solid #334155;'
             "border-radius:20px;padding:28px;margin:6px;"
             "font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;"
             'box-shadow:0 4px 20px rgba(0,0,0,0.5);">\n'
-            '  <div style="display:flex;flex-direction:column;align-items:center;'
+            '<div style="display:flex;flex-direction:column;align-items:center;'
             'text-align:center;gap:12px;margin-bottom:24px;">\n'
             '    <div style="font-size:32px;">🧠</div>\n'
             "    <div>\n"
@@ -1879,7 +1906,7 @@ class UIRenderer:
             "    </div>\n"
             "  </div>\n"
             f'  <div style="display:flex;flex-direction:column;gap:4px;">\n    {tasks_html}\n  </div>\n'
-            f"</div>\n{theme_script}"
+            f"</div>\n{theme_script}\n{resize_script}"
         )
         return html
 
