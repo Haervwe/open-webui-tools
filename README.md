@@ -53,7 +53,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 
 ### Option 1: Open WebUI Hub (Recommended)
 
-1. Visit [https://openwebui.com/u/haervwe](https://openwebui.com/u/haervwe)
+1. Visit [https://openwebui.com/u/Haervwe](https://openwebui.com/u/Haervwe)
 2. Browse the collection and click "Get" for desired tools
 3. Follow the installation prompts in your Open WebUI instance
 
