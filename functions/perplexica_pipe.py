@@ -3,7 +3,7 @@ title: Perplexica Pipe
 author: haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/open-webui
-version: 0.3.1
+version: 0.3.2
 license: MIT
 requirements: aiohttp
 environment_variables: PERPLEXICA_API_URL
@@ -17,7 +17,6 @@ from open_webui.constants import TASKS
 from open_webui.utils.chat import generate_chat_completion
 import aiohttp
 from open_webui.models.users import User
-
 
 name = "Perplexica"
 
@@ -37,7 +36,7 @@ class Pipe:
         task_model: str = Field(default="gpt-4o-mini")
         max_history_pairs: int = Field(default=12)
         perplexica_timeout_s: int = Field(
-            default=120,
+            default=360,
             description="Total request timeout in seconds (research can be slow)",
         )
 
@@ -197,8 +196,9 @@ class Pipe:
 
             return msg
 
-        # Streaming: handled in handler; bare return
-        return
+        # Streaming: content was emitted chunk-by-chunk; return the full text
+        # so Open WebUI persists the message instead of wiping it.
+        return response or ""
 
     # ---------- Helpers ----------
     def _extract_user_input(self, body: dict) -> str:
@@ -343,8 +343,7 @@ class Pipe:
                     resp.raise_for_status()
 
                     if stream:
-                        await self._handle_streaming_response(resp)
-                        return  # bare return, no payload
+                        return await self._handle_streaming_response(resp)
                     else:
                         data = await resp.json()
                         return self._render_non_stream_response(data)
@@ -358,7 +357,7 @@ class Pipe:
             await self.emit_status(f"Search error: {str(e)}", done=True, error=True)
             return f"Error: {str(e)}"
 
-    async def _handle_streaming_response(self, resp: aiohttp.ClientResponse) -> None:
+    async def _handle_streaming_response(self, resp: aiohttp.ClientResponse) -> str:
         """
         Perplexica stream event types (newline-delimited JSON):
           {"type": "init",     "data": "Stream connected"}
@@ -371,11 +370,15 @@ class Pipe:
           2. status(done=True, urls/items)           ← web_results bubble w/ source links
           3. citation × N                            ← individual citation cards
           4. message chunks                          ← streamed answer tokens
+
+        Returns the full accumulated response text so pipe() can return it,
+        preventing Open WebUI from wiping the streamed content on completion.
         """
         urls: List[str] = []
         items: List[dict] = []
         sources_emitted = False
         got_any_event = False
+        full_response: List[str] = []  # accumulate all chunks
 
         async for raw_line in resp.content:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -430,6 +433,7 @@ class Pipe:
 
                 chunk = event.get("data", "")
                 if chunk:
+                    full_response.append(chunk)
                     await self.emit_message(chunk)
 
             elif etype == "done":
@@ -437,7 +441,7 @@ class Pipe:
                 if not sources_emitted:
                     await self.emit_web_results(urls, items)
                     sources_emitted = True
-                return
+                return "".join(full_response)
 
         # Stream ended without a "done" event (e.g. SearXNG error killed connection)
         if not sources_emitted:
@@ -448,6 +452,8 @@ class Pipe:
                 )
             else:
                 await self.emit_web_results([], [])
+
+        return "".join(full_response)
 
     def _parse_source(self, src: dict):
         """Extract (title, url, content, snippet) from a Perplexica source document."""
