@@ -19,6 +19,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Perplexica Search** - Web search using Perplexica API with citations
 - **Pexels Media Search** - High-quality photos and videos from Pexels API
 - **YouTube Search & Embed** - Search YouTube and play videos in embedded player
+- **Xquik X Data Tool** - Search and look up X posts, users, timelines, and trends
 - **Native Image Generator** - Direct Open WebUI image generation with Ollama model management
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI Image-to-Image (Qwen Edit 2509)** - Advanced image editing with multi-image support
@@ -111,29 +112,30 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 11. [ComfyUI ACE Step Audio Tool (Legacy)](#comfyui-ace-step-audio-tool-legacy)
 12. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
 13. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
-14. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-15. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-16. [MiniMax LLM Pipe](#minimax-llm-pipe)
-17. [Planner Agent v3](#planner-agent-v3)
-18. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-19. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
-20. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-21. [Mopidy Music Controller](#mopidy-music-controller)
-22. [Letta Agent Pipe](#letta-agent-pipe)
-23. [Perplexica Pipe](#perplexica-pipe)
-24. [OpenRouter Image Pipe](#openrouter-image-pipe)
-25. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-26. [Doodle Paint Filter](#doodle-paint-filter)
-27. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-28. [Semantic Router Filter](#semantic-router-filter)
-29. [Full Document Filter](#full-document-filter)
-30. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-31. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-32. [Installation](#installation)
-33. [Contributing](#contributing)
-34. [License](#license)
-35. [Credits](#credits)
-36. [Support](#support)
+14. [Xquik X Data Tool](#xquik-x-data-tool)
+15. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+16. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+17. [MiniMax LLM Pipe](#minimax-llm-pipe)
+18. [Planner Agent v3](#planner-agent-v3)
+19. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+20. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
+21. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+22. [Mopidy Music Controller](#mopidy-music-controller)
+23. [Letta Agent Pipe](#letta-agent-pipe)
+24. [Perplexica Pipe](#perplexica-pipe)
+25. [OpenRouter Image Pipe](#openrouter-image-pipe)
+26. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+27. [Doodle Paint Filter](#doodle-paint-filter)
+28. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+29. [Semantic Router Filter](#semantic-router-filter)
+30. [Full Document Filter](#full-document-filter)
+31. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+32. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+33. [Installation](#installation)
+34. [Contributing](#contributing)
+35. [License](#license)
+36. [Credits](#credits)
+37. [Support](#support)
 ---
 
 ## 🧪 Tools
@@ -810,6 +812,53 @@ Tool that fetches weather forecasts using the OpenWeatherMap API and displays an
 
 ![OpenWeatherMap Forecast Tool](img/openweathermap_tool.png)
 *Example OpenWeatherMap Forecast Tool widget*
+
+---
+
+### Xquik X Data Tool
+
+### Description
+
+Search and look up X posts, users, timelines, and trends through the Xquik API. This tool is read-only and returns structured JSON so Open WebUI models can inspect source text, authors, metrics, pagination fields, and trend metadata.
+
+### Configuration
+
+- `XQUIK_API_KEY` (str): Xquik API key for authenticated read requests
+- `BASE_URL` (str): Xquik API base URL (default: `https://xquik.com/api/v1`)
+- `DEFAULT_LIMIT` (int): Default result limit for list endpoints (default: 10)
+- `REQUEST_TIMEOUT_SECONDS` (int): Request timeout in seconds (default: 30)
+
+**Prerequisites**: Create a Xquik API key at [xquik.com](https://xquik.com) for authenticated read requests.
+
+### Usage
+
+- **Search X Posts:**
+
+  ```python
+  Search X for "open webui lang:en" with the latest results
+  ```
+
+- **Look Up a User:**
+
+  ```python
+  Look up the X user openwebui
+  ```
+
+- **Get Trends:**
+
+  ```python
+  Get worldwide X trends
+  ```
+
+### Features
+
+- **Post Search**: Uses X search operators with Latest or Top ordering
+- **Post Lookup**: Fetches a single post by numeric ID
+- **User Search**: Searches X users by name or username
+- **User Lookup**: Fetches user profile details by ID or username
+- **User Timelines**: Lists recent user posts with optional replies and parent posts
+- **Trends**: Fetches regional X trends by WOEID
+- **Structured Output**: Returns JSON responses for reliable model analysis
 
 ---
 
