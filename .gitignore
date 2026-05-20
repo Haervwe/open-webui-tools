@@ -128,3 +128,13 @@ logs/
 *.temp
 .tmp/
 .temp/
+
+# Node/NPM dependencies and build artifacts
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+out/
+.pnpm-store/

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D Dice Roller Test</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #111; color: #fff; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; gap: 16px; }
+    button { padding: 12px 32px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.1); color: #fff; font-size: 14px; cursor: pointer; font-weight: 600; }
+    button:hover { background: rgba(255,255,255,0.2); }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  </style>
+</head>
+<body>
+  <h2>3D Dice Roller Test</h2>
+  <div class="controls">
+    <button onclick="test('1d4')">D4</button>
+    <button onclick="test('1d6')">D6</button>
+    <button onclick="test('1d8')">D8</button>
+    <button onclick="test('1d10')">D10</button>
+    <button onclick="test('1d12')">D12</button>
+    <button onclick="test('1d20')">D20</button>
+    <button onclick="test('2d20+5')">2d20+5</button>
+    <button onclick="test('4d6')">4d6</button>
+    <button onclick="test('1d20+1d8+3')">1d20+1d8+3</button>
+  </div>
+  <div id="result" style="font-size: 18px; color: #aaa;"></div>
+  <script type="module">
+    import { rollDice3D } from './src/dice-roller.js';
+
+    function parseDice(notation) {
+      const dice = [];
+      let modifier = 0;
+      const parts = notation.replace(/\s/g, '').match(/[+-]?[^+-]+/g) || [];
+      for (const part of parts) {
+        const sign = part.startsWith('-') ? -1 : 1;
+        const clean = part.replace(/^[+-]/, '');
+        const m = clean.match(/^(\d+)?d(\d+)$/i);
+        if (m) {
+          const count = parseInt(m[1] || '1');
+          const sides = parseInt(m[2]);
+          for (let i = 0; i < count; i++) dice.push({ sides, sign });
+        } else {
+          modifier += parseInt(part) || 0;
+        }
+      }
+      return { dice, modifier };
+    }
+
+    window.test = async (notation) => {
+      const { dice, modifier } = parseDice(notation);
+      const result = await rollDice3D({ dice, modifier, notation, diceColor: '#c0392b', animMs: 1500 });
+      document.getElementById('result').textContent = 'Result: ' + result;
+    };
+  </script>
+</body>
+</html>

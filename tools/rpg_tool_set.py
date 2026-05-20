@@ -4,9 +4,9 @@ description: Interactive RPG companion with 3D dice rolling overlays, character 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.1
+version: 1.0.0
 license: MIT
-required_open_webui_version: 0.9.1
+required_open_webui_version: 0.8.10
 """
 
 import random
@@ -222,58 +222,62 @@ def format_modifier(mod: int) -> str:
 def get_die_geometry(sides: int) -> Dict[str, Any]:
     """Helper to return CSS geometry configurations for polyhedral dice."""
     if sides == 4:
-        clip = "polygon(50% 0%, 0% 86.6%, 100% 86.6%)"
-        origin = "50% 57.7%"
+        clip = "polygon(50% 0%, 0% 86.603%, 100% 86.603%)"
+        origin = "50% 57.735%"
         faces = [
-            "rotateY(0deg) rotateX(19.5deg) translateZ(14px)",
-            "rotateY(120deg) rotateX(19.5deg) translateZ(14px)",
-            "rotateY(240deg) rotateX(19.5deg) translateZ(14px)",
-            "rotateX(-90deg) translateZ(14px)",
+            "rotateY(0deg) rotateX(19.47deg) translateZ(14.7px)",
+            "rotateY(120deg) rotateX(19.47deg) translateZ(14.7px)",
+            "rotateY(240deg) rotateX(19.47deg) translateZ(14.7px)",
+            "rotateX(-90deg) translateZ(14.7px)",
         ]
-        return {"clip": clip, "origin": origin, "cx": -19.5, "cy": 0, "faces": faces}
+        return {"clip": clip, "origin": origin, "cx": -19.47, "cy": 0, "faces": faces}
 
     elif sides == 8:
-        clip = "polygon(50% 0%, 0% 86.6%, 100% 86.6%)"
-        origin = "50% 57.7%"
-        tz = 28
+        clip = "polygon(50% 0%, 0% 86.603%, 100% 86.603%)"
+        origin = "50% 57.735%"
+        tz = 29.4
         faces = []
         for i in range(4):
-            faces.append(f"rotateY({i * 90}deg) rotateX(35.3deg) translateZ({tz}px)")
-            faces.append(f"rotateY({i * 90}deg) rotateX(-35.3deg) rotateZ(180deg) translateZ({tz}px)")
-        return {"clip": clip, "origin": origin, "cx": -35.3, "cy": 0, "faces": faces}
+            faces.append(f"rotateY({i * 90}deg) rotateX(35.26deg) translateZ({tz}px)")
+            faces.append(
+                f"rotateY({i * 90}deg) rotateX(-35.26deg) rotateZ(180deg) translateZ({tz}px)"
+            )
+        return {"clip": clip, "origin": origin, "cx": -35.26, "cy": 0, "faces": faces}
 
     elif sides == 10 or sides == 100:
-        clip = "polygon(50% 0%, 100% 30%, 50% 100%, 0% 30%)"
-        origin = "50% 50%"
-        tz = 35
+        clip = "polygon(50% 0%, 71.66% 66.66%, 50% 100%, 28.34% 66.66%)"
+        origin = "50% 66.66%"
+        tz = 24
         faces = []
         for i in range(5):
-            faces.append(f"rotateY({i * 72}deg) rotateX(25deg) translateZ({tz}px)")
-            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(-25deg) rotateZ(180deg) translateZ({tz}px)")
-        return {"clip": clip, "origin": origin, "cx": -25, "cy": 0, "faces": faces}
+            faces.append(f"rotateY({i * 72}deg) rotateX(26.57deg) translateZ({tz}px)")
+            faces.append(
+                f"rotateY({i * 72 + 36}deg) rotateX(-26.57deg) rotateZ(180deg) translateZ({tz}px)"
+            )
+        return {"clip": clip, "origin": origin, "cx": -26.57, "cy": 0, "faces": faces}
 
     elif sides == 12:
-        clip = "polygon(50% 0%, 100% 38%, 81% 100%, 19% 100%, 0% 38%)"
-        origin = "50% 50%"
-        tz = 46
-        faces = ["rotateX(90deg) translateZ(46px)"]
+        clip = "polygon(50% 2.45%, 100% 38.78%, 80.9% 97.55%, 19.1% 97.55%, 0% 38.78%)"
+        origin = "50% 55.0%"
+        tz = 49.55
+        faces = [f"rotateX(90deg) translateZ({tz}px)"]
         for i in range(5):
-            faces.append(f"rotateY({i * 72}deg) rotateX(26.6deg) translateZ({tz}px)")
-            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(-26.6deg) rotateZ(180deg) translateZ({tz}px)")
-        faces.append("rotateX(-90deg) translateZ(46px)")
+            faces.append(f"rotateY({i * 72}deg) rotateX(26.57deg) rotateZ(180deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(-26.57deg) translateZ({tz}px)")
+        faces.append(f"rotateX(-90deg) rotateZ(180deg) translateZ({tz}px)")
         return {"clip": clip, "origin": origin, "cx": -90, "cy": 0, "faces": faces}
 
     elif sides == 20:
-        clip = "polygon(50% 0%, 0% 86.6%, 100% 86.6%)"
-        origin = "50% 57.7%"
-        tz = 51
+        clip = "polygon(50% 0%, 0% 86.603%, 100% 86.603%)"
+        origin = "50% 57.735%"
+        tz = 54.4
         faces = []
         for i in range(5):
-            faces.append(f"rotateY({i * 72}deg) rotateX(52.6deg) translateZ({tz}px)")
-            faces.append(f"rotateY({i * 72}deg) rotateX(-52.6deg) rotateZ(180deg) translateZ({tz}px)")
-            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(10.8deg) translateZ({tz}px)")
-            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(-10.8deg) rotateZ(180deg) translateZ({tz}px)")
-        return {"clip": clip, "origin": origin, "cx": -52.6, "cy": 0, "faces": faces}
+            faces.append(f"rotateY({i * 72}deg) rotateX(52.62deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 72}deg) rotateX(10.81deg) rotateZ(180deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(-10.81deg) translateZ({tz}px)")
+            faces.append(f"rotateY({i * 72 + 36}deg) rotateX(-52.62deg) rotateZ(180deg) translateZ({tz}px)")
+        return {"clip": clip, "origin": origin, "cx": -52.62, "cy": 0, "faces": faces}
 
     faces = [
         "rotateY(0deg) translateZ(34px)",
@@ -291,14 +295,19 @@ def get_die_geometry(sides: int) -> Dict[str, Any]:
         "faces": faces[:sides] if sides < 6 else faces,
     }
 
-def get_die_silhouette(sides: int) -> str:
-    if sides == 4: return "polygon(50% 0%, 0% 100%, 100% 100%)"
-    if sides == 8: return "polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)"
-    if sides in (10, 100): return "polygon(50% 0%, 100% 40%, 50% 100%, 0% 40%)"
-    if sides == 12: return "polygon(50% 0%, 100% 38%, 81% 100%, 19% 100%, 0% 38%)"
-    if sides == 20: return "polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)"
-    return "none"
 
+def get_die_silhouette(sides: int) -> str:
+    if sides == 4:
+        return "polygon(50% 0%, 0% 100%, 100% 100%)"
+    if sides == 8:
+        return "polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)"
+    if sides in (10, 100):
+        return "polygon(50% 0%, 100% 40%, 50% 100%, 0% 40%)"
+    if sides == 12:
+        return "polygon(50% 0%, 100% 38%, 81% 100%, 19% 100%, 0% 38%)"
+    if sides == 20:
+        return "polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)"
+    return "none"
 
 
 def get_die_geometry_dict() -> Dict[int, Any]:
@@ -310,7 +319,6 @@ def get_die_geometry_dict() -> Dict[int, Any]:
         12: get_die_geometry(12),
         20: get_die_geometry(20),
     }
-
 
 
 def generate_roll_embed(
@@ -356,8 +364,8 @@ def generate_roll_embed(
             )
 
             sil_clip = get_die_silhouette(g["sides"])
-            text_mt = '8px' if g["sides"] == 4 else '0px'
-            
+            text_mt = "8px" if g["sides"] == 4 else "0px"
+
             dice_blocks_html += f"""
       <div style="width:52px;height:52px;display:flex;align-items:center;justify-content:center;
         font-size:20px;font-weight:800;color:#fff;background:{face_bg};
@@ -657,11 +665,17 @@ btnArea.style.cssText='display:flex;justify-content:center;';
 panel.appendChild(btnArea);
 
 // Show placeholder dice
-DICE.forEach(function(){
+DICE.forEach(function(d){
   var ph=document.createElement('div');
   ph.style.cssText='width:72px;height:72px;border-radius:12px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:28px;color:rgba(255,255,255,0.2);';
   ph.textContent='?';
   diceArea.appendChild(ph);
+  if (d.sides === 100) {
+    var ph2=document.createElement('div');
+    ph2.style.cssText='width:72px;height:72px;border-radius:12px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;font-size:28px;color:rgba(255,255,255,0.2);';
+    ph2.textContent='?';
+    diceArea.appendChild(ph2);
+  }
 });
 
 function makeBtn(label){
@@ -680,25 +694,34 @@ rollBtn.onclick=function(){
   rollBtn.style.display='none';
   diceArea.innerHTML='';
   var results=[];
+  var animIdx=0;
 
-  DICE.forEach(function(d,idx){
-    var val=Math.floor(Math.random()*d.sides)+1;
-    results.push({value:val,sides:d.sides,sign:d.sign});
-
+  function renderDie(valLabel, sides, d_sides) {
     var wrap=document.createElement('div');
     wrap.style.cssText='width:72px;height:72px;perspective:400px;';
 
     var cube=document.createElement('div');
-    cube.style.cssText='width:72px;height:72px;position:relative;transform-style:preserve-3d;animation:rpgSpin_'+idx+' '+ANIM_MS+'ms cubic-bezier(0.2,0.8,0.3,1) forwards;';
+    cube.style.cssText='width:72px;height:72px;position:relative;transform-style:preserve-3d;animation:rpgSpin_'+animIdx+' '+ANIM_MS+'ms cubic-bezier(0.2,0.8,0.3,1) forwards;';
 
-    var geo = GEO_DATA[d.sides] || GEO_DATA[6];
-    if (d.sides === 100) geo = GEO_DATA[10];
+    var geo = GEO_DATA[sides] || GEO_DATA[6];
 
     geo.faces.forEach(function(tr, fi){
       var isMain = (fi === 0);
-      var lbl = isMain ? val : Math.ceil(Math.random()*d.sides);
+      var lbl = valLabel;
+      if (!isMain) {
+          if (d_sides === 100) {
+             if (valLabel.length > 1) {
+                 lbl = (Math.floor(Math.random()*10)*10).toString().padStart(2, '0');
+             } else {
+                 lbl = Math.floor(Math.random()*10).toString();
+             }
+          } else {
+             lbl = Math.ceil(Math.random()*sides);
+          }
+      }
       var face=document.createElement('div');
       var sz=isMain?'28':'20';
+      if (lbl.toString().length > 1) sz = isMain ? '22' : '16';
       var wt=isMain?'800':'600';
       var bg=isMain?DICE_COLOR:'rgba(20,20,30,0.85)';
       var bd=isMain?'0.4':'0.25';
@@ -710,14 +733,40 @@ rollBtn.onclick=function(){
       cube.appendChild(face);
     });
 
-    var sx=2+Math.floor(Math.random()*3);
-    var sy=2+Math.floor(Math.random()*3);
+    var sx=4+Math.floor(Math.random()*4);
+    var sy=4+Math.floor(Math.random()*4);
+    var sz=2+Math.floor(Math.random()*3);
+    var rx = geo.cx !== undefined ? geo.cx : 0;
+    var ry = geo.cy !== undefined ? geo.cy : 0;
+    var rz = geo.cz !== undefined ? geo.cz : 0;
+    if (geo.cz === undefined) { rx -= 15; ry -= 20; }
     var st=document.createElement('style');
-    st.textContent='@keyframes rpgSpin_'+idx+'{0%{transform:rotateX(0) rotateY(0) rotateZ(0)}30%{transform:rotateX('+(sx*360+180)+'deg) rotateY('+(sy*180)+'deg) rotateZ(45deg)}70%{transform:rotateX('+(sx*360+90)+'deg) rotateY('+(sy*360-45)+'deg) rotateZ(-20deg)}100%{transform:rotateX('+(720+geo.cx-15)+'deg) rotateY('+(360+geo.cy-20)+'deg) rotateZ(0deg)}}';
+    st.textContent='@keyframes rpgSpin_'+animIdx+'{0%{transform:rotateX(0) rotateY(0) rotateZ(0)}30%{transform:rotateX('+(sx*360+180)+'deg) rotateY('+(sy*180)+'deg) rotateZ('+(sz*180)+'deg)}70%{transform:rotateX('+(sx*360+90)+'deg) rotateY('+(sy*360-45)+'deg) rotateZ('+(sz*360)+'deg)}100%{transform:rotateX('+(1440+rx)+'deg) rotateY('+(1440+ry)+'deg) rotateZ('+(1080+rz)+'deg)}}';
     document.head.appendChild(st);
 
     wrap.appendChild(cube);
     diceArea.appendChild(wrap);
+    animIdx++;
+  }
+
+  DICE.forEach(function(d){
+    if (d.sides === 100) {
+      var tens = Math.floor(Math.random()*10);
+      var ones = Math.floor(Math.random()*10);
+      var val = (tens*10 + ones);
+      if (val === 0) val = 100;
+      results.push({value:val,sides:100,sign:d.sign});
+      
+      var tensStr = (tens*10).toString().padStart(2, '0');
+      var onesStr = ones.toString();
+      
+      renderDie(tensStr, 10, 100);
+      renderDie(onesStr, 10, 100);
+    } else {
+      var val = Math.floor(Math.random()*d.sides)+1;
+      results.push({value:val,sides:d.sides,sign:d.sign});
+      renderDie(val.toString(), d.sides, d.sides);
+    }
   });
 
   // Show results + Accept button after animation
@@ -1175,12 +1224,18 @@ return (function() {{
 """
 
 
-def generate_choice_embed(prompt_text: str, selected: str, accent: str, is_custom: bool = False) -> str:
+def generate_choice_embed(
+    prompt_text: str, selected: str, accent: str, is_custom: bool = False
+) -> str:
     """Generate a small embed showing the player's choice."""
     safe_prompt = _esc(prompt_text)
     safe_choice = _esc(selected)
     pid = f"rpgc{random.randint(100000, 999999)}"
-    badge = '<span style="font-size:9px;font-weight:700;color:#e67e22;background:rgba(230,126,34,0.15);border:1px solid rgba(230,126,34,0.25);border-radius:4px;padding:1px 6px;margin-left:8px;vertical-align:middle;">CUSTOM</span>' if is_custom else ''
+    badge = (
+        '<span style="font-size:9px;font-weight:700;color:#e67e22;background:rgba(230,126,34,0.15);border:1px solid rgba(230,126,34,0.25);border-radius:4px;padding:1px 6px;margin-left:8px;vertical-align:middle;">CUSTOM</span>'
+        if is_custom
+        else ""
+    )
     return f"""
 <div style="display:flex;justify-content:center;width:100%;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
 <div style="position:relative;overflow:hidden;border-radius:14px;max-width:400px;width:100%;
@@ -1207,9 +1262,7 @@ def generate_choice_embed(prompt_text: str, selected: str, accent: str, is_custo
 # ---------------------------------------------------------------------------
 
 
-def build_confirm_js(
-    prompt_text: str, confirm_label: str, cancel_label: str
-) -> str:
+def build_confirm_js(prompt_text: str, confirm_label: str, cancel_label: str) -> str:
     """Build JavaScript for a dramatic yes/no confirmation overlay."""
     safe_prompt = json.dumps(prompt_text)
     safe_confirm = json.dumps(confirm_label)
@@ -1570,7 +1623,7 @@ class Tools:
                 images = await image_generations(
                     request=__request__,
                     form_data=GenerateImageForm(prompt=prompt),
-                    user=await Users.get_user_by_id(__user__["id"]),
+                    user=Users.get_user_by_id(__user__["id"]),
                 )
                 if images and len(images) > 0:
                     char_data["image_url"] = images[0]["url"]
@@ -1699,9 +1752,7 @@ class Tools:
 
         if __event_call__:
             try:
-                js_code = build_choice_selector_js(
-                    prompt_text, choice_list, context
-                )
+                js_code = build_choice_selector_js(prompt_text, choice_list, context)
                 raw = await __event_call__(
                     {"type": "execute", "data": {"code": js_code}}
                 )
@@ -1787,7 +1838,10 @@ class Tools:
             await __event_emitter__(
                 {
                     "type": "status",
-                    "data": {"description": "Awaiting player decision...", "done": False},
+                    "data": {
+                        "description": "Awaiting player decision...",
+                        "done": False,
+                    },
                 }
             )
 
@@ -1814,7 +1868,11 @@ class Tools:
                             parsed = json.loads(data)
                             confirmed = parsed.get("confirmed", False)
                         except json.JSONDecodeError:
-                            confirmed = data.lower().strip() in ("true", "yes", "confirmed")
+                            confirmed = data.lower().strip() in (
+                                "true",
+                                "yes",
+                                "confirmed",
+                            )
             except Exception as e:
                 logger.warning(f"RPG Tool: confirm overlay failed ({e})")
 
