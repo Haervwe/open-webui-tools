@@ -2,12 +2,12 @@
 title: MiniMax LLM Pipe
 author: octopus
 author_url: https://github.com/octo-patch
-version: 1.0.0
+version: 1.1.0
 required_open_webui_version: 0.6.0
 description: MiniMax LLM Pipe for Open WebUI — routes chat completions to MiniMax's
-OpenAI-compatible API (api.minimax.io/v1). Supports MiniMax-M2.7 and
-MiniMax-M2.7-highspeed models with streaming, temperature clamping, and
-automatic think-tag handling.
+OpenAI-compatible API (api.minimax.io/v1). Supports MiniMax-M3 (default),
+MiniMax-M2.7, and MiniMax-M2.7-highspeed models with streaming, temperature
+clamping, and automatic think-tag handling.
 """
 
 import aiohttp
@@ -38,6 +38,11 @@ logger = logging.getLogger("minimax_pipe")
 MINIMAX_API_BASE = "https://api.minimax.io/v1"
 
 MINIMAX_MODELS = [
+    {
+        "id": "MiniMax-M3",
+        "name": "MiniMax M3",
+        "context_length": 512000,
+    },
     {
         "id": "MiniMax-M2.7",
         "name": "MiniMax M2.7",

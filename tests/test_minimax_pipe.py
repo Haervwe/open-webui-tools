@@ -286,12 +286,18 @@ class TestConstants(unittest.TestCase):
             assert "id" in model
             assert "name" in model
             assert "context_length" in model
-            assert model["context_length"] == 204000
+            assert isinstance(model["context_length"], int)
+            assert model["context_length"] >= 200000
 
     def test_model_ids(self):
         ids = [m["id"] for m in MINIMAX_MODELS]
+        assert "MiniMax-M3" in ids
         assert "MiniMax-M2.7" in ids
         assert "MiniMax-M2.7-highspeed" in ids
+
+    def test_m3_is_first(self):
+        """M3 should be listed first as the new default."""
+        assert MINIMAX_MODELS[0]["id"] == "MiniMax-M3"
 
 
 if __name__ == "__main__":
