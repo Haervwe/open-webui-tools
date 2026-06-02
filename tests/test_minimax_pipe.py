@@ -128,6 +128,10 @@ class TestResolveModelId(unittest.TestCase):
         pipe = Pipe()
         assert pipe._resolve_model_id("minimax-MiniMax-M2.7") == "MiniMax-M2.7"
 
+    def test_m3_model(self):
+        pipe = Pipe()
+        assert pipe._resolve_model_id("minimax-MiniMax-M3") == "MiniMax-M3"
+
     def test_highspeed_model(self):
         pipe = Pipe()
         assert (
@@ -286,12 +290,26 @@ class TestConstants(unittest.TestCase):
             assert "id" in model
             assert "name" in model
             assert "context_length" in model
-            assert model["context_length"] == 204000
 
     def test_model_ids(self):
         ids = [m["id"] for m in MINIMAX_MODELS]
+        assert "MiniMax-M3" in ids
         assert "MiniMax-M2.7" in ids
         assert "MiniMax-M2.7-highspeed" in ids
+
+    def test_m3_is_first(self):
+        """M3 should be the first model (new default exposed)."""
+        assert MINIMAX_MODELS[0]["id"] == "MiniMax-M3"
+
+    def test_m3_context_length(self):
+        m3 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3")
+        assert m3["context_length"] == 524288
+
+    def test_legacy_models_removed(self):
+        """Older versions (M2.5/M2.1/M2/M1) should not be present."""
+        ids = [m["id"] for m in MINIMAX_MODELS]
+        for legacy in ("MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2", "MiniMax-M1"):
+            assert legacy not in ids
 
 
 if __name__ == "__main__":

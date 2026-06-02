@@ -39,7 +39,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Letta Agent** - Autonomous agent integration
 - **Perplexica Pipe** - AI-powered web search with streaming responses and citations
 - **Google Veo Text-to-Video & Image-to-Video** - Generate videos from text or a single image using Google Veo (only one image supported as input)
-- **MiniMax LLM Pipe** - Route chat completions to MiniMax's OpenAI-compatible API with M2.7 and M2.7-highspeed models (204K context)
+- **MiniMax LLM Pipe** - Route chat completions to MiniMax's OpenAI-compatible API with M3 (512K context), M2.7, and M2.7-highspeed models
 
 ### 🔧 **Filters**
 
@@ -944,7 +944,7 @@ Prompt: "Edit this image to look like a medieval fantasy king, preserving facial
 
 ### Description
 
-Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-compatible API (`api.minimax.io/v1`) directly from Open WebUI. This pipe exposes MiniMax-M2.7 and MiniMax-M2.7-highspeed models (both with 204K context windows) as selectable models in your Open WebUI instance.
+Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-compatible API (`api.minimax.io/v1`) directly from Open WebUI. This pipe exposes MiniMax-M3 (512K context, the latest flagship model), MiniMax-M2.7, and MiniMax-M2.7-highspeed (both 204K context) as selectable models in your Open WebUI instance.
 
 ### Configuration
 
@@ -959,13 +959,13 @@ Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-comp
 
 1. **Install the pipe**: Copy `functions/minimax_pipe.py` into Open WebUI via Workspace > Functions
 2. **Configure**: Set your `MINIMAX_API_KEY` in the pipe's Valves settings
-3. **Select model**: Choose "MiniMax M2.7" or "MiniMax M2.7 Highspeed" from the model dropdown
+3. **Select model**: Choose "MiniMax M3", "MiniMax M2.7", or "MiniMax M2.7 Highspeed" from the model dropdown
 4. **Start chatting**: The pipe streams responses directly from the MiniMax API
 
 ### Features
 
 - **OpenAI-Compatible Routing**: Uses MiniMax's `/v1/chat/completions` endpoint
-- **Two Models**: MiniMax-M2.7 (full) and MiniMax-M2.7-highspeed (faster) — both with 204K context
+- **Three Models**: MiniMax-M3 (512K context flagship), MiniMax-M2.7 (full, 204K), and MiniMax-M2.7-highspeed (faster, 204K)
 - **Streaming**: Real-time streamed responses via `chat:message:delta` events
 - **Temperature Clamping**: Automatically clamps temperature to MiniMax's accepted range (0.01–1.0)
 - **Think-Tag Stripping**: Strips `<think>…</think>` reasoning blocks from output (configurable)
