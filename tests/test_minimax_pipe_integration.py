@@ -48,11 +48,11 @@ def pipe():
 
 @pytest.mark.asyncio
 async def test_streaming_completion(pipe):
-    """Test a real streaming chat completion with MiniMax M2.7-highspeed."""
+    """Test a real streaming chat completion with MiniMax M3."""
     emitter = AsyncMock()
     result = await pipe.pipe(
         body={
-            "model": "minimax-MiniMax-M2.7-highspeed",
+            "model": "minimax-MiniMax-M3",
             "messages": [
                 {"role": "user", "content": "Say 'hello' and nothing else."}
             ],
@@ -89,7 +89,7 @@ async def test_think_tag_stripping(pipe):
     pipe.valves.STRIP_THINKING = True
     result = await pipe.pipe(
         body={
-            "model": "minimax-MiniMax-M2.7-highspeed",
+            "model": "minimax-MiniMax-M3",
             "messages": [
                 {
                     "role": "user",
@@ -120,7 +120,7 @@ async def test_temperature_zero_handled(pipe):
     emitter = AsyncMock()
     result = await pipe.pipe(
         body={
-            "model": "minimax-MiniMax-M2.7-highspeed",
+            "model": "minimax-MiniMax-M3",
             "messages": [
                 {"role": "user", "content": "Say 'ok' and nothing else."}
             ],

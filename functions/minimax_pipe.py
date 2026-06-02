@@ -41,7 +41,7 @@ MINIMAX_MODELS = [
     {
         "id": "MiniMax-M3",
         "name": "MiniMax M3",
-        "context_length": 512000,
+        "context_length": 524288,
     },
     {
         "id": "MiniMax-M2.7",

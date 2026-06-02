@@ -39,7 +39,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Letta Agent** - Autonomous agent integration
 - **Perplexica Pipe** - AI-powered web search with streaming responses and citations
 - **Google Veo Text-to-Video & Image-to-Video** - Generate videos from text or a single image using Google Veo (only one image supported as input)
-- **MiniMax LLM Pipe** - Route chat completions to MiniMax's OpenAI-compatible API with M3 (512K context, default), M2.7 and M2.7-highspeed (204K context) models
+- **MiniMax LLM Pipe** - Route chat completions to MiniMax's OpenAI-compatible API with M3 (512K context), M2.7, and M2.7-highspeed models
 
 ### 🔧 **Filters**
 
@@ -944,7 +944,7 @@ Prompt: "Edit this image to look like a medieval fantasy king, preserving facial
 
 ### Description
 
-Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-compatible API (`api.minimax.io/v1`) directly from Open WebUI. This pipe exposes MiniMax-M3 (512K context, the new flagship and default), MiniMax-M2.7 and MiniMax-M2.7-highspeed (both with 204K context windows) as selectable models in your Open WebUI instance.
+Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-compatible API (`api.minimax.io/v1`) directly from Open WebUI. This pipe exposes MiniMax-M3 (512K context, the latest flagship model), MiniMax-M2.7, and MiniMax-M2.7-highspeed (both 204K context) as selectable models in your Open WebUI instance.
 
 ### Configuration
 
@@ -965,7 +965,7 @@ Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-comp
 ### Features
 
 - **OpenAI-Compatible Routing**: Uses MiniMax's `/v1/chat/completions` endpoint
-- **Three Models**: MiniMax-M3 (flagship, 512K context), MiniMax-M2.7 (full, 204K context) and MiniMax-M2.7-highspeed (faster, 204K context)
+- **Three Models**: MiniMax-M3 (512K context flagship), MiniMax-M2.7 (full, 204K), and MiniMax-M2.7-highspeed (faster, 204K)
 - **Streaming**: Real-time streamed responses via `chat:message:delta` events
 - **Temperature Clamping**: Automatically clamps temperature to MiniMax's accepted range (0.01–1.0)
 - **Think-Tag Stripping**: Strips `<think>…</think>` reasoning blocks from output (configurable)
