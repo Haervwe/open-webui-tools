@@ -86,58 +86,79 @@ async def download_audio_to_storage(
     audio_url: str,
     song_name: str = "",
     headers: Optional[Dict[str, str]] = None,
+    max_retries: int = 3,
+    retry_delay: float = 3.0,
 ) -> Optional[str]:
-    """Downloads audio from the backend and saves it to OWUI storage."""
-    try:
-        # Determine extension from URL or default to .mp3
-        file_extension = ".mp3"
-        if ".wav" in audio_url.lower(): file_extension = ".wav"
-        elif ".flac" in audio_url.lower(): file_extension = ".flac"
-        
-        if song_name:
-            safe_name = re.sub(r"[^\w\s-]", "", song_name).strip().replace(" ", "_")
-            local_filename = f"{safe_name}{file_extension}"
-        else:
-            local_filename = f"acestep_{uuid.uuid4().hex[:8]}{file_extension}"
+    """Downloads audio from the backend and saves it to OWUI storage.
+    Retries on failure since the audio file may not be immediately available."""
+    # Determine extension from URL or default to .mp3
+    file_extension = ".mp3"
+    if ".wav" in audio_url.lower(): file_extension = ".wav"
+    elif ".flac" in audio_url.lower(): file_extension = ".flac"
 
-        mime_map = {
-            ".mp3": "audio/mpeg",
-            ".wav": "audio/wav",
-            ".flac": "audio/flac",
-            ".ogg": "audio/ogg",
-        }
-        content_type = mime_map.get(file_extension.lower(), "audio/mpeg")
+    if song_name:
+        safe_name = re.sub(r"[^\w\s-]", "", song_name).strip().replace(" ", "_")
+        local_filename = f"{safe_name}{file_extension}"
+    else:
+        local_filename = f"acestep_{uuid.uuid4().hex[:8]}{file_extension}"
 
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(audio_url) as response:
-                if response.status == 200:
-                    audio_content = await response.read()
+    mime_map = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+    }
+    content_type = mime_map.get(file_extension.lower(), "audio/mpeg")
 
-                    upload_file = UploadFile(
-                        file=io.BytesIO(audio_content),
-                        filename=local_filename,
-                        headers={"content-type": content_type},
-                    )
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(audio_url) as response:
+                    if response.status == 200:
+                        audio_content = await response.read()
+                        if not audio_content or len(audio_content) < 100:
+                            print(f"[ACEStep] Attempt {attempt}/{max_retries}: Audio content too small ({len(audio_content) if audio_content else 0} bytes) from {audio_url}")
+                            last_error = "Audio content too small or empty"
+                            if attempt < max_retries:
+                                await asyncio.sleep(retry_delay)
+                            continue
 
-                    file_item = await upload_file_handler(
-                        request,
-                        file=upload_file,
-                        metadata={},
-                        process=False,
-                        user=user,
-                    )
+                        upload_file = UploadFile(
+                            file=io.BytesIO(audio_content),
+                            filename=local_filename,
+                            headers={"content-type": content_type},
+                        )
 
-                    if file_item and file_item.id:
-                        return f"/api/v1/files/{file_item.id}/content"
+                        file_item = await upload_file_handler(
+                            request,
+                            file=upload_file,
+                            metadata={},
+                            process=False,
+                            user=user,
+                        )
 
-                    return None
-                else:
-                    print(f"[DEBUG] Failed to download audio: HTTP {response.status}")
-                    return None
+                        if file_item and file_item.id:
+                            print(f"[ACEStep] Successfully saved audio to OWUI storage: {file_item.id} ({len(audio_content)} bytes)")
+                            return f"/api/v1/files/{file_item.id}/content"
 
-    except Exception as e:
-        print(f"[DEBUG] Error uploading audio to storage: {str(e)}")
-        return None
+                        print(f"[ACEStep] Attempt {attempt}/{max_retries}: upload_file_handler returned no file ID")
+                        last_error = "upload_file_handler returned no file ID"
+                    else:
+                        body = await response.text()
+                        print(f"[ACEStep] Attempt {attempt}/{max_retries}: Failed to download audio: HTTP {response.status} - {body[:200]}")
+                        last_error = f"HTTP {response.status}"
+
+        except Exception as e:
+            print(f"[ACEStep] Attempt {attempt}/{max_retries}: Error downloading/uploading audio: {str(e)}")
+            last_error = str(e)
+
+        if attempt < max_retries:
+            print(f"[ACEStep] Retrying in {retry_delay}s...")
+            await asyncio.sleep(retry_delay)
+
+    print(f"[ACEStep] All {max_retries} attempts failed for {audio_url}. Last error: {last_error}")
+    return None
 
 
 # PORTED UI LOGIC (1:1 copy from comfyui_ace_step_audio_tool_1_5.py)
@@ -774,12 +795,16 @@ class Tools:
                 user_obj = await Users.get_user_by_id(__user__["id"])
 
             for i, rel_url in enumerate(audio_urls):
-                full_audio_url = f"{base_url}{rel_url}"
+                # Ensure relative URLs are properly joined (handle leading slash)
+                if rel_url.startswith("http://") or rel_url.startswith("https://"):
+                    full_audio_url = rel_url
+                else:
+                    full_audio_url = f"{base_url}{rel_url if rel_url.startswith('/') else '/' + rel_url}"
                 track_title = (
                     song_title if batch_size <= 1 else f"{song_title} (Track {i + 1})"
                 )
-                
-                # Save to OWUI storage
+
+                # Save to OWUI storage (retries internally)
                 owui_url = await download_audio_to_storage(
                     __request__,
                     user_obj,
@@ -790,14 +815,30 @@ class Tools:
                 if owui_url:
                     tracks.append({"title": track_title, "url": owui_url})
                 else:
-                    # Fallback to direct backend URL if storage fails
-                    tracks.append({"title": track_title, "url": full_audio_url})
+                    # Do NOT fall back to backend URL - it won't work in the browser
+                    print(f"[ACEStep] WARNING: Could not save track {i+1} ({track_title}) to OWUI storage. Backend URL: {full_audio_url}")
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": f"Warning: Failed to save track {i+1} to storage.", "done": False},
+                            }
+                        )
+
+            if not tracks:
+                error_msg = f"Generation succeeded but all {len(audio_urls)} track(s) failed to save to storage. Check server logs for details."
+                if __event_emitter__:
+                    await __event_emitter__({"type": "status", "data": {"description": error_msg, "done": True}})
+                return error_msg
 
             if __event_emitter__:
+                saved_count = len(tracks)
+                total_count = len(audio_urls)
+                desc = "Generation complete!" if saved_count == total_count else f"Generation complete! ({saved_count}/{total_count} tracks saved)"
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "Generation complete!", "done": True},
+                        "data": {"description": desc, "done": True},
                     }
                 )
 

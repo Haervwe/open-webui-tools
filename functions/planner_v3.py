@@ -2528,13 +2528,13 @@ class ToolRegistry:
                             },
                             "prompt": {
                                 "type": "string",
-                                "description": "Detailed instructions for the subagent. If you need data from previous tasks, list them in 'related_tasks' instead of using macros here.",
+                                "description": "Detailed instructions for the subagent. CRITICAL: If you need data from previous tasks, you MUST pass their task IDs in 'related_tasks' - subagents CANNOT access other task results or macros in the prompt.",
                             },
                             "task_id": sub_task_id_schema,
                             "related_tasks": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Optional list of previously completed Task IDs whose results you need contextually available to the subagent.",
+                                "description": "List of previously completed Task IDs. REQUIRED if the subagent needs context, code, or data from those tasks to complete its objective.",
                             },
                         },
                         "required": ["model_id", "prompt", "task_id"],
@@ -3372,7 +3372,7 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
                 "   - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent. To **continue or follow up** on a previous interaction, you MUST use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.\n"
                 "   - **@task_id Text Replacement (Orchestrator Macro)**: Writing `@task_id` (e.g., `@task_research`) in your **FINAL response** to the user will automatically insert the full text result of that task. **USE THIS to avoid re-typing or redundantly summarizing large code blocks, data, or technical reports.** Do NOT use these macros in subagent prompts — use `related_tasks` for that purpose.\n"
                 "   - **Raw Task ID (no @ or :)**: Use the plain ID (`task_research`) in tool parameters. NEVER prefix with @ or : in parameter fields or when defining task IDs.\n"
-                "   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array. **The task must already have a result stored (completed status) for this to work.**\n"
+                "   - **CRITICAL — EXPLICITLY PASS `related_tasks`**: Subagents are ISOLATED and have NO memory of other tasks. They CANNOT see any other task's results unless you explicitly pass them. When a subagent needs context, data, or code produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array. **The task must already have a result stored (completed status) for this to work.**\n"
             )
             tool_idx = 3
         else:
@@ -3381,7 +3381,7 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
                 "   - **Threading & Context**: The `task_id` identifies the conversation thread with the subagent. To **continue or follow up** on a previous interaction, use the **same** `task_id`. To start a **fresh** conversation, use a **new** `task_id`.\n"
                 "   - **@task_id Text Replacement (Orchestrator Macro)**: Writing `@task_id` (e.g., `@task_research`) in your **FINAL response** to the user will automatically insert the full text result of that task. **USE THIS to avoid re-typing or redundantly summarizing large code blocks, data, or technical reports.** Do NOT use these macros in subagent prompts — use `related_tasks` for that purpose.\n"
                 "   - **Raw Task ID (no @ or :)**: Use the plain ID (`task_research`) in tool parameters. NEVER prefix with @ or : in parameter fields or when defining task IDs.\n"
-                "   - **CRITICAL — `related_tasks` for cross-task data passing**: Subagents are ISOLATED — they CANNOT see any other task's results unless you explicitly pass them. When a subagent needs data produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array. **The task must already have a result stored (completed status) for this to work.**\n"
+                "   - **CRITICAL — EXPLICITLY PASS `related_tasks`**: Subagents are ISOLATED and have NO memory of other tasks. They CANNOT see any other task's results unless you explicitly pass them. When a subagent needs context, data, or code produced by a DIFFERENT task, you MUST list that task's raw ID in the `related_tasks` array. **The task must already have a result stored (completed status) for this to work.**\n"
             )
             tool_idx = 2
 
@@ -3395,7 +3395,7 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
             "### MANDATORY RULES:\n"
             "- Delegate work to subagents using `call_subagent` for complex analysis, generation, or reasoning.\n"
             "- **CODING RULE**: For COMPLEX coding, scripting, calculation, or data-processing task, delegate to a `code_interpreter_agent` or equivalent. NEVER use web_search_agent or knowledge_agent for code. **ALWAYS provide FULL code in the final output by using @task_id substitution tags** (e.g., '@task_coding') to avoid truncation or partial copying.\n"
-            "- **ALWAYS pass `related_tasks`** when a subagent needs results from previous tasks. Subagents CANNOT see other task results without this.\n"
+            "- **CRITICAL - EXPLICITLY PASS `related_tasks`**: Subagents are completely ISOLATED and have NO memory of other tasks. If a subagent needs context, data, or code from previous tasks, you MUST explicitly pass those task IDs in the `related_tasks` array of `call_subagent`. DO NOT assume they know anything outside their own prompt.\n"
             "- **ID CONSISTENCY**: You MUST use the EXACT `task_id` values you defined during the PLANNING phase. NEVER prepend task IDs with colons (:) or @ symbols in tool calls.\n"
             "- **ANTIGRAVITY MACROS**: Use `@task_id` references in your FINAL response to include large previous outputs, code, or reports. **DO NOT summarize or manually copy-paste large technical results** if a macro can include the original verbatim.\n"
             "- Final Output is YOUR responsibility. Make it look professional and clean.\n"
