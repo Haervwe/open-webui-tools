@@ -41,6 +41,9 @@ from minimax_pipe import (
     MINIMAX_API_BASE,
     MINIMAX_TEMP_MIN,
     MINIMAX_TEMP_MAX,
+    THINKING_MODE_ADAPTIVE,
+    THINKING_MODE_DISABLED,
+    THINKING_MODE_ALWAYS_ON,
 )
 
 
@@ -102,6 +105,7 @@ class TestPipeInit(unittest.TestCase):
         assert pipe.valves.MINIMAX_API_KEY == ""
         assert pipe.valves.STRIP_THINKING is True
         assert pipe.valves.DEFAULT_TEMPERATURE == 0.7
+        assert pipe.valves.THINKING_MODE == THINKING_MODE_ADAPTIVE
         assert len(pipe.valves.ENABLED_MODELS) == len(MINIMAX_MODELS)
 
     def test_pipes_returns_all_models(self):
@@ -119,6 +123,7 @@ class TestPipeInit(unittest.TestCase):
         result = pipe.pipes()
         assert len(result) == 1
         assert result[0]["id"] == "minimax-MiniMax-M2.7"
+        assert result[0]["name"] == "MiniMax MiniMax M2.7"
 
 
 class TestResolveModelId(unittest.TestCase):
@@ -131,13 +136,6 @@ class TestResolveModelId(unittest.TestCase):
     def test_m3_model(self):
         pipe = Pipe()
         assert pipe._resolve_model_id("minimax-MiniMax-M3") == "MiniMax-M3"
-
-    def test_highspeed_model(self):
-        pipe = Pipe()
-        assert (
-            pipe._resolve_model_id("minimax-MiniMax-M2.7-highspeed")
-            == "MiniMax-M2.7-highspeed"
-        )
 
     def test_with_function_prefix(self):
         pipe = Pipe()
@@ -290,26 +288,211 @@ class TestConstants(unittest.TestCase):
             assert "id" in model
             assert "name" in model
             assert "context_length" in model
+            assert "input_modalities" in model
+            assert "thinking" in model
 
     def test_model_ids(self):
         ids = [m["id"] for m in MINIMAX_MODELS]
         assert "MiniMax-M3" in ids
         assert "MiniMax-M2.7" in ids
-        assert "MiniMax-M2.7-highspeed" in ids
 
     def test_m3_is_first(self):
-        """M3 should be the first model (new default exposed)."""
+        """M3 should be the first model (default exposed)."""
         assert MINIMAX_MODELS[0]["id"] == "MiniMax-M3"
 
     def test_m3_context_length(self):
         m3 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3")
-        assert m3["context_length"] == 524288
+        assert m3["context_length"] == 1000000
+
+    def test_m27_context_length(self):
+        m27 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M2.7")
+        assert m27["context_length"] == 204800
+
+    def test_m3_input_modalities(self):
+        m3 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3")
+        assert m3["input_modalities"] == ["text", "image", "video"]
+
+    def test_m27_text_only_modalities(self):
+        m27 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M2.7")
+        assert m27["input_modalities"] == ["text"]
+
+    def test_m3_thinking_modes(self):
+        m3 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3")
+        assert m3["thinking"] == ["adaptive", "disabled"]
+
+    def test_m27_always_on_thinking(self):
+        m27 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M2.7")
+        assert m27["thinking"] == ["always_on"]
+
+    def test_thinking_mode_constants(self):
+        assert THINKING_MODE_ADAPTIVE == "adaptive"
+        assert THINKING_MODE_DISABLED == "disabled"
+        assert THINKING_MODE_ALWAYS_ON == "always_on"
 
     def test_legacy_models_removed(self):
-        """Older versions (M2.5/M2.1/M2/M1) should not be present."""
+        """Older variants should not be present."""
         ids = [m["id"] for m in MINIMAX_MODELS]
-        for legacy in ("MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2", "MiniMax-M1"):
+        for legacy in (
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5",
+            "MiniMax-M2.1",
+            "MiniMax-M2",
+            "MiniMax-M1",
+        ):
             assert legacy not in ids
+
+
+class TestNormalizeMessages(unittest.TestCase):
+    """Tests for Pipe._normalize_messages()."""
+
+    def _pipe(self):
+        pipe = Pipe()
+        pipe.valves.MINIMAX_API_KEY = "test-key"
+        return pipe
+
+    def test_string_content_unchanged(self):
+        pipe = self._pipe()
+        messages = [{"role": "user", "content": "Hello"}]
+        result = pipe._normalize_messages(messages, "MiniMax-M3")
+        assert result == [{"role": "user", "content": "Hello"}]
+
+    def test_text_only_model_flattens_files(self):
+        """M2.7 must not receive image parts even when files are present."""
+        pipe = self._pipe()
+        messages = [
+            {
+                "role": "user",
+                "content": "Describe this",
+                "files": [
+                    {"type": "image", "url": "data:image/png;base64,AAAA"}
+                ],
+            }
+        ]
+        result = pipe._normalize_messages(messages, "MiniMax-M2.7")
+        assert result == [
+            {"role": "user", "content": "Describe this"}
+        ]
+
+    def test_multimodal_model_inlines_image_file(self):
+        pipe = self._pipe()
+        messages = [
+            {
+                "role": "user",
+                "content": "Describe this",
+                "files": [
+                    {"type": "image", "url": "data:image/png;base64,AAAA"}
+                ],
+            }
+        ]
+        result = pipe._normalize_messages(messages, "MiniMax-M3")
+        assert len(result) == 1
+        content = result[0]["content"]
+        assert isinstance(content, list)
+        assert {"type": "text", "text": "Describe this"} in content
+        assert any(p.get("type") == "image_url" for p in content)
+
+    def test_multimodal_model_inlines_video_file(self):
+        pipe = self._pipe()
+        messages = [
+            {
+                "role": "user",
+                "content": "Describe this clip",
+                "files": [
+                    {"type": "video", "url": "data:video/mp4;base64,AAAA"}
+                ],
+            }
+        ]
+        result = pipe._normalize_messages(messages, "MiniMax-M3")
+        content = result[0]["content"]
+        assert isinstance(content, list)
+        assert any(p.get("type") == "video_url" for p in content)
+
+    def test_already_multipart_content_passthrough(self):
+        pipe = self._pipe()
+        parts = [{"type": "text", "text": "Hi"}]
+        messages = [{"role": "user", "content": parts}]
+        result = pipe._normalize_messages(messages, "MiniMax-M3")
+        assert result[0]["content"] is parts
+
+    def test_image_url_extension_detected_as_video(self):
+        pipe = self._pipe()
+        messages = [
+            {
+                "role": "user",
+                "content": "",
+                "files": [{"url": "https://example.com/clip.mp4"}],
+            }
+        ]
+        result = pipe._normalize_messages(messages, "MiniMax-M3")
+        content = result[0]["content"]
+        assert any(p.get("type") == "video_url" for p in content)
+
+
+class TestResolveThinking(unittest.TestCase):
+    """Tests for Pipe._resolve_thinking()."""
+
+    def _pipe(self):
+        pipe = Pipe()
+        pipe.valves.MINIMAX_API_KEY = "test-key"
+        return pipe
+
+    def test_always_on_model_returns_none(self):
+        """M2.7 is always-on, so the thinking field must be omitted."""
+        pipe = self._pipe()
+        assert pipe._resolve_thinking("MiniMax-M2.7", {}) is None
+
+    def test_m3_default_adaptive(self):
+        pipe = self._pipe()
+        assert pipe._resolve_thinking("MiniMax-M3", {}) == "adaptive"
+
+    def test_m3_body_override_disabled(self):
+        pipe = self._pipe()
+        assert pipe._resolve_thinking("MiniMax-M3", {"thinking": "disabled"}) == "disabled"
+
+    def test_m3_ignores_unsupported_body_value(self):
+        pipe = self._pipe()
+        assert pipe._resolve_thinking("MiniMax-M3", {"thinking": "bogus"}) == "adaptive"
+
+    def test_m3_respects_valve_default(self):
+        pipe = self._pipe()
+        pipe.valves.THINKING_MODE = "disabled"
+        assert pipe._resolve_thinking("MiniMax-M3", {}) == "disabled"
+
+    def test_unknown_model_returns_none(self):
+        pipe = self._pipe()
+        assert pipe._resolve_thinking("MiniMax-Unknown", {}) is None
+
+
+class TestPayloadThinking(unittest.TestCase):
+    """Verify the thinking field is added to the payload only when supported."""
+
+    def test_m3_payload_includes_thinking(self):
+        pipe = Pipe()
+        pipe.valves.MINIMAX_API_KEY = "test-key"
+        body = {
+            "model": "minimax-MiniMax-M3",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        model_id = pipe._resolve_model_id(body["model"])
+        thinking = pipe._resolve_thinking(model_id, body)
+        payload = {"model": model_id, "messages": body["messages"], "stream": True}
+        if thinking is not None:
+            payload["thinking"] = thinking
+        assert payload["thinking"] == "adaptive"
+
+    def test_m27_payload_omits_thinking(self):
+        pipe = Pipe()
+        pipe.valves.MINIMAX_API_KEY = "test-key"
+        body = {
+            "model": "minimax-MiniMax-M2.7",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        model_id = pipe._resolve_model_id(body["model"])
+        thinking = pipe._resolve_thinking(model_id, body)
+        payload = {"model": model_id, "messages": body["messages"], "stream": True}
+        if thinking is not None:
+            payload["thinking"] = thinking
+        assert "thinking" not in payload
 
 
 if __name__ == "__main__":
