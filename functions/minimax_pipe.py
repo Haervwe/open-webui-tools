@@ -2,12 +2,13 @@
 title: MiniMax LLM Pipe
 author: octopus
 author_url: https://github.com/octo-patch
-version: 1.1.0
+version: 1.2.0
 required_open_webui_version: 0.6.0
 description: MiniMax LLM Pipe for Open WebUI — routes chat completions to MiniMax's
-OpenAI-compatible API (api.minimax.io/v1). Supports MiniMax-M3 (default),
-MiniMax-M2.7, and MiniMax-M2.7-highspeed models with streaming, temperature
-clamping, and automatic think-tag handling.
+OpenAI-compatible API (api.minimax.io/v1). Supports MiniMax-M3 (default) with
+image and video input plus adaptive/disabled thinking, and MiniMax-M2.7 with
+always-on thinking, with streaming, temperature clamping, and automatic
+think-tag handling.
 """
 
 import aiohttp
@@ -24,6 +25,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Tuple,
 )
 
 from fastapi import Request
@@ -41,19 +43,24 @@ MINIMAX_MODELS = [
     {
         "id": "MiniMax-M3",
         "name": "MiniMax M3",
-        "context_length": 524288,
+        "context_length": 1000000,
+        "input_modalities": ["text", "image", "video"],
+        "thinking": ["adaptive", "disabled"],
     },
     {
         "id": "MiniMax-M2.7",
         "name": "MiniMax M2.7",
-        "context_length": 204000,
-    },
-    {
-        "id": "MiniMax-M2.7-highspeed",
-        "name": "MiniMax M2.7 Highspeed",
-        "context_length": 204000,
+        "context_length": 204800,
+        "input_modalities": ["text"],
+        "thinking": ["always_on"],
     },
 ]
+
+# Thinking modes accepted by the chat-completions API. Each model declares
+# which of these it supports in MINIMAX_MODELS[*]["thinking"].
+THINKING_MODE_ADAPTIVE = "adaptive"
+THINKING_MODE_DISABLED = "disabled"
+THINKING_MODE_ALWAYS_ON = "always_on"
 
 # Temperature must be in (0.0, 1.0] for MiniMax
 MINIMAX_TEMP_MIN = 0.01
@@ -104,6 +111,14 @@ class Pipe:
         DEFAULT_TEMPERATURE: float = Field(
             default=0.7,
             description="Default temperature when none is specified (0.01–1.0)",
+        )
+        THINKING_MODE: str = Field(
+            default=THINKING_MODE_ADAPTIVE,
+            description=(
+                "Thinking mode for models that support it: "
+                "'adaptive' (let the model decide) or 'disabled'. "
+                "Ignored by always-on models."
+            ),
         )
 
     def __init__(self) -> None:
@@ -175,7 +190,9 @@ class Pipe:
             return error_msg
 
         # --- Build payload ---
-        messages = body.get("messages", [])
+        messages = self._normalize_messages(
+            body.get("messages", []), model_id
+        )
         temperature = _clamp_temperature(
             body.get("temperature", self.valves.DEFAULT_TEMPERATURE)
         )
@@ -192,6 +209,13 @@ class Pipe:
             payload["max_tokens"] = body["max_tokens"]
         if body.get("top_p") is not None:
             payload["top_p"] = body["top_p"]
+
+        # Forward adaptive/disabled thinking controls for models that support
+        # them. M3 accepts "adaptive" (let the model decide) and "disabled";
+        # M2.7 is always-on and ignores this field.
+        thinking_config = self._resolve_thinking(model_id, body)
+        if thinking_config is not None:
+            payload["thinking"] = thinking_config
 
         headers = {
             "Authorization": f"Bearer {self.valves.MINIMAX_API_KEY}",
@@ -253,6 +277,153 @@ class Pipe:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _message_content_to_str(content: Any) -> str:
+        """Flatten a message's content into a single string."""
+        if isinstance(content, str):
+            return content
+        parts: List[str] = []
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text" and isinstance(
+                        item.get("text"), str
+                    ):
+                        parts.append(item["text"])
+                    elif isinstance(item.get("content"), str):
+                        parts.append(item["content"])
+                elif isinstance(item, str):
+                    parts.append(item)
+        return "".join(parts)
+
+    def _model_supports_modality(
+        self, model_id: str, modality: str
+    ) -> bool:
+        """True when the resolved model lists the given input modality."""
+        for model in MINIMAX_MODELS:
+            if model["id"] == model_id:
+                return modality in model.get("input_modalities", ["text"])
+        return False
+
+    def _normalize_messages(
+        self, messages: List[Dict[str, Any]], model_id: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Normalize Open WebUI messages for the MiniMax API.
+
+        For multimodal models (MiniMax-M3), inline attachments carried on the
+        Open WebUI message are converted to OpenAI-style multi-part content:
+        text plus image_url / video_url parts. For text-only models the content
+        is flattened to a string so the API never receives image or video
+        parts it cannot handle. The supplied ``model_id`` selects which path
+        applies.
+        """
+        normalized: List[Dict[str, Any]] = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content")
+            files = message.get("files")
+
+            # Already multi-part content from the caller
+            if isinstance(content, list):
+                normalized.append({"role": role, "content": content})
+                continue
+
+            text_content = (
+                content if isinstance(content, str) else self._message_content_to_str(content)
+            )
+
+            if files and self._model_supports_modality(
+                model_id, "image"
+            ):
+                parts: List[Dict[str, Any]] = []
+                if text_content:
+                    parts.append({"type": "text", "text": text_content})
+                for file in files:
+                    url = self._attachment_url(file)
+                    if not url:
+                        continue
+                    kind = file.get("type") or self._attachment_kind(url)
+                    if kind == "video" and self._model_supports_modality(
+                        model_id, "video"
+                    ):
+                        parts.append(
+                            {"type": "video_url", "video_url": {"url": url}}
+                        )
+                    else:
+                        parts.append(
+                            {"type": "image_url", "image_url": {"url": url}}
+                        )
+                normalized.append({"role": role, "content": parts or text_content})
+            else:
+                normalized.append({"role": role, "content": text_content})
+        return normalized
+
+    @staticmethod
+    def _attachment_url(file: Any) -> Optional[str]:
+        """Extract a URL or data URL from an Open WebUI file attachment."""
+        if not isinstance(file, dict):
+            return None
+        # Direct URL fields used by Open WebUI uploads
+        for key in ("url", "uri"):
+            value = file.get(key)
+            if isinstance(value, str) and value:
+                return value
+        # Nested { image_url: { url } } / { video_url: { url } }
+        for key in ("image_url", "video_url"):
+            nested = file.get(key)
+            if isinstance(nested, dict):
+                url = nested.get("url")
+                if isinstance(url, str) and url:
+                    return url
+        return None
+
+    @staticmethod
+    def _attachment_kind(url: str) -> str:
+        """Classify an attachment as 'image' or 'video' from its data URL."""
+        if url.startswith("data:"):
+            head = url.split(",", 1)[0]
+            if head.startswith("data:video"):
+                return "video"
+            return "image"
+        lower = url.lower().split("?", 1)[0]
+        if lower.endswith((".mp4", ".mov", ".webm", ".mkv", ".avi")):
+            return "video"
+        return "image"
+
+    def _resolve_thinking(
+        self, model_id: str, body: Dict[str, Any]
+    ) -> Optional[str]:
+        """
+        Resolve the thinking mode to forward to the API.
+
+        Only models that list adaptive/disabled thinking send the field; an
+        always-on model (e.g. M2.7) ignores it and returns None so the field
+        is omitted entirely.
+        """
+        supported: List[str] = []
+        for model in MINIMAX_MODELS:
+            if model["id"] == model_id:
+                supported = model.get("thinking", [])
+                break
+
+        if THINKING_MODE_ADAPTIVE not in supported and (
+            THINKING_MODE_DISABLED not in supported
+        ):
+            return None
+
+        requested = body.get("thinking", self.valves.THINKING_MODE)
+        if isinstance(requested, str) and requested in supported:
+            return requested
+        # Fall back to the valve default when it is supported, otherwise pick
+        # the first supported adaptive/disabled mode.
+        if self.valves.THINKING_MODE in supported:
+            return self.valves.THINKING_MODE
+        for mode in (THINKING_MODE_ADAPTIVE, THINKING_MODE_DISABLED):
+            if mode in supported:
+                return mode
+        return None
 
     def _resolve_model_id(self, pipe_id: str) -> Optional[str]:
         """Extract the MiniMax model ID from the pipe model string."""
