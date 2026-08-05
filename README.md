@@ -20,6 +20,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Pexels Media Search** - High-quality photos and videos from Pexels API
 - **YouTube Search & Embed** - Search YouTube and play videos in embedded player
 - **Xquik X Data Tool** - Search and look up X posts, users, timelines, and trends
+- **OutageDeck Provider Status** - Check provider health and incident timelines without an API key
 - **Native Image Generator** - Direct Open WebUI image generation with Ollama model management
 - **Hugging Face Image Generator** - AI-powered image creation
 - **ComfyUI Image-to-Image (Qwen Edit 2509)** - Advanced image editing with multi-image support
@@ -113,29 +114,30 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 12. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
 13. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
 14. [Xquik X Data Tool](#xquik-x-data-tool)
-15. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-16. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-17. [MiniMax LLM Pipe](#minimax-llm-pipe)
-18. [Planner Agent v3](#planner-agent-v3)
-19. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-20. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
-21. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-22. [Mopidy Music Controller](#mopidy-music-controller)
-23. [Letta Agent Pipe](#letta-agent-pipe)
-24. [Perplexica Pipe](#perplexica-pipe)
-25. [OpenRouter Image Pipe](#openrouter-image-pipe)
-26. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-27. [Doodle Paint Filter](#doodle-paint-filter)
-28. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-29. [Semantic Router Filter](#semantic-router-filter)
-30. [Full Document Filter](#full-document-filter)
-31. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-32. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-33. [Installation](#installation)
-34. [Contributing](#contributing)
-35. [License](#license)
-36. [Credits](#credits)
-37. [Support](#support)
+15. [OutageDeck Provider Status](#outagedeck-provider-status)
+16. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+17. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+18. [MiniMax LLM Pipe](#minimax-llm-pipe)
+19. [Planner Agent v3](#planner-agent-v3)
+20. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+21. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
+22. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+23. [Mopidy Music Controller](#mopidy-music-controller)
+24. [Letta Agent Pipe](#letta-agent-pipe)
+25. [Perplexica Pipe](#perplexica-pipe)
+26. [OpenRouter Image Pipe](#openrouter-image-pipe)
+27. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+28. [Doodle Paint Filter](#doodle-paint-filter)
+29. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+30. [Semantic Router Filter](#semantic-router-filter)
+31. [Full Document Filter](#full-document-filter)
+32. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+33. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+34. [Installation](#installation)
+35. [Contributing](#contributing)
+36. [License](#license)
+37. [Credits](#credits)
+38. [Support](#support)
 ---
 
 ## 🧪 Tools
@@ -859,6 +861,52 @@ Search and look up X posts, users, timelines, and trends through the Xquik API. 
 - **User Timelines**: Lists recent user posts with optional replies and parent posts
 - **Trends**: Fetches regional X trends by WOEID
 - **Structured Output**: Returns JSON responses for reliable model analysis
+
+---
+
+### OutageDeck Provider Status
+
+### Description
+
+Check current provider and service health, find active incidents, and inspect incident update timelines through the public [OutageDeck API](https://outagedeck.com/developers/api?utm_source=open_webui&utm_medium=integration&utm_campaign=open_webui_tool). The tool is read-only, requires no API key, and includes source freshness in provider responses so models can qualify what they report.
+
+### Configuration
+
+- `REQUEST_TIMEOUT_SECONDS` (int): Request timeout from 5 to 60 seconds (default: 15)
+- `MAX_PROVIDER_RESULTS` (int): Maximum providers returned by one search (default: 20)
+- `MAX_TIMELINE_UPDATES` (int): Maximum updates returned for one incident (default: 20)
+
+**Prerequisites**: None. Public status lookups work without an OutageDeck account or API key.
+
+### Usage
+
+- **Check a Provider:**
+
+  ```python
+  Is GitHub having an outage? Check its services and source freshness.
+  ```
+
+- **Find Active Incidents:**
+
+  ```python
+  List active major incidents across the providers OutageDeck monitors.
+  ```
+
+- **Inspect a Timeline:**
+
+  ```python
+  Get the update timeline for this OutageDeck incident slug.
+  ```
+
+### Features
+
+- **Zero-Key Setup**: Uses OutageDeck's public read-only API without credentials
+- **Provider Discovery**: Searches monitored vendors by name, health, or category
+- **Component Status**: Checks individual services such as GitHub Actions
+- **Incident Triage**: Filters active or resolved incidents by provider and severity
+- **Update Timelines**: Returns bounded incident histories for root-cause context
+- **Safe Requests**: Uses a fixed HTTPS origin, strict slug validation, timeouts, and no redirects
+- **Bounded Output**: Selects the operational fields models need instead of returning oversized payloads
 
 ---
 
