@@ -696,7 +696,7 @@ return (function() {
 
     # ── Tool calling helpers ──────────────────────────────────────────
 
-    def _check_model_native_fc(self, model_id: str) -> bool:
+    async def _check_model_native_fc(self, model_id: str) -> bool:
         """Return True if the model is configured for native function calling."""
         model_info = await Models.get_model_by_id(model_id)
         if model_info and model_info.params:
@@ -976,7 +976,15 @@ return (function() {
 
         if __task__ and __task__ != TASKS.DEFAULT:
             # For tasks like title generation or summarization, use the first participant's context
-            first_participant = participants[0] if participants else {"model": self.__model__, "alias": "Assistant"}
+            task_config = self._sanitize_config(
+                self._extract_config_from_metadata(body), valves
+            )
+            participants = task_config.get("participants", [])
+            first_participant = (
+                participants[0]
+                if participants
+                else {"model": self.__model__, "alias": "Assistant"}
+            )
             target_model = first_participant.get("model", self.__model__)
             target_alias = first_participant.get("alias", "Assistant")
             
@@ -1239,7 +1247,7 @@ return (function() {
                 f"[MultiModelTools] Features for {p_model_id}: {p_features}"
             )
             logger.debug(
-                f"[MultiModelTools] ENABLE_IMAGE_GENERATION={getattr(self.__request__.app.state.config, 'ENABLE_IMAGE_GENERATION', 'NOT_SET')}"
+                f"[MultiModelTools] ENABLE_IMAGE_GENERATION={getattr(getattr(self.__request__.app.state, 'config', None), 'ENABLE_IMAGE_GENERATION', 'NOT_SET')}"
             )
 
             try:
@@ -1269,7 +1277,7 @@ return (function() {
                 logger.debug(f"[MultiModelTools] Terminal tools added for {p_model_id}")
 
             # Get native function calling flag
-            native_fc = self._check_model_native_fc(p_model_id)
+            native_fc = await self._check_model_native_fc(p_model_id)
 
             # Get system message
             model_system_message = ""
