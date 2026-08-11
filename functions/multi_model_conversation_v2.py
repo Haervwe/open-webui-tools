@@ -3,8 +3,8 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.9.1
-required_open_webui_version: 0.9.1
+version: 2.9.2
+required_open_webui_version: 0.11.0
 """
 
 import logging
