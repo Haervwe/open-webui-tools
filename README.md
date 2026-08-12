@@ -870,6 +870,8 @@ Search and look up X posts, users, timelines, and trends through the Xquik API. 
 
 Check current provider and service health, find active incidents, and inspect incident update timelines through the public [OutageDeck API](https://outagedeck.com/developers/api?utm_source=open_webui&utm_medium=integration&utm_campaign=open_webui_tool). The tool is read-only, requires no API key, and includes source freshness in provider responses so models can qualify what they report.
 
+**Install:** [Get OutageDeck Provider Status from Open WebUI Community](https://openwebui.com/posts/5cac0e1b-424c-4700-8d5e-3ac9003648a1), or copy [the tool file](tools/outagedeck_status_tool.py) into Workspace > Tools.
+
 ### Configuration
 
 - `REQUEST_TIMEOUT_SECONDS` (int): Request timeout from 5 to 60 seconds (default: 15)
