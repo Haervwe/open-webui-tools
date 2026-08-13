@@ -115,7 +115,7 @@ async def test_generate_image_submits_polls_and_formats_outputs():
 
 
 @pytest.mark.asyncio
-async def test_generate_video_submits_expected_options_and_formats_output():
+async def test_generate_video_submits_expected_options_and_returns_html_embed():
     tool = Tools()
     tool.valves.ATLASCLOUD_API_KEY = "test-key"
     session = FakeSession(
@@ -141,7 +141,13 @@ async def test_generate_video_submits_expected_options_and_formats_output():
             generate_audio=False,
         )
 
-    assert "[Download generated video](https://cdn.example.test/video.mp4)" in result
+    # With RETURN_HTML_EMBED=True (default), result is (HTMLResponse, context_str)
+    assert isinstance(result, tuple) and len(result) == 2
+    html_response, context = result
+    html_body = html_response.body.decode("utf-8")
+    assert "<video" in html_body
+    assert "https://cdn.example.test/video.mp4" in html_body
+    assert "https://cdn.example.test/video.mp4" in context
     assert session.requests[0] == (
         "POST",
         "https://api.atlascloud.ai/api/v1/model/generateVideo",
@@ -154,6 +160,33 @@ async def test_generate_video_submits_expected_options_and_formats_output():
             "generate_audio": False,
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_video_fallback_without_html_embed():
+    tool = Tools()
+    tool.valves.ATLASCLOUD_API_KEY = "test-key"
+    tool.valves.RETURN_HTML_EMBED = False
+    session = FakeSession(
+        [
+            FakeResponse({"data": {"id": "prediction-video"}}),
+            FakeResponse(
+                {
+                    "data": {
+                        "status": "completed",
+                        "outputs": ["https://cdn.example.test/video.mp4"],
+                    }
+                }
+            ),
+        ]
+    )
+
+    with patch("atlascloud_media_tool.aiohttp.ClientSession", return_value=session):
+        result = await tool.generate_video("a city at night")
+
+    assert isinstance(result, str)
+    assert "[Download generated video](https://cdn.example.test/video.mp4)" in result
+
 
 
 @pytest.mark.asyncio

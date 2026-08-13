@@ -5,14 +5,16 @@ author: binyangzhu000-sudo
 author_url: https://github.com/binyangzhu000-sudo
 version: 1.0.0
 license: MIT
+required_open_webui_version: 0.9.1
 """
 
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, Optional
+from typing import Any, Optional, Tuple, Union
 
 import aiohttp
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 IMAGE_ENDPOINT = "/model/generateImage"
@@ -50,6 +52,10 @@ class Tools:
         )
         POLL_INTERVAL_SECONDS: float = Field(default=3.0, ge=0.1)
         GENERATION_TIMEOUT_SECONDS: float = Field(default=600.0, ge=1.0)
+        RETURN_HTML_EMBED: bool = Field(
+            default=True,
+            description="Return an inline HTML video/audio player upon completion.",
+        )
 
     def __init__(self) -> None:
         self.valves = self.Valves()
@@ -213,7 +219,7 @@ class Tools:
         ratio: str = "adaptive",
         generate_audio: bool = True,
         __event_emitter__: EventEmitter = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """Generate a video from a text prompt with Atlas Cloud."""
         await self._emit_status(
             __event_emitter__, "Generating video with Atlas Cloud", done=False
@@ -240,5 +246,21 @@ class Tools:
         await self._emit_status(
             __event_emitter__, "Atlas Cloud video generated", done=True
         )
-        links = "\n".join(f"- [Download generated video]({url})" for url in outputs)
+        url = outputs[0]
+        context = f"🎬 Video generated successfully. Link: {url}"
+        if self.valves.RETURN_HTML_EMBED:
+            html_player = (
+                f'<video controls src="{url}" width="960"'
+                f' style="max-width:100%"></video>'
+            )
+            return (
+                HTMLResponse(
+                    content=html_player,
+                    headers={"content-disposition": "inline"},
+                ),
+                context,
+            )
+        links = "\n".join(
+            f"- [Download generated video]({u})" for u in outputs
+        )
         return f"Generated video:\n{links}"
