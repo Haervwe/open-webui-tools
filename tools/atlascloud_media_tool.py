@@ -108,7 +108,6 @@ class Tools:
 
     def __init__(self) -> None:
         self.valves = self.Valves()
-        self.UserValves = Tools.UserValves
 
     def _resolve_config(
         self, __user__: Optional[Dict[str, Any]] = None
@@ -120,7 +119,15 @@ class Tools:
             if isinstance(v, Tools.UserValves):
                 user_valves = v
             elif isinstance(v, dict):
-                user_valves = Tools.UserValves(**v)
+                try:
+                    user_valves = Tools.UserValves(**v)
+                except Exception:
+                    pass
+            elif hasattr(v, "__dict__"):
+                try:
+                    user_valves = Tools.UserValves(**v.__dict__)
+                except Exception:
+                    pass
 
         def pick(user_val: Optional[str], default_val: str) -> str:
             if user_val and isinstance(user_val, str) and user_val.strip():
@@ -373,6 +380,7 @@ class Tools:
                 raise AtlasCloudError("Atlas Cloud did not return a prediction ID.")
 
             deadline = time.monotonic() + config["timeout"]
+            last_status: Optional[str] = None
             while time.monotonic() < deadline:
                 async with session.get(
                     f"{base_url}/model/prediction/{prediction_id}"
@@ -404,11 +412,13 @@ class Tools:
                     )
                     raise AtlasCloudError(f"Atlas Cloud generation failed: {detail}")
 
-                await self._emit_status(
-                    emitter,
-                    f"Atlas Cloud generation status: {status or 'processing'}",
-                    done=False,
-                )
+                if status != last_status:
+                    last_status = status
+                    await self._emit_status(
+                        emitter,
+                        f"Atlas Cloud generation status: {status or 'processing'}",
+                        done=False,
+                    )
                 await asyncio.sleep(config["poll_interval"])
 
         raise AtlasCloudError("Atlas Cloud generation timed out.")
