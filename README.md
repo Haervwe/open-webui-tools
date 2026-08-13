@@ -27,8 +27,10 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **ComfyUI ACE Step 1.5 Audio** - Advanced music generation (New)
 - **ComfyUI ACE Step Audio (Legacy)** - Advanced music generation
 - **ComfyUI Text-to-Video** - Generate short videos from text using ComfyUI (default WAN 2.2 workflow)
+- **Atlas Cloud Media Generator** - Multi-modal image generation, image editing, and text/image/audio-to-video using Atlas Cloud AI
 - **Flux Kontext ComfyUI** - Professional image editing
 - **OpenWeatherMap Forecast Tool** - Interactive weather widget with current conditions and forecasts
+
 
 ### 🔄 **Function Pipes**
 
@@ -112,32 +114,33 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 10. [ComfyUI ACE Step 1.5 Audio Tool](#comfyui-ace-step-1-5-audio-tool)
 11. [ComfyUI ACE Step Audio Tool (Legacy)](#comfyui-ace-step-audio-tool-legacy)
 12. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
-13. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
-14. [Xquik X Data Tool](#xquik-x-data-tool)
-15. [OutageDeck Provider Status](#outagedeck-provider-status)
-16. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-17. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-18. [MiniMax LLM Pipe](#minimax-llm-pipe)
-19. [Planner Agent v3](#planner-agent-v3)
-20. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-21. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
-22. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-23. [Mopidy Music Controller](#mopidy-music-controller)
-24. [Letta Agent Pipe](#letta-agent-pipe)
-25. [Perplexica Pipe](#perplexica-pipe)
-26. [OpenRouter Image Pipe](#openrouter-image-pipe)
-27. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-28. [Doodle Paint Filter](#doodle-paint-filter)
-29. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-30. [Semantic Router Filter](#semantic-router-filter)
-31. [Full Document Filter](#full-document-filter)
-32. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-33. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-34. [Installation](#installation)
-35. [Contributing](#contributing)
-36. [License](#license)
-37. [Credits](#credits)
-38. [Support](#support)
+13. [Atlas Cloud Media Generator](#atlas-cloud-media-generator)
+14. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
+15. [Xquik X Data Tool](#xquik-x-data-tool)
+16. [OutageDeck Provider Status](#outagedeck-provider-status)
+17. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+18. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+19. [MiniMax LLM Pipe](#minimax-llm-pipe)
+20. [Planner Agent v3](#planner-agent-v3)
+21. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+22. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
+23. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+24. [Mopidy Music Controller](#mopidy-music-controller)
+25. [Letta Agent Pipe](#letta-agent-pipe)
+26. [Perplexica Pipe](#perplexica-pipe)
+27. [OpenRouter Image Pipe](#openrouter-image-pipe)
+28. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+29. [Doodle Paint Filter](#doodle-paint-filter)
+30. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+31. [Semantic Router Filter](#semantic-router-filter)
+32. [Full Document Filter](#full-document-filter)
+33. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+34. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+35. [Installation](#installation)
+36. [Contributing](#contributing)
+37. [License](#license)
+38. [Credits](#credits)
+39. [Support](#support)
 ---
 
 ## 🧪 Tools
@@ -787,7 +790,54 @@ Generate a 3 second shot of "a cyberpunk panda skating through neon city streets
 
 ---
 
+### Atlas Cloud Media Generator
+
+### Description
+
+Generate high-quality images, edit images (image-to-image), and create videos (text-to-video, image-to-video, audio-to-video) directly within Open WebUI chat using Atlas Cloud's unified API platform. Supports ByteDance's **Seedream** (image generation/editing) and **Seedance** (video generation) model suites with inline HTML `<video>` player embeds and user-level model customization.
+
+The implementation lives at `tools/atlascloud_media_tool.py`.
+
+### Configuration
+
+- `ATLASCLOUD_API_KEY` (str): Atlas Cloud API key (Supports per-user override via User Valves)
+- `API_BASE_URL` (str): Media API Base URL (default: `https://api.atlascloud.ai/api/v1`)
+- `IMAGE_MODEL` (str): Default text-to-image model ID (default: `bytedance/seedream-v5.0-pro/text-to-image`)
+- `IMAGE_EDIT_MODEL` (str): Default image-editing model ID (default: `bytedance/seedream-v5.0-pro/image-to-image`)
+- `VIDEO_MODEL` (str): Default text-to-video model ID (default: `bytedance/seedance-2.0-fast/text-to-video`)
+- `IMAGE_TO_VIDEO_MODEL` (str): Default image-to-video model ID (default: `bytedance/seedance-2.5/image-to-video`)
+- `AUDIO_TO_VIDEO_MODEL` (str): Default audio-to-video model ID (default: `bytedance/seedance-2.5/reference-to-video`)
+- `POLL_INTERVAL_SECONDS` (float): Polling interval for task completion (default: `3.0`)
+- `GENERATION_TIMEOUT_SECONDS` (float): Maximum seconds to wait for generation (default: `600.0`)
+- `RETURN_HTML_EMBED` (bool): Embed inline HTML video player in chat upon completion (default: `True`)
+
+### Usage
+
+1. **Install & Configure the Tool**
+   - Copy `tools/atlascloud_media_tool.py` into Open WebUI Workspace > Tools.
+   - Enter your `ATLASCLOUD_API_KEY` in the tool Valves.
+2. **Generate Images & Videos in Chat**
+   - **Text-to-Image:** *"Generate an image of a cyberpunk street in rain"*
+   - **Image Editing:** Attach an image (or use a generated image) and ask *"Edit this image to add falling snow"*
+   - **Text-to-Video:** *"Generate a 5-second video of ocean waves crashing at sunset"*
+   - **Image-to-Video:** Attach an image and ask *"Animate this image into a video"*
+   - **Audio-to-Video:** Attach an audio clip and ask *"Create a video matching this music track"*
+
+![Atlas Cloud Media Generator](img/Atlas_cloud_tool.png)
+*Atlas Cloud video generated from reference image with inline HTML video player in Open WebUI chat*
+
+### Features
+
+- Multi-modal generation: Text-to-Image, Image Editing, Text-to-Video, Image-to-Video, Audio-to-Video
+- Seamless OWUI backend image interoperability (automatically uploads local OWUI backend files or base64 images to Atlas Cloud via `/model/uploadMedia`)
+- Inline HTML `<video>` player embed for immediate video playback in chat
+- User Valves support for per-user model customization and personal API keys
+- Deduplicated status emissions during polling loop to keep chat notifications clean
+
+---
+
 ### OpenWeatherMap Forecast Tool
+
 
 ### Description
 
