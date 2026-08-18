@@ -17,6 +17,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 
 - **arXiv Search** - Academic paper discovery (no API key required!)
 - **Perplexica Search** - Web search using Perplexica API with citations
+- **SerpBase Google Search** - Google web search with organic results, featured snippets, and AI Overviews (no self-hosted instance needed)
 - **Pexels Media Search** - High-quality photos and videos from Pexels API
 - **YouTube Search & Embed** - Search YouTube and play videos in embedded player
 - **Xquik X Data Tool** - Search and look up X posts, users, timelines, and trends
@@ -141,6 +142,7 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 37. [License](#license)
 38. [Credits](#credits)
 39. [Support](#support)
+40. [SerpBase Google Search Tool](#serpbase-google-search-tool)
 ---
 
 ## 🧪 Tools
@@ -1741,6 +1743,29 @@ Checks if an assistant's message ends with an unclosed or incomplete "thinking" 
 ### Why this matters
 
 This approach allows you to leverage state-of-the-art image and music generation/editing models with full control and customization, directly from Open WebUI.
+
+---
+
+### SerpBase Google Search Tool
+
+### Description
+
+Google web search via the [SerpBase API](https://serpbase.dev) — organic results, featured snippets, and AI Overviews returned as clean JSON. No browser automation, no CAPTCHA handling, and no self-hosted instance required.
+
+### Configuration
+
+- **SERPBASE_API_KEY**: SerpBase API key (required). Get 100 free searches at https://serpbase.dev — no credit card required.
+- **MAX_RESULTS**: Maximum number of organic results to return (default: 10, max: 20)
+- **LANGUAGE**: Google interface language code, e.g. `en`, `de`, `ja` (default: `en`)
+- **COUNTRY**: Google country region code, e.g. `us`, `de`, `uk` (default: `us`)
+
+### Usage
+
+- **Example:** `Search Google for the latest Open WebUI release notes`
+
+- Returns up to 10 organic results with title, link, and snippet, plus the featured snippet and AI Overview when Google shows them.
+- Results are returned as markdown with citation events, so Open WebUI can link sources.
+- The tool degrades gracefully: without an API key it returns a clear setup message instead of failing.
 
 ---
 
