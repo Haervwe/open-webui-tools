@@ -148,7 +148,7 @@ class Tools:
 
         await emit_status(__event_emitter__, f"Searching Google for: {query}")
 
-        payload = {"q": query, "num": num, "hl": hl, "gl": gl}
+        payload = {"q": query, "hl": hl, "gl": gl}
         headers = {
             "Content-Type": "application/json",
             "X-API-Key": api_key,
@@ -163,7 +163,7 @@ class Tools:
                     if response.status != 200:
                         error_msg = (
                             f"SerpBase API returned HTTP {response.status}. "
-                            "Check your API key and quota at https://serpbase.dev/dashboard/api-keys."
+                            "Check your API key and quota at https://serpbase.dev/api-keys."
                         )
                         logger.error(error_msg)
                         await emit_status(__event_emitter__, error_msg, done=True)
