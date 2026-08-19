@@ -4275,10 +4275,19 @@ class SubagentManager:
         temp_override = context.get("temp_override")
         user_obj = context["user_obj"]
 
+        # v3.16: Fix 'No user query found in messages' Jinja exception
+        # We MUST pass a copy of history so we don't permanently persist the dummy user message
+        safe_history = history.copy()
+        if safe_history and safe_history[-1].get("role") == "tool":
+            safe_history.append({
+                "role": "user",
+                "content": "Please continue based on the tool results."
+            })
+
         sub_body = {
             **body,
             "model": actual_model,
-            "messages": history,
+            "messages": safe_history,
             "tools": tools_specs,
             "metadata": self.metadata.get("__metadata__", {}),
         }
@@ -5752,10 +5761,18 @@ class PlannerEngine:
                 ]
             )
 
+        # v3.16: Fix 'No user query found in messages' Jinja exception
+        safe_exec_history = exec_history.copy()
+        if safe_exec_history and safe_exec_history[-1].get("role") == "tool":
+            safe_exec_history.append({
+                "role": "user",
+                "content": "Please continue based on the tool results."
+            })
+
         planner_body = {
             **body,
             "model": valves.PLANNER_MODEL,
-            "messages": exec_history,
+            "messages": safe_exec_history,
             "tools": tools,
             "metadata": self.metadata.get("__metadata__", {}),
         }
