@@ -3,8 +3,8 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.10.3
-required_open_webui_version: 0.9.1
+version: 3.10.4
+required_open_webui_version: 0.11.0
 
 Features:
 - **Autonomous Multi-Agent Orchestration**: Dynamic task decomposition and delegation to specialized subagents.
