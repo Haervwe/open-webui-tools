@@ -4,8 +4,8 @@ description: Generate video from text prompt via ComfyUI workflow JSON. Uses Com
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.2
-required_open_webui_version: 0.9.1
+version: 0.3.3
+required_open_webui_version: 0.11.0
 license: MIT
 """
 
@@ -433,9 +433,7 @@ async def download_and_upload_to_owui(
             file_id = getattr(file_item, "id", None)
 
             if file_id:
-                relative_path = request.app.url_path_for(
-                    "get_file_content_by_id", id=str(file_id)
-                )
+                relative_path = f"/api/v1/files/{file_id}/content"
                 return f"{relative_path}?t={int(time.time())}", True
 
     except Exception as e:

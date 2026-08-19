@@ -4,8 +4,8 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.3
-required_open_webui_version: 0.9.1
+version: 1.1.4
+required_open_webui_version: 0.11.0
 """
 
 import json
@@ -270,9 +270,7 @@ async def download_audio_to_storage(
 
                     if file_item and getattr(file_item, "id", None):
                         file_id = str(getattr(file_item, "id", ""))
-                        relative_path = request.app.url_path_for(
-                            "get_file_content_by_id", id=file_id
-                        )
+                        relative_path = f"/api/v1/files/{file_id}/content"
                         return f"{relative_path}"
 
                     print("[DEBUG] upload_file_handler returned no file item")
