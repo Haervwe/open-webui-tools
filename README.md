@@ -29,6 +29,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **ComfyUI ACE Step Audio (Legacy)** - Advanced music generation
 - **ComfyUI Text-to-Video** - Generate short videos from text using ComfyUI (default WAN 2.2 workflow)
 - **Atlas Cloud Media Generator** - Multi-modal image generation, image editing, and text/image/audio-to-video using Atlas Cloud AI
+- **MuAPI Media Generator** - Generate images and text/image-to-video outputs through MuAPI
 - **Flux Kontext ComfyUI** - Professional image editing
 - **OpenWeatherMap Forecast Tool** - Interactive weather widget with current conditions and forecasts
 
@@ -116,33 +117,34 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 11. [ComfyUI ACE Step Audio Tool (Legacy)](#comfyui-ace-step-audio-tool-legacy)
 12. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
 13. [Atlas Cloud Media Generator](#atlas-cloud-media-generator)
-14. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
-15. [Xquik X Data Tool](#xquik-x-data-tool)
-16. [OutageDeck Provider Status](#outagedeck-provider-status)
-17. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-18. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-19. [MiniMax LLM Pipe](#minimax-llm-pipe)
-20. [Planner Agent v3](#planner-agent-v3)
-21. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-22. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
-23. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-24. [Mopidy Music Controller](#mopidy-music-controller)
-25. [Letta Agent Pipe](#letta-agent-pipe)
-26. [Perplexica Pipe](#perplexica-pipe)
-27. [OpenRouter Image Pipe](#openrouter-image-pipe)
-28. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-29. [Doodle Paint Filter](#doodle-paint-filter)
-30. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-31. [Semantic Router Filter](#semantic-router-filter)
-32. [Full Document Filter](#full-document-filter)
-33. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-34. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-35. [Installation](#installation)
-36. [Contributing](#contributing)
-37. [License](#license)
-38. [Credits](#credits)
-39. [Support](#support)
-40. [SerpBase Google Search Tool](#serpbase-google-search-tool)
+14. [MuAPI Media Generator](#muapi-media-generator)
+15. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
+16. [Xquik X Data Tool](#xquik-x-data-tool)
+17. [OutageDeck Provider Status](#outagedeck-provider-status)
+18. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+19. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+20. [MiniMax LLM Pipe](#minimax-llm-pipe)
+21. [Planner Agent v3](#planner-agent-v3)
+22. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+23. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
+24. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+25. [Mopidy Music Controller](#mopidy-music-controller)
+26. [Letta Agent Pipe](#letta-agent-pipe)
+27. [Perplexica Pipe](#perplexica-pipe)
+28. [OpenRouter Image Pipe](#openrouter-image-pipe)
+29. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+30. [Doodle Paint Filter](#doodle-paint-filter)
+31. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+32. [Semantic Router Filter](#semantic-router-filter)
+33. [Full Document Filter](#full-document-filter)
+34. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+35. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+36. [Installation](#installation)
+37. [Contributing](#contributing)
+38. [License](#license)
+39. [Credits](#credits)
+40. [Support](#support)
+41. [SerpBase Google Search Tool](#serpbase-google-search-tool)
 ---
 
 ## 🧪 Tools
@@ -835,6 +837,57 @@ The implementation lives at `tools/atlascloud_media_tool.py`.
 - Inline HTML `<video>` player embed for immediate video playback in chat
 - User Valves support for per-user model customization and personal API keys
 - Deduplicated status emissions during polling loop to keep chat notifications clean
+
+---
+
+### MuAPI Media Generator
+
+### Description
+
+Generate images and videos directly in Open WebUI chat through MuAPI's asynchronous API. The tool supports text-to-image generation with `nano-banana`, text-to-video generation with `seedance-2.5-text-to-video`, and image-to-video generation with `seedance-2.5-image-to-video`.
+
+The implementation lives at `tools/muapi_media_tool.py`.
+
+### Configuration
+
+- `MUAPI_API_KEY` (str): MuAPI API key. It can also be supplied as a per-user User Valve.
+- `API_BASE_URL` (str): MuAPI API base URL (default: `https://api.muapi.ai/api/v1`).
+- `IMAGE_MODEL` (str): Text-to-image endpoint slug (default: `nano-banana`). Set this to `nano-banana-pro` to use the Pro image endpoint.
+- `VIDEO_MODEL` (str): Text-to-video endpoint slug (default: `seedance-2.5-text-to-video`).
+- `IMAGE_TO_VIDEO_MODEL` (str): Image-to-video endpoint slug (default: `seedance-2.5-image-to-video`).
+- `POLL_INTERVAL_SECONDS` (float): Seconds between result checks (default: `3.0`).
+- `GENERATION_TIMEOUT_SECONDS` (float): Maximum wait for a generation (default: `600.0`).
+- `RETURN_HTML_EMBED` (bool): Return an inline HTML video player for video results (default: `True`).
+
+### Usage
+
+1. **Install and configure the tool**
+   - Copy `tools/muapi_media_tool.py` into Open WebUI Workspace > Tools.
+   - Enter `MUAPI_API_KEY` in the tool Valves.
+2. **Generate media in chat**
+   - **Text-to-image:** *"Generate an image of a quiet mountain lake at sunrise"*
+   - **Text-to-video:** *"Generate a 5-second video of ocean waves at sunset"*
+   - **Image-to-video:** Attach an image or provide an `image_url`, then ask *"Animate this image into a video"*
+
+Image-to-video inputs must be absolute HTTP(S) URLs that MuAPI can fetch. Attached image URLs are used automatically when Open WebUI provides them in the message context.
+
+### Features
+
+- Async submission and polling with status updates in the chat
+- Text-to-image, text-to-video, and image-to-video operations
+- Per-user API key and model overrides through User Valves
+- Optional inline HTML video playback or direct download links
+- No live request is required during installation; configure the key only when you are ready to generate
+
+### API references
+
+- [MuAPI API reference](https://muapi.ai/docs/api-reference)
+- [MuAPI Nano Banana](https://muapi.ai/nano-banana)
+- [MuAPI Seedance 2.5](https://muapi.ai/seedance-2.5)
+- [nano-banana model contract](https://api.muapi.ai/api/v1/models/nano-banana)
+- [Seedance text-to-video model contract](https://api.muapi.ai/api/v1/models/seedance-2.5-text-to-video)
+- [Seedance image-to-video model contract](https://api.muapi.ai/api/v1/models/seedance-2.5-image-to-video)
+
 
 ---
 
