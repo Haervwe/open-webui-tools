@@ -143,6 +143,7 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 38. [Credits](#credits)
 39. [Support](#support)
 40. [SerpBase Google Search Tool](#serpbase-google-search-tool)
+41. [You.com Search Tool](#youcom-search-tool)
 ---
 
 ## 🧪 Tools
@@ -1764,6 +1765,32 @@ Google web search via the [SerpBase API](https://serpbase.dev) — organic resul
 - **Example:** `Search Google for the latest Open WebUI release notes`
 
 - Returns up to 10 organic results with title, link, and snippet, plus the featured snippet and AI Overview when Google shows them.
+- Results are returned as markdown with citation events, so Open WebUI can link sources.
+- The tool degrades gracefully: without an API key it returns a clear setup message instead of failing.
+
+---
+
+### You.com Search Tool
+
+### Description
+
+Web search via the [You.com Search API](https://you.com/docs/guides/search) — web and news results with titles, links and snippets, returned as markdown with citation events so Open WebUI can link sources. Supports freshness filtering for time-sensitive queries.
+
+### Configuration
+
+- **YDC_API_KEY**: You.com API key (required). Get one at https://you.com/platform/api-keys
+- **MAX_RESULTS**: Maximum number of web results to return (default: 10, max: 100)
+- **FRESHNESS**: Optional freshness filter: `day`, `week`, `month`, `year`, or `YYYY-MM-DDtoYYYY-MM-DD`
+- **COUNTRY**: Optional country code for results (ISO 3166-1 alpha-2, e.g. `US`, `DE`, `JP`)
+- **LANGUAGE**: Optional language code for results (BCP 47, e.g. `EN`, `DE`, `JA`)
+- **TIMEOUT_SECONDS**: Request timeout in seconds (default: 30)
+
+### Usage
+
+- **Example:** `Search You.com for the latest Open WebUI release notes`
+- Optional per-call arguments: `num_results` (1-100) and `freshness` override the valves for a single query.
+
+- Returns up to 10 web results with title, link, and description, plus a News section when the query warrants it.
 - Results are returned as markdown with citation events, so Open WebUI can link sources.
 - The tool degrades gracefully: without an API key it returns a clear setup message instead of failing.
 
