@@ -145,7 +145,6 @@ class Pipe:
     async def get_streaming_completion(
         self, messages: List[Dict[str, str]], model: str
     ):
-        request = (self.__request__,)
         form_data = {
             "model": model,
             "messages": messages,
@@ -155,7 +154,8 @@ class Pipe:
             "top_p": self.valves.Top_p,
         }
         response = await generate_chat_completions(
-            form_data,
+            request=self.__request__,
+            form_data=form_data,
             user=self.__user__,
         )
         async for chunk in response.body_iterator:
@@ -435,7 +435,7 @@ class Pipe:
         ]
         full_response = ""
         async for chunk in self.get_streaming_completion(
-            self.__request__, messages, model=self.valves.Model
+            messages, model=self.valves.Model
         ):
             full_response += chunk
             await self.emit_message(chunk)
