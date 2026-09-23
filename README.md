@@ -31,6 +31,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Atlas Cloud Media Generator** - Multi-modal image generation, image editing, and text/image/audio-to-video using Atlas Cloud AI
 - **Flux Kontext ComfyUI** - Professional image editing
 - **OpenWeatherMap Forecast Tool** - Interactive weather widget with current conditions and forecasts
+- - **[Knowledge Base Manager](https://github.com/izyazev/open-webui-knowledge-base-manager)** - Manage knowledge bases, directories, and files directly from chat with nested paths and safe deletions
 
 
 ### 🔄 **Function Pipes**
