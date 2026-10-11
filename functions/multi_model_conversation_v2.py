@@ -3,7 +3,7 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.9.2
+version: 2.9.3
 required_open_webui_version: 0.11.0
 """
 
@@ -827,7 +827,7 @@ return (function() {
                 tool_result = f"Error: tool '{name}' not found"
 
             # Process result using Open WebUI's process_tool_result
-            tool_return = process_tool_result(
+            tool_return = await process_tool_result(
                 self.__request__,
                 name,
                 tool_result,
