@@ -464,6 +464,23 @@ Search and retrieve images from the web using a self-hosted [SearxNG](https://se
 
 ---
 
+### MiniMax Speech Generator
+
+Generate speech from text and play or download the resulting MP3 in chat.
+
+1. Copy `tools/minimax_tts_tool.py` into **Workspace > Tools**.
+2. Set `MINIMAX_API_KEY` in the tool valves and select the matching `REGION`
+   (`global_en` or `cn_zh`).
+3. Enable the tool in chat and ask it to speak your text (fewer than 10,000 characters).
+
+`MODEL` defaults to `speech-2.8-hd`. Set `VOICE_ID` to a MiniMax voice ID and
+adjust `SPEED` between 0.5 and 2.0 as needed. Requests use synchronous speech
+synthesis and return a self-contained audio player with a download link.
+
+See the [MiniMax speech API documentation](https://platform.minimax.io/docs/api-reference/speech-t2a-http) for supported voices and models.
+
+---
+
 ## 🔄 Function Pipes
 
 ### Perplexica Pipe
