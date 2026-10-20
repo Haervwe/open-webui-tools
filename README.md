@@ -43,7 +43,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Letta Agent** - Autonomous agent integration
 - **Perplexica Pipe** - AI-powered web search with streaming responses and citations
 - **Google Veo Text-to-Video & Image-to-Video** - Generate videos from text or a single image using Google Veo (only one image supported as input)
-- **MiniMax LLM Pipe** - Route chat completions to MiniMax's OpenAI-compatible API with M3 (1M context, image/video input) and M2.7 models
+- **MiniMax LLM Pipe** - Route chat completions to MiniMax's OpenAI-compatible API with M3.1 Flash (default) and M3 (1M context, image/video input)
 
 ### 🔧 **Filters**
 
@@ -1046,15 +1046,18 @@ Prompt: "Edit this image to look like a medieval fantasy king, preserving facial
 
 ### Description
 
-Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-compatible API (`api.minimax.io/v1`) directly from Open WebUI. This pipe exposes MiniMax-M3 (1M context, with image and video input and adaptive or disabled thinking) and MiniMax-M2.7 (204,800-token context, always-on thinking) as selectable models in your Open WebUI instance.
+Route chat completions to [MiniMax](https://platform.minimax.io)'s OpenAI-compatible API (`api.minimax.io/v1`) directly from Open WebUI. New configurations expose MiniMax-M3.1-Flash first, followed by MiniMax-M3. Both have 1M context and support image and video input. Flash always uses adaptive thinking with configurable effort; M3 supports adaptive or disabled thinking.
+
+Saved `ENABLED_MODELS` settings and explicit legacy/custom model IDs are preserved. To enable Flash in an existing installation, add `MiniMax-M3.1-Flash` to `ENABLED_MODELS`. API availability of legacy/custom IDs depends on your account.
 
 ### Configuration
 
 - `MINIMAX_API_KEY` (str): Your MiniMax API key (required, get one at https://platform.minimaxi.com)
-- `ENABLED_MODELS` (list): Which MiniMax models to expose (default: all)
+- `ENABLED_MODELS` (list): Which MiniMax models to expose (default: `MiniMax-M3.1-Flash`, `MiniMax-M3`); explicitly configured legacy/custom IDs remain selectable
 - `STRIP_THINKING` (bool): Strip `<think>…</think>` blocks from responses (default: `True`)
 - `DEFAULT_TEMPERATURE` (float): Default temperature when none is specified, 0.01–1.0 (default: `0.7`)
-- `THINKING_MODE` (str): Thinking mode for supporting models — `adaptive` (let the model decide) or `disabled`; ignored by always-on models (default: `adaptive`)
+- `THINKING_MODE` (str): `adaptive` or `disabled` for M3 (default: `adaptive`); Flash always uses `adaptive`, and legacy models omit this field
+- `REASONING_EFFORT` (str): Flash thinking depth, `low`, `medium`, `high`, `xhigh`, or `max` (default: `max`); a supported request `reasoning_effort` overrides the valve. Invalid values fall back to the valve or `max`
 
 **Prerequisites**: Get a MiniMax API key from [MiniMax Platform](https://platform.minimaxi.com).
 
@@ -1062,15 +1065,15 @@ Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-comp
 
 1. **Install the pipe**: Copy `functions/minimax_pipe.py` into Open WebUI via Workspace > Functions
 2. **Configure**: Set your `MINIMAX_API_KEY` in the pipe's Valves settings
-3. **Select model**: Choose "MiniMax M3" or "MiniMax M2.7" from the model dropdown
+3. **Select model**: Choose "MiniMax M3.1 Flash" or "MiniMax M3" from the model dropdown
 4. **Start chatting**: The pipe streams responses directly from the MiniMax API
 
 ### Features
 
 - **OpenAI-Compatible Routing**: Uses MiniMax's `/v1/chat/completions` endpoint
-- **Two Models**: MiniMax-M3 (1M-context flagship with image and video input) and MiniMax-M2.7 (204,800-token context)
-- **Multimodal Input**: Forwards inline image and video attachments to MiniMax-M3 as `image_url`/`video_url` content parts
-- **Thinking Controls**: Forwards `adaptive`/`disabled` thinking to MiniMax-M3; M2.7 stays always-on
+- **Current Models**: MiniMax-M3.1-Flash first, followed by MiniMax-M3, both with 1M context
+- **Multimodal Input**: Forwards inline image and video attachments to both current models as `image_url`/`video_url` content parts
+- **Thinking Controls**: Sends the API's `thinking.type` object, with adaptive-only thinking and tunable effort for Flash, and adaptive/disabled thinking for M3
 - **Streaming**: Real-time streamed responses via `chat:message:delta` events
 - **Temperature Clamping**: Automatically clamps temperature to MiniMax's accepted range (0.01–1.0)
 - **Think-Tag Stripping**: Strips `<think>…</think>` reasoning blocks from output (configurable)
