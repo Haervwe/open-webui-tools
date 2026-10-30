@@ -216,11 +216,10 @@ def test_base_url_resolution_rules():
     assert tool._resolve_base_url(req) == ("http://127.0.0.1:8080/owui/api/v1", None)
     req = FakeRequest(3000, host="::")
     assert tool._resolve_base_url(req) == ("http://[::1]:3000/api/v1", None)
+    # Without a server socket, fall back to loopback on $PORT, never the
+    # Host-header derived request.base_url
     req.scope = {}
-    assert tool._resolve_base_url(req) == (
-        "https://public.example.invalid/api/v1",
-        None,
-    )
+    assert tool._resolve_base_url(req) == ("http://127.0.0.1:8080/api/v1", None)
     tool.valves.OWUI_API_BASE_URL = "http://owui:8080/api/v1/"
     assert tool._resolve_base_url(req) == ("http://owui:8080/api/v1", None)
     for bad in (

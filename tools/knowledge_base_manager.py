@@ -7,7 +7,7 @@ Destructive operations require a confirmation click in the chat UI.
 author: izyazev
 author_url: https://github.com/izyazev/open-webui-knowledge-base-manager
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.0
+version: 1.1.1
 license: MIT
 required_open_webui_version: 0.9.6
 """
@@ -15,6 +15,7 @@ required_open_webui_version: 0.9.6
 import asyncio
 import ipaddress
 import json
+import os
 import re
 from typing import Any, Optional
 from urllib.parse import quote, urlsplit
@@ -64,7 +65,7 @@ class Tools:
             default="",
             description=(
                 "Base URL of this Open WebUI instance's API, e.g. http://127.0.0.1:8080/api/v1. "
-                "Leave empty to use the address the current request was served on. The user's "
+                "Leave empty to use the local socket Open WebUI is serving on (or 127.0.0.1:$PORT). The user's "
                 "Authorization header and cookies are only ever sent to this base."
             ),
         )
@@ -126,13 +127,15 @@ class Tools:
             )
             return f"{scheme}://{host}:{port}{root_path}/api/v1", None
 
-        base_url = getattr(request, "base_url", None)
-        if base_url:
-            return f"{str(base_url).rstrip('/')}/api/v1", None
-        return (
-            None,
-            "Error: cannot determine the Open WebUI API URL; set the OWUI_API_BASE_URL valve.",
-        )
+        # Never derive it from request.base_url: that comes from the Host header,
+        # and the user's credentials are forwarded to this URL.
+        port = os.environ.get("PORT", "8080")
+        if not port.isdigit():
+            return (
+                None,
+                "Error: cannot determine the Open WebUI API URL; set the OWUI_API_BASE_URL valve.",
+            )
+        return f"http://127.0.0.1:{port}{root_path}/api/v1", None
 
     def _check_id(self, value, name, allow_empty=False):
         """Validate an Open WebUI id (uuid4). Returns an error string or None."""
