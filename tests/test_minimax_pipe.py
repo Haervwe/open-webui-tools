@@ -293,36 +293,35 @@ class TestConstants(unittest.TestCase):
 
     def test_model_ids(self):
         ids = [m["id"] for m in MINIMAX_MODELS]
-        assert "MiniMax-M3" in ids
-        assert "MiniMax-M2.7" in ids
+        assert ids == ["MiniMax-M3.1-Flash", "MiniMax-M3"]
 
-    def test_m3_is_first(self):
-        """M3 should be the first model (default exposed)."""
-        assert MINIMAX_MODELS[0]["id"] == "MiniMax-M3"
+    def test_flash_is_first(self):
+        """Flash should be the first model (default exposed)."""
+        assert MINIMAX_MODELS[0]["id"] == "MiniMax-M3.1-Flash"
 
     def test_m3_context_length(self):
         m3 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3")
         assert m3["context_length"] == 1000000
 
-    def test_m27_context_length(self):
-        m27 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M2.7")
-        assert m27["context_length"] == 204800
+    def test_flash_context_length(self):
+        flash = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3.1-Flash")
+        assert flash["context_length"] == 1000000
 
     def test_m3_input_modalities(self):
         m3 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3")
         assert m3["input_modalities"] == ["text", "image", "video"]
 
-    def test_m27_text_only_modalities(self):
-        m27 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M2.7")
-        assert m27["input_modalities"] == ["text"]
+    def test_flash_input_modalities(self):
+        flash = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3.1-Flash")
+        assert flash["input_modalities"] == ["text", "image", "video"]
 
     def test_m3_thinking_modes(self):
         m3 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3")
         assert m3["thinking"] == ["adaptive", "disabled"]
 
-    def test_m27_always_on_thinking(self):
-        m27 = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M2.7")
-        assert m27["thinking"] == ["always_on"]
+    def test_flash_adaptive_only_thinking(self):
+        flash = next(m for m in MINIMAX_MODELS if m["id"] == "MiniMax-M3.1-Flash")
+        assert flash["thinking"] == ["adaptive"]
 
     def test_thinking_mode_constants(self):
         assert THINKING_MODE_ADAPTIVE == "adaptive"
@@ -333,6 +332,7 @@ class TestConstants(unittest.TestCase):
         """Older variants should not be present."""
         ids = [m["id"] for m in MINIMAX_MODELS]
         for legacy in (
+            "MiniMax-M2.7",
             "MiniMax-M2.7-highspeed",
             "MiniMax-M2.5",
             "MiniMax-M2.1",
@@ -461,38 +461,6 @@ class TestResolveThinking(unittest.TestCase):
     def test_unknown_model_returns_none(self):
         pipe = self._pipe()
         assert pipe._resolve_thinking("MiniMax-Unknown", {}) is None
-
-
-class TestPayloadThinking(unittest.TestCase):
-    """Verify the thinking field is added to the payload only when supported."""
-
-    def test_m3_payload_includes_thinking(self):
-        pipe = Pipe()
-        pipe.valves.MINIMAX_API_KEY = "test-key"
-        body = {
-            "model": "minimax-MiniMax-M3",
-            "messages": [{"role": "user", "content": "Hi"}],
-        }
-        model_id = pipe._resolve_model_id(body["model"])
-        thinking = pipe._resolve_thinking(model_id, body)
-        payload = {"model": model_id, "messages": body["messages"], "stream": True}
-        if thinking is not None:
-            payload["thinking"] = thinking
-        assert payload["thinking"] == "adaptive"
-
-    def test_m27_payload_omits_thinking(self):
-        pipe = Pipe()
-        pipe.valves.MINIMAX_API_KEY = "test-key"
-        body = {
-            "model": "minimax-MiniMax-M2.7",
-            "messages": [{"role": "user", "content": "Hi"}],
-        }
-        model_id = pipe._resolve_model_id(body["model"])
-        thinking = pipe._resolve_thinking(model_id, body)
-        payload = {"model": model_id, "messages": body["messages"], "stream": True}
-        if thinking is not None:
-            payload["thinking"] = thinking
-        assert "thinking" not in payload
 
 
 if __name__ == "__main__":

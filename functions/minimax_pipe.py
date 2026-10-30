@@ -2,13 +2,12 @@
 title: MiniMax LLM Pipe
 author: octopus
 author_url: https://github.com/octo-patch
-version: 1.2.0
+version: 1.3.0
 required_open_webui_version: 0.6.0
 description: MiniMax LLM Pipe for Open WebUI — routes chat completions to MiniMax's
-OpenAI-compatible API (api.minimax.io/v1). Supports MiniMax-M3 (default) with
-image and video input plus adaptive/disabled thinking, and MiniMax-M2.7 with
-always-on thinking, with streaming, temperature clamping, and automatic
-think-tag handling.
+OpenAI-compatible API (api.minimax.io/v1). Supports MiniMax-M3.1-Flash (default)
+and MiniMax-M3 with image and video input, model-aware thinking controls,
+streaming, temperature clamping, and automatic think-tag handling.
 """
 
 import aiohttp
@@ -41,20 +40,22 @@ MINIMAX_API_BASE = "https://api.minimax.io/v1"
 
 MINIMAX_MODELS = [
     {
+        "id": "MiniMax-M3.1-Flash",
+        "name": "MiniMax M3.1 Flash",
+        "context_length": 1000000,
+        "input_modalities": ["text", "image", "video"],
+        "thinking": ["adaptive"],
+    },
+    {
         "id": "MiniMax-M3",
         "name": "MiniMax M3",
         "context_length": 1000000,
         "input_modalities": ["text", "image", "video"],
         "thinking": ["adaptive", "disabled"],
     },
-    {
-        "id": "MiniMax-M2.7",
-        "name": "MiniMax M2.7",
-        "context_length": 204800,
-        "input_modalities": ["text"],
-        "thinking": ["always_on"],
-    },
 ]
+
+FLASH_REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 # Thinking modes accepted by the chat-completions API. Each model declares
 # which of these it supports in MINIMAX_MODELS[*]["thinking"].
@@ -117,8 +118,12 @@ class Pipe:
             description=(
                 "Thinking mode for models that support it: "
                 "'adaptive' (let the model decide) or 'disabled'. "
-                "Ignored by always-on models."
+                "Flash always uses adaptive; ignored by legacy models."
             ),
+        )
+        REASONING_EFFORT: str = Field(
+            default="max",
+            description="Flash thinking depth: low, medium, high, xhigh, or max.",
         )
 
     def __init__(self) -> None:
@@ -131,11 +136,21 @@ class Pipe:
     def pipes(self) -> List[Dict[str, str]]:
         """Return the list of model entries this pipe exposes."""
         enabled = set(self.valves.ENABLED_MODELS)
-        return [
+        entries = [
             {"id": f"minimax-{m['id']}", "name": f"MiniMax {m['name']}"}
             for m in MINIMAX_MODELS
             if m["id"] in enabled
         ]
+        # Keep explicitly configured legacy/custom choices without adding them
+        # to the ordinary catalog or changing saved valve settings.
+        known = {m["id"] for m in MINIMAX_MODELS}
+        for model_id in dict.fromkeys(self.valves.ENABLED_MODELS):
+            if model_id not in known:
+                entries.append({
+                    "id": f"minimax-{model_id}",
+                    "name": f"MiniMax {model_id.replace('MiniMax-', 'MiniMax ', 1)}",
+                })
+        return entries
 
     # ------------------------------------------------------------------
     # pipe() — handle a chat completion request
@@ -210,12 +225,17 @@ class Pipe:
         if body.get("top_p") is not None:
             payload["top_p"] = body["top_p"]
 
-        # Forward adaptive/disabled thinking controls for models that support
-        # them. M3 accepts "adaptive" (let the model decide) and "disabled";
-        # M2.7 is always-on and ignores this field.
+        # Flash always thinks; M3 also supports disabling thinking.
         thinking_config = self._resolve_thinking(model_id, body)
         if thinking_config is not None:
-            payload["thinking"] = thinking_config
+            payload["thinking"] = {"type": thinking_config}
+        if model_id == "MiniMax-M3.1-Flash":
+            effort = body.get("reasoning_effort", self.valves.REASONING_EFFORT)
+            if effort not in FLASH_REASONING_EFFORTS:
+                effort = self.valves.REASONING_EFFORT
+            payload["reasoning_effort"] = (
+                effort if effort in FLASH_REASONING_EFFORTS else "max"
+            )
 
         headers = {
             "Authorization": f"Bearer {self.valves.MINIMAX_API_KEY}",
@@ -414,6 +434,8 @@ class Pipe:
             return None
 
         requested = body.get("thinking", self.valves.THINKING_MODE)
+        if isinstance(requested, dict):
+            requested = requested.get("type")
         if isinstance(requested, str) and requested in supported:
             return requested
         # Fall back to the valve default when it is supported, otherwise pick
@@ -427,16 +449,16 @@ class Pipe:
 
     def _resolve_model_id(self, pipe_id: str) -> Optional[str]:
         """Extract the MiniMax model ID from the pipe model string."""
-        # The pipe ID is formatted as "minimax-<model_id>"
-        # Open WebUI may also prepend the function name, e.g.
-        # "minimax_pipe.minimax-MiniMax-M2.7"
-        # Check longer IDs first to avoid "M2.7" matching before "M2.7-highspeed"
-        sorted_models = sorted(
-            MINIMAX_MODELS, key=lambda m: len(m["id"]), reverse=True
-        )
-        for model in sorted_models:
-            if model["id"] in pipe_id:
-                return model["id"]
+        if not isinstance(pipe_id, str):
+            return None
+        # Strip only the pipe/function wrapper, never a model suffix. A saved
+        # legacy or custom MiniMax ID must not become a different active model.
+        match = re.fullmatch(r"(?:[^.]+\.)?minimax-(.+)", pipe_id)
+        model_id = match.group(1) if match else pipe_id
+        if model_id in self.valves.ENABLED_MODELS:
+            return model_id
+        if re.fullmatch(r"MiniMax-[A-Za-z0-9][A-Za-z0-9._-]*", model_id):
+            return model_id
         return None
 
     async def _stream_response(
