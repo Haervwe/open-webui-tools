@@ -34,6 +34,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Flux Kontext ComfyUI** - Professional image editing
 - **OpenWeatherMap Forecast Tool** - Interactive weather widget with current conditions and forecasts
 - **[Knowledge Base Manager](https://github.com/izyazev/open-webui-knowledge-base-manager)** - Manage knowledge bases, directories, and files directly from chat with nested paths and safe deletions
+- **3D Model Viewer** - View GLB / glTF models already in Open WebUI in an interactive inline 3D viewer
 
 
 ### 🔄 **Function Pipes**
@@ -148,6 +149,7 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 40. [Support](#support)
 41. [SerpBase Google Search Tool](#serpbase-google-search-tool)
 42. [Serply Web Search Tool](#serply-web-search-tool)
+43. [3D Model Viewer](#3d-model-viewer)
 ---
 
 ## 🧪 Tools
@@ -821,7 +823,7 @@ Generate a 3 second shot of "a cyberpunk panda skating through neon city streets
 
 ### Description
 
-Generate high-quality images, edit images (image-to-image), and create videos (text-to-video, image-to-video, audio-to-video) directly within Open WebUI chat using Atlas Cloud's unified API platform. Supports ByteDance's **Seedream** (image generation/editing) and **Seedance** (video generation) model suites with inline HTML `<video>` player embeds and user-level model customization.
+Generate high-quality images, edit images (image-to-image), create videos (text-to-video, image-to-video, audio-to-video) and 3D models (text-to-3D, image-to-3D) directly within Open WebUI chat using Atlas Cloud's unified API platform. Supports ByteDance's **Seedream** (image generation/editing) and **Seedance** (video generation) model suites, **Hunyuan3D / Tripo / Meshy** 3D models, inline HTML `<video>` player and interactive 3D viewer embeds, and user-level model customization.
 
 The implementation lives at `tools/atlascloud_media_tool.py`.
 
@@ -834,9 +836,29 @@ The implementation lives at `tools/atlascloud_media_tool.py`.
 - `VIDEO_MODEL` (str): Default text-to-video model ID (default: `bytedance/seedance-2.0-fast/text-to-video`)
 - `IMAGE_TO_VIDEO_MODEL` (str): Default image-to-video model ID (default: `bytedance/seedance-2.5/image-to-video`)
 - `AUDIO_TO_VIDEO_MODEL` (str): Default audio-to-video model ID (default: `bytedance/seedance-2.5/reference-to-video`)
+- `TEXT_TO_3D_MODEL` (str): Default text-to-3D model ID (default: `tencent/hunyuan3d-rapid/text-to-3d`)
+- `IMAGE_TO_3D_MODEL` (str): Default image-to-3D model ID (default: `tencent/hunyuan3d-rapid/image-to-3d`)
+- `ENABLE_PBR_3D` (bool): Request PBR materials for 3D models (default: `True`)
+- `FACE_LIMIT_3D` (int, optional): Target face count for 3D meshes; clamped to the provider range (Tripo `face_limit`, Hunyuan3D Pro `face_count`). Empty = provider default
+- `MAX_WAIT_3D_SECONDS` (float): Maximum seconds to wait for a 3D generation (default: `900.0`)
 - `POLL_INTERVAL_SECONDS` (float): Polling interval for task completion (default: `3.0`)
 - `GENERATION_TIMEOUT_SECONDS` (float): Maximum seconds to wait for generation (default: `600.0`)
-- `RETURN_HTML_EMBED` (bool): Embed inline HTML video player in chat upon completion (default: `True`)
+- `RETURN_HTML_EMBED` (bool): Embed the inline image viewer / video player / 3D viewer in chat upon completion (default: `True`)
+
+User Valves can override the API key and every model ID, including `TEXT_TO_3D_MODEL` and `IMAGE_TO_3D_MODEL`.
+
+#### Supported 3D models
+
+| Family | Text-to-3D | Image-to-3D | Cost tier |
+|---|---|---|---|
+| Hunyuan3D Rapid (default) | `tencent/hunyuan3d-rapid/text-to-3d` | `tencent/hunyuan3d-rapid/image-to-3d` | ~$0.02 |
+| Hunyuan3D Pro | `tencent/hunyuan3d-pro/text-to-3d` | `tencent/hunyuan3d-pro/image-to-3d` | ~$0.02 |
+| Tripo H3.1 | `tripo-h3.1/text-to-3d` | `tripo-h3.1/image-to-3d` | ~$0.10 |
+| Meshy v7 | `meshy-v7/text-to-3d` | `meshy-v7/image-to-3d` | ~$0.02 |
+
+Other model IDs are rejected. The tool always asks for a GLB mesh and fails clearly if the model returns no GLB.
+
+Text-to-3D on Meshy v7 is sent with `mode: "full"`, which gives a textured mesh; `preview` would give an untextured one. Atlas Cloud does not document Meshy's output layout, so the tool picks the GLB defensively from `files[]` or `outputs`. Brief status-check failures while polling (HTTP 429/5xx, non-JSON bodies, dropped connections) are retried on the next poll, up to 4 in a row. A long 3D job is not lost to a single gateway hiccup. If polling gives up or times out, the error includes the prediction ID.
 
 ### Usage
 
@@ -849,6 +871,8 @@ The implementation lives at `tools/atlascloud_media_tool.py`.
    - **Text-to-Video:** *"Generate a 5-second video of ocean waves crashing at sunset"*
    - **Image-to-Video:** Attach an image and ask *"Animate this image into a video"*
    - **Audio-to-Video:** Attach an audio clip and ask *"Create a video matching this music track"*
+   - **Text-to-3D:** *"Make a 3D model of a weathered bronze knight helmet"*
+   - **Image-to-3D:** Attach an image (or reference a generated one) and ask *"Turn this into a 3D model"*. Only an image attached to the latest message (or passed as `image_url`) switches to image-to-3D; older chat images are ignored. 3D generations take a few minutes.
 
 ![Atlas Cloud Media Generator](img/Atlas_cloud_tool.png)
 *Atlas Cloud video generated from reference image with inline HTML video player in Open WebUI chat*
@@ -858,6 +882,7 @@ The implementation lives at `tools/atlascloud_media_tool.py`.
 - Multi-modal generation: Text-to-Image, Image Editing, Text-to-Video, Image-to-Video, Audio-to-Video
 - Seamless OWUI backend image interoperability (automatically uploads local OWUI backend files or base64 images to Atlas Cloud via `/model/uploadMedia`)
 - Inline HTML `<video>` player embed for immediate video playback in chat
+- Interactive 3D viewer for generated GLB models (Google [`<model-viewer>`](https://modelviewer.dev/) 4.4.0, Apache-2.0, loaded from jsDelivr with a pinned version and SRI hash): orbit/zoom camera controls, auto-rotate toggle, shadows and environment lighting, preview-image poster, loading progress bar, fullscreen and GLB download. The GLB and its preview render are stored in Open WebUI (`model/gltf-binary`, linked to the chat), so provider URLs never reach the chat. When the viewer script or the model cannot load (offline, CSP, or **iframe Sandbox Allow Same Origin** disabled), the embed shows the preview image and an open/download link instead.
 - User Valves support for per-user model customization and personal API keys
 - Deduplicated status emissions during polling loop to keep chat notifications clean
 
@@ -1868,6 +1893,27 @@ Google web search via the [Serply API](https://serply.io) ([docs](https://serply
 - **Example:** `Search the web for the latest Open WebUI release notes`
 
 - Without an API key the tool returns a setup message instead of failing.
+
+---
+
+### 3D Model Viewer
+
+### Description
+
+Shows a GLB / glTF 3D model that is already stored in Open WebUI in an interactive inline viewer (Google `<model-viewer>`): orbit and zoom controls, auto-rotate toggle, fullscreen, and GLB download. It uses the same viewer as the Atlas Cloud 3D generator, so both look the same. The tool only opens files you can read in Open WebUI (your own files, files shared with you, or any file for admins).
+
+### Configuration
+
+- **AUTO_ROTATE**: Start the viewer with the model rotating (default: `true`)
+
+### Usage
+
+- **Example:** attach `robot.glb` and ask `Show me this 3D model`
+- **Example:** `Open the 3D model /api/v1/files/<id>/content`
+
+- With no file id, the tool uses the most recent `.glb` / `.gltf` attached in the chat.
+- Turn on Settings > Interface > "iframe Sandbox Allow Same Origin" to load the model inline. Without it, the viewer shows a download link instead.
+- A `.gltf` that points to separate `.bin` or texture files may not load. Use a self-contained `.glb`.
 
 ---
 

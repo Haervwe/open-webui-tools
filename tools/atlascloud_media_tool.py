@@ -1,9 +1,9 @@
 """
 title: Atlas Cloud Media Generator
-description: Generate images, edit images, and create videos (text-to-video, image-to-video, audio-to-video) through the Atlas Cloud Media API. Outputs are stored in Open WebUI file storage and shown in an inline viewer.
+description: Generate images, edit images, create videos (text-to-video, image-to-video, audio-to-video) and 3D models (text-to-3D, image-to-3D as GLB) through the Atlas Cloud Media API. Outputs are stored in Open WebUI file storage and shown in an inline viewer.
 author: binyangzhu000-sudo & Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-version: 1.2.0
+version: 1.3.0
 license: MIT
 required_open_webui_version: 0.9.0
 """
@@ -47,9 +47,68 @@ DEFAULT_IMAGE_EDIT_MODEL = "bytedance/seedream-v5.0-pro/image-to-image"
 DEFAULT_VIDEO_MODEL = "bytedance/seedance-2.0-fast/text-to-video"
 DEFAULT_IMAGE_TO_VIDEO_MODEL = "bytedance/seedance-2.5/image-to-video"
 DEFAULT_AUDIO_TO_VIDEO_MODEL = "bytedance/seedance-2.5/reference-to-video"
+DEFAULT_TEXT_TO_3D_MODEL = "tencent/hunyuan3d-rapid/text-to-3d"
+DEFAULT_IMAGE_TO_3D_MODEL = "tencent/hunyuan3d-rapid/image-to-3d"
+
+# Supported 3D model families. "image_field" is the request field that carries
+# the reference image for the image-to-3d variant (it differs per provider).
+MODEL_3D_FAMILIES: Dict[str, Dict[str, Any]] = {
+    "hunyuan3d-rapid": {
+        "label": "Hunyuan3D Rapid",
+        "text": "tencent/hunyuan3d-rapid/text-to-3d",
+        "image": "tencent/hunyuan3d-rapid/image-to-3d",
+        "image_field": "image",
+        "cost": "economy (about $0.02 per model)",
+        "max_prompt": None,
+    },
+    "hunyuan3d-pro": {
+        "label": "Hunyuan3D Pro",
+        "text": "tencent/hunyuan3d-pro/text-to-3d",
+        "image": "tencent/hunyuan3d-pro/image-to-3d",
+        "image_field": "image",
+        "cost": "economy (about $0.02 per model)",
+        "max_prompt": None,
+    },
+    "tripo-h3.1": {
+        "label": "Tripo H3.1",
+        "text": "tripo-h3.1/text-to-3d",
+        "image": "tripo-h3.1/image-to-3d",
+        "image_field": "image_url",
+        "cost": "premium (about $0.10 per model)",
+        "max_prompt": 1024,
+    },
+    "meshy-v7": {
+        "label": "Meshy v7",
+        "text": "meshy-v7/text-to-3d",
+        "image": "meshy-v7/image-to-3d",
+        "image_field": "image",
+        "cost": "economy (about $0.02 per model)",
+        "max_prompt": 800,
+    },
+}
+# model id -> (family, "text" | "image")
+SUPPORTED_3D_MODELS: Dict[str, Tuple[str, str]] = {
+    spec[mode]: (family, mode)
+    for family, spec in MODEL_3D_FAMILIES.items()
+    for mode in ("text", "image")
+}
+GLB_CONTENT_TYPE = "model/gltf-binary"
+GLB_MAGIC = b"glTF"
+MAX_3D_MODEL_BYTES = 200 * 1024 * 1024
+PREVIEW_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+# Google <model-viewer> (Apache-2.0), pinned exact version + SRI (jsDelivr file hash).
+MODEL_VIEWER_VERSION = "4.4.0"
+MODEL_VIEWER_MODULE_URL = (
+    f"https://cdn.jsdelivr.net/npm/@google/model-viewer@{MODEL_VIEWER_VERSION}/dist/model-viewer.min.js"
+)
+MODEL_VIEWER_INTEGRITY = "sha256-GLLnEQNapHBe4oFTClXcIzj/Be7T1wrhbVQQUoKnXtU="
 
 COMPLETED_STATUSES = frozenset({"completed", "succeeded", "success"})
 FAILED_STATUSES = frozenset({"failed", "error", "cancelled", "canceled", "timeout"})
+# Poll GETs that hit a gateway hiccup are retried on the next tick instead of
+# aborting a (paid) generation; only this many failures in a row give up.
+TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+MAX_CONSECUTIVE_POLL_ERRORS = 5
 
 MAX_ERROR_DETAIL_CHARS = 200
 # Reference media read from Open WebUI / data: URIs before re-uploading to Atlas Cloud.
@@ -75,6 +134,10 @@ EventEmitter = Optional[Callable[[dict[str, Any]], Awaitable[None]]]
 
 class AtlasCloudError(RuntimeError):
     """Raised when Atlas Cloud rejects or fails a generation request."""
+
+
+class AtlasCloudTransientError(AtlasCloudError):
+    """A poll request failed in a way that is worth retrying (5xx/429, non-JSON)."""
 
 
 def _short(value: Any, limit: int = MAX_ERROR_DETAIL_CHARS) -> str:
@@ -114,6 +177,7 @@ MEDIA_EXTENSIONS = {
     "video/webm": ".webm",
     "video/quicktime": ".mov",
     "image/svg+xml": ".svg",
+    "model/gltf-binary": ".glb",
 }
 
 TRANSIENT_HTTP_STATUSES = frozenset({429, 502, 503, 504})
@@ -745,6 +809,246 @@ def video_player_embed(
 
 
 # --------------------------------------------------------------------------
+# 3D model viewer (Google <model-viewer>, GLB)
+# --------------------------------------------------------------------------
+
+_MODEL_3D_CSS = """
+.mv-wrap { position: relative; width: 100%; height: __H__px; border-radius: 12px; overflow: hidden;
+  background: radial-gradient(circle at 50% 35%, #ffffff 0%, #e9ebef 70%, #dfe2e7 100%); }
+.mv-wrap:fullscreen { height: 100%; border-radius: 0; }
+.mv-wrap:-webkit-full-screen { height: 100%; border-radius: 0; }
+.mv-wrap model-viewer { position: absolute; inset: 0; width: 100%; height: 100%;
+  background: transparent; --poster-color: transparent; --progress-bar-height: 0px; }
+.mv-poster { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.mv-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(0,0,0,0.08); }
+.mv-bar { height: 100%; width: 0; background: #3b82f6; transition: width .2s; }
+.mv-status { position: absolute; left: 12px; bottom: 12px; padding: 4px 10px; border-radius: 999px;
+  font-size: 11px; color: #333; background: rgba(255,255,255,0.75); }
+.mv-wrap.mv-failed { height: auto; background: transparent; overflow: visible; }
+.mv-wrap.mv-failed .mv-poster { position: static; display: block; max-height: __H__px;
+  border-radius: 12px; margin-bottom: 8px; }
+.mv-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0 0 0; }
+.mv-actions .owui-btn { margin-top: 0; }
+.mv-meta { font-size: 11px; color: #777; margin-left: auto; }
+@media (prefers-color-scheme: dark) {
+  .mv-wrap { background: radial-gradient(circle at 50% 35%, #3a3d44 0%, #24262b 70%, #1c1d21 100%); }
+  .mv-wrap.mv-failed { background: transparent; }
+  .mv-progress { background: rgba(255,255,255,0.1); }
+  .mv-status { color: #ddd; background: rgba(0,0,0,0.55); }
+  .mv-meta { color: #999; }
+}
+"""
+
+_MODEL_3D_JS = r"""
+var M = window.OWUIMedia, wrap = document.getElementById('mv'), stage = document.getElementById('mv-stage');
+var bar = document.getElementById('mv-bar'), status = document.getElementById('mv-status');
+var acts = document.getElementById('mv-actions'), holder = { dataset: {} }, mv = null, failed = false;
+var poster = null;
+if (DATA.poster) {
+  poster = document.createElement('img');
+  poster.className = 'mv-poster'; poster.alt = DATA.alt; poster.decoding = 'async';
+  stage.appendChild(poster);
+  M.load(poster, DATA.poster, function () { if (poster && poster.parentNode) poster.parentNode.removeChild(poster); poster = null; });
+}
+function setStatus(t) { if (status) { status.textContent = t; status.style.display = t ? '' : 'none'; } }
+function fail() {
+  if (failed) return;
+  failed = true;
+  if (mv && mv.parentNode) mv.parentNode.removeChild(mv);
+  wrap.className += ' mv-failed';
+  var bars = wrap.querySelectorAll('.mv-progress, .mv-status');
+  for (var i = 0; i < bars.length; i++) bars[i].parentNode.removeChild(bars[i]);
+  acts.style.display = 'none';
+  var box = document.createElement('div');
+  wrap.appendChild(box);
+  M.fallback(box, DATA.glb, '3D model');
+}
+// GLB / poster source: same-origin Bearer blob for /api/ paths, else the URL itself.
+function source(u) {
+  if (M.isLocalApi(u) && M.sameOrigin) return M.blobUrl(u);
+  if (M.isSafe(u)) return Promise.resolve(u);
+  return Promise.reject(new Error('unsafe URL'));
+}
+function loadModule() {
+  if (!window.customElements || !DATA.module) return Promise.reject(new Error('no custom elements'));
+  if (customElements.get('model-viewer')) return Promise.resolve();
+  return new Promise(function (resolve, reject) {
+    var s = document.createElement('script');
+    s.type = 'module'; s.src = DATA.module; s.crossOrigin = 'anonymous';
+    if (DATA.integrity) s.integrity = DATA.integrity;
+    s.onerror = function () { reject(new Error('module failed to load')); };
+    customElements.whenDefined('model-viewer').then(resolve);
+    setTimeout(function () { reject(new Error('module load timed out')); }, 20000);
+    document.head.appendChild(s);
+  });
+}
+setStatus('Loading 3D viewer...');
+Promise.all([loadModule(), source(DATA.glb)]).then(function (res) {
+  var src = res[1];
+  if (src.indexOf('blob:') === 0) holder.dataset.blob = src;
+  mv = document.createElement('model-viewer');
+  mv.setAttribute('camera-controls', '');
+  mv.setAttribute('touch-action', 'pan-y');
+  mv.setAttribute('shadow-intensity', '1');
+  mv.setAttribute('environment-image', 'neutral');
+  mv.setAttribute('exposure', '1');
+  mv.setAttribute('interaction-prompt', 'auto');
+  mv.setAttribute('alt', DATA.alt);
+  if (DATA.autoRotate) mv.setAttribute('auto-rotate', '');
+  mv.addEventListener('progress', function (e) {
+    var p = (e && e.detail && e.detail.totalProgress) || 0;
+    bar.style.width = Math.round(p * 100) + '%';
+    setStatus(p < 1 ? 'Loading model ' + Math.round(p * 100) + '%' : '');
+    if (p >= 1 && bar.parentNode) bar.parentNode.style.display = 'none';
+  });
+  mv.addEventListener('load', function () {
+    setStatus('');
+    if (bar.parentNode) bar.parentNode.style.display = 'none';
+    if (poster && poster.parentNode) poster.parentNode.removeChild(poster);
+    M.postHeight();
+  });
+  mv.addEventListener('error', fail);
+  stage.appendChild(mv);
+  mv.src = src;
+  setStatus('Loading model...');
+}).catch(fail);
+
+var rot = document.getElementById('mv-rotate');
+rot.textContent = DATA.autoRotate ? 'Stop rotation' : 'Auto-rotate';
+rot.addEventListener('click', function (e) {
+  e.preventDefault();
+  if (!mv) return;
+  mv.autoRotate = !mv.autoRotate;
+  rot.textContent = mv.autoRotate ? 'Stop rotation' : 'Auto-rotate';
+});
+var fs = document.getElementById('mv-fullscreen');
+var canFs = (document.fullscreenEnabled || document.webkitFullscreenEnabled) &&
+  (wrap.requestFullscreen || wrap.webkitRequestFullscreen);
+if (!canFs) { fs.style.display = 'none'; } else {
+  fs.addEventListener('click', function (e) {
+    e.preventDefault();
+    var cur = document.fullscreenElement || document.webkitFullscreenElement;
+    try {
+      if (cur) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); }
+      else { var r = (wrap.requestFullscreen || wrap.webkitRequestFullscreen).call(wrap); if (r && r.catch) r.catch(function () {}); }
+    } catch (err) {}
+  });
+}
+document.getElementById('mv-download').addEventListener('click', function (e) {
+  e.preventDefault(); M.download(DATA.glb, DATA.name, holder);
+});
+if (DATA.meta) document.getElementById('mv-meta').textContent = DATA.meta;
+"""
+
+
+def model_3d_viewer_embed(
+    glb_url: str,
+    poster_url: Optional[str] = None,
+    title: str = "Generated 3D Model",
+    prompt: str = "",
+    *,
+    prompt_label: str = "Prompt",
+    download_name: str = "model.glb",
+    model_label: str = "",
+    auto_rotate: bool = True,
+    height: int = 440,
+) -> str:
+    """Interactive GLB viewer (<model-viewer>): orbit controls, auto-rotate toggle,
+    shadow + neutral environment lighting, poster, progress bar, fullscreen and
+    download. Falls back to the poster image + download link when the viewer
+    module or the GLB cannot be loaded."""
+    h = max(240, min(int(height or 440), 900))
+    data = {
+        "glb": glb_url if isinstance(glb_url, str) else "",
+        "poster": poster_url if isinstance(poster_url, str) and poster_url.strip() else None,
+        "name": download_name or "model.glb",
+        "alt": title or "Generated 3D model",
+        "meta": model_label or "",
+        "autoRotate": bool(auto_rotate),
+        "module": MODEL_VIEWER_MODULE_URL,
+        "integrity": MODEL_VIEWER_INTEGRITY,
+    }
+    body = (
+        '<div id="mv" class="mv-wrap"><div id="mv-stage"></div>'
+        '<div class="mv-progress"><div id="mv-bar" class="mv-bar"></div></div>'
+        '<div id="mv-status" class="mv-status"></div></div>'
+        '<div id="mv-actions" class="mv-actions">'
+        '<a href="#" id="mv-rotate" class="owui-btn">Stop rotation</a>'
+        '<a href="#" id="mv-fullscreen" class="owui-btn">Fullscreen</a>'
+        '<a href="#" id="mv-download" class="owui-btn">Download GLB</a>'
+        '<span id="mv-meta" class="mv-meta"></span></div>'
+        + _prompt_bubble(prompt_label, prompt)
+    )
+    return _page(title, _MODEL_3D_CSS.replace("__H__", str(h)), body, data, _MODEL_3D_JS)
+
+
+def _url_path(url: Any) -> str:
+    """Lower-cased URL path (query string / fragment ignored)."""
+    if not isinstance(url, str):
+        return ""
+    try:
+        return (urlparse(url.strip()).path or "").lower()
+    except ValueError:
+        return ""
+
+
+def _prediction_files(prediction: Dict[str, Any]) -> List[Dict[str, Any]]:
+    files = prediction.get("files")
+    return [f for f in files if isinstance(f, dict)] if isinstance(files, list) else []
+
+
+def _prediction_outputs(prediction: Dict[str, Any]) -> List[str]:
+    outputs = prediction.get("outputs") or prediction.get("output") or []
+    if isinstance(outputs, str):
+        outputs = [outputs]
+    return [o for o in outputs if isinstance(o, str) and o.strip()] if isinstance(outputs, list) else []
+
+
+def select_glb_url(prediction: Dict[str, Any]) -> str:
+    """The GLB mesh of a completed 3D prediction: a files[] entry named/typed as GLB,
+    else the first outputs URL whose path ends in .glb. Raises AtlasCloudError."""
+    for entry in _prediction_files(prediction):
+        url = entry.get("url")
+        if not is_http_url(url):
+            continue
+        name = str(entry.get("file_name") or entry.get("name") or "").lower()
+        ctype = str(entry.get("content_type") or "").lower()
+        ftype = str(entry.get("type") or "").lower()
+        if name.endswith(".glb") or _url_path(url).endswith(".glb") or "gltf-binary" in ctype or ftype == "glb":
+            return url
+    for url in _prediction_outputs(prediction):
+        if is_http_url(url) and _url_path(url).endswith(".glb"):
+            return url
+    raise AtlasCloudError("The Atlas Cloud model returned no GLB file.")
+
+
+def select_preview_url(prediction: Dict[str, Any], exclude: Optional[str] = None) -> Optional[str]:
+    """Preview render: data.thumbnail, else an image in files[] / outputs."""
+    thumb = prediction.get("thumbnail")
+    if isinstance(thumb, dict):
+        thumb = thumb.get("url")
+    if is_http_url(thumb) and thumb != exclude:
+        return thumb
+    for entry in _prediction_files(prediction):
+        url = entry.get("url")
+        if not is_http_url(url) or url == exclude:
+            continue
+        name = str(entry.get("file_name") or entry.get("name") or "").lower()
+        ctype = str(entry.get("content_type") or "").lower()
+        if ctype.startswith("image/") or name.endswith(PREVIEW_EXTENSIONS) or _url_path(url).endswith(PREVIEW_EXTENSIONS):
+            return url
+    for url in reversed(_prediction_outputs(prediction)):  # preview image is listed last
+        if is_http_url(url) and url != exclude and _url_path(url).endswith(PREVIEW_EXTENSIONS):
+            return url
+    return None
+
+
+def model_slug(text: Optional[str], fallback: str = "atlascloud_3d") -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")[:48].strip("-")
+    return slug or f"{fallback}_{uuid.uuid4().hex[:8]}"
+
+
+# --------------------------------------------------------------------------
 # Return helper
 # --------------------------------------------------------------------------
 
@@ -795,6 +1099,14 @@ class Tools:
             default=None,
             description="Preferred audio-to-video / reference-to-video model ID.",
         )
+        TEXT_TO_3D_MODEL: Optional[str] = Field(
+            default=None,
+            description="Preferred text-to-3D model ID (one of the supported 3D models).",
+        )
+        IMAGE_TO_3D_MODEL: Optional[str] = Field(
+            default=None,
+            description="Preferred image-to-3D model ID (one of the supported 3D models).",
+        )
 
     class Valves(BaseModel):
         ATLASCLOUD_API_KEY: str = Field(
@@ -826,11 +1138,42 @@ class Tools:
             default=DEFAULT_AUDIO_TO_VIDEO_MODEL,
             description="Default audio-to-video / reference-to-video model ID.",
         )
+        TEXT_TO_3D_MODEL: str = Field(
+            default=DEFAULT_TEXT_TO_3D_MODEL,
+            description=(
+                "Default text-to-3D model ID. Supported: "
+                + ", ".join(spec["text"] for spec in MODEL_3D_FAMILIES.values())
+            ),
+        )
+        IMAGE_TO_3D_MODEL: str = Field(
+            default=DEFAULT_IMAGE_TO_3D_MODEL,
+            description=(
+                "Default image-to-3D model ID. Supported: "
+                + ", ".join(spec["image"] for spec in MODEL_3D_FAMILIES.values())
+            ),
+        )
+        ENABLE_PBR_3D: bool = Field(
+            default=True,
+            description="Request PBR materials (metallic/roughness/normal maps) for 3D models.",
+        )
+        FACE_LIMIT_3D: Optional[int] = Field(
+            default=None,
+            ge=1,
+            description=(
+                "Optional target face count for 3D meshes (Tripo: face_limit 1000-2000000, "
+                "Hunyuan3D Pro: face_count 40000-1500000; clamped). Empty = provider default."
+            ),
+        )
+        MAX_WAIT_3D_SECONDS: float = Field(
+            default=900.0,
+            ge=30.0,
+            description="Maximum seconds to wait for a 3D generation (they take minutes).",
+        )
         POLL_INTERVAL_SECONDS: float = Field(default=3.0, ge=0.1)
         GENERATION_TIMEOUT_SECONDS: float = Field(default=600.0, ge=1.0)
         RETURN_HTML_EMBED: bool = Field(
             default=True,
-            description="Return an inline HTML image viewer / video player upon completion.",
+            description="Return an inline HTML image viewer / video player / 3D viewer upon completion.",
         )
 
     def __init__(self) -> None:
@@ -890,6 +1233,17 @@ class Tools:
                 user_valves.AUDIO_TO_VIDEO_MODEL if user_valves else None,
                 self.valves.AUDIO_TO_VIDEO_MODEL,
             ),
+            "text_to_3d_model": pick(
+                user_valves.TEXT_TO_3D_MODEL if user_valves else None,
+                self.valves.TEXT_TO_3D_MODEL,
+            ),
+            "image_to_3d_model": pick(
+                user_valves.IMAGE_TO_3D_MODEL if user_valves else None,
+                self.valves.IMAGE_TO_3D_MODEL,
+            ),
+            "enable_pbr_3d": bool(self.valves.ENABLE_PBR_3D),
+            "face_limit_3d": self.valves.FACE_LIMIT_3D,
+            "timeout_3d": self.valves.MAX_WAIT_3D_SECONDS,
             "poll_interval": self.valves.POLL_INTERVAL_SECONDS,
             "timeout": self.valves.GENERATION_TIMEOUT_SECONDS,
             "return_html_embed": self.valves.RETURN_HTML_EMBED,
@@ -1205,13 +1559,23 @@ class Tools:
 
         return media_items
 
-    async def _submit_and_wait(
+    async def _submit_and_poll(
         self,
         endpoint: str,
         payload: dict[str, Any],
         config: Dict[str, Any],
         emitter: EventEmitter,
-    ) -> list[str]:
+        *,
+        timeout: Optional[float] = None,
+        heartbeat: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Submit a prediction and poll until it completes. Returns the completed
+        prediction ``data`` dict (outputs/files/thumbnail are validated by callers).
+
+        :param timeout: per-call wait limit (default: GENERATION_TIMEOUT_SECONDS).
+        :param heartbeat: when set, re-emit an unchanged status with the elapsed
+            time every ``heartbeat`` seconds (long 3D jobs); still deduplicated.
+        """
         api_key = config["api_key"]
         if not api_key:
             raise AtlasCloudError(
@@ -1223,9 +1587,10 @@ class Tools:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        timeout = aiohttp.ClientTimeout(total=config["timeout"] + 30)
+        wait = float(timeout if timeout is not None else config["timeout"])
+        client_timeout = aiohttp.ClientTimeout(total=wait + 30)
 
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with aiohttp.ClientSession(timeout=client_timeout, headers=headers) as session:
             async with session.post(f"{base_url}{endpoint}", json=payload) as response:
                 submit_data = self._data(await self._json_response(response))
 
@@ -1233,32 +1598,41 @@ class Tools:
             if not prediction_id:
                 raise AtlasCloudError("Atlas Cloud did not return a prediction ID.")
 
-            deadline = time.monotonic() + config["timeout"]
-            last_status: Optional[str] = None
+            started = time.monotonic()
+            deadline = started + wait
+            last_key: Optional[Tuple[str, int]] = None
+            poll_errors = 0
             while time.monotonic() < deadline:
-                async with session.get(
-                    f"{base_url}/model/prediction/{prediction_id}"
-                ) as response:
-                    prediction = self._data(await self._json_response(response))
+                try:
+                    prediction = await self._poll_once(
+                        session, f"{base_url}/model/prediction/{prediction_id}"
+                    )
+                except (
+                    AtlasCloudTransientError,
+                    aiohttp.ClientConnectionError,
+                    aiohttp.ClientPayloadError,
+                    asyncio.TimeoutError,
+                ) as exc:
+                    poll_errors += 1
+                    if poll_errors >= MAX_CONSECUTIVE_POLL_ERRORS:
+                        raise AtlasCloudError(
+                            f"Atlas Cloud status checks kept failing for prediction "
+                            f"{_short(prediction_id, 80)}: {_short(str(exc) or type(exc).__name__)}"
+                        ) from exc
+                    last_key = None  # re-announce the status once polling recovers
+                    await self._emit_status(
+                        emitter,
+                        f"Atlas Cloud status check failed, retrying ({poll_errors}/"
+                        f"{MAX_CONSECUTIVE_POLL_ERRORS - 1})...",
+                        done=False,
+                    )
+                    await asyncio.sleep(config["poll_interval"])
+                    continue
+                poll_errors = 0
 
                 status = str(prediction.get("status", "")).lower()
                 if status in COMPLETED_STATUSES:
-                    outputs = (
-                        prediction.get("outputs") or prediction.get("output") or []
-                    )
-                    if isinstance(outputs, str):
-                        outputs = [outputs]
-                    if not isinstance(outputs, list) or not all(
-                        isinstance(item, str) for item in outputs
-                    ):
-                        raise AtlasCloudError(
-                            "Atlas Cloud returned invalid output URLs."
-                        )
-                    if not outputs:
-                        raise AtlasCloudError(
-                            "Atlas Cloud completed without output URLs."
-                        )
-                    return outputs
+                    return prediction
 
                 if status in FAILED_STATUSES:
                     detail = (
@@ -1266,16 +1640,58 @@ class Tools:
                     )
                     raise AtlasCloudError(f"Atlas Cloud generation failed: {_short(detail)}")
 
-                if status != last_status:
-                    last_status = status
-                    await self._emit_status(
-                        emitter,
-                        f"Atlas Cloud generation status: {_short(status or 'processing', 40)}",
-                        done=False,
-                    )
+                elapsed = time.monotonic() - started
+                tick = int(elapsed // heartbeat) if heartbeat else 0
+                if (status, tick) != last_key:
+                    last_key = (status, tick)
+                    text = f"Atlas Cloud generation status: {_short(status or 'processing', 40)}"
+                    if heartbeat and tick:
+                        text += f" ({int(elapsed) // 60}m {int(elapsed) % 60:02d}s elapsed)"
+                    await self._emit_status(emitter, text, done=False)
                 await asyncio.sleep(config["poll_interval"])
 
-        raise AtlasCloudError("Atlas Cloud generation timed out.")
+        raise AtlasCloudError(
+            f"Atlas Cloud generation timed out (prediction {_short(prediction_id, 80)})."
+        )
+
+    async def _poll_once(self, session: aiohttp.ClientSession, url: str) -> Dict[str, Any]:
+        """One prediction status GET. Gateway errors (429/5xx) and non-JSON bodies
+        raise AtlasCloudTransientError; other 4xx and API error codes stay fatal."""
+        async with session.get(url) as response:
+            if response.status in TRANSIENT_HTTP_STATUSES:
+                raise AtlasCloudTransientError(
+                    f"Atlas Cloud status check returned HTTP {response.status}."
+                )
+            try:
+                payload = await self._json_response(response)
+            except AtlasCloudError as exc:
+                if response.status < 400 and "non-JSON" in str(exc):
+                    raise AtlasCloudTransientError(str(exc)) from exc
+                raise
+        return self._data(payload)
+
+    async def _submit_and_wait(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        config: Dict[str, Any],
+        emitter: EventEmitter,
+        *,
+        timeout: Optional[float] = None,
+    ) -> list[str]:
+        prediction = await self._submit_and_poll(
+            endpoint, payload, config, emitter, timeout=timeout
+        )
+        outputs = prediction.get("outputs") or prediction.get("output") or []
+        if isinstance(outputs, str):
+            outputs = [outputs]
+        if not isinstance(outputs, list) or not all(
+            isinstance(item, str) for item in outputs
+        ):
+            raise AtlasCloudError("Atlas Cloud returned invalid output URLs.")
+        if not outputs:
+            raise AtlasCloudError("Atlas Cloud completed without output URLs.")
+        return outputs
 
     # ------------------------------------------------------------------
     # Output persistence + presentation
@@ -1746,3 +2162,232 @@ class Tools:
             metadata=__metadata__,
             emitter=__event_emitter__,
         )
+
+    # ------------------------------------------------------------------
+    # 3D models
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_3d_model(model_id: str, mode: str) -> Dict[str, Any]:
+        """Validate a configured 3D model id for ``mode`` ("text" | "image")."""
+        entry = SUPPORTED_3D_MODELS.get(str(model_id or "").strip())
+        valve = "TEXT_TO_3D_MODEL" if mode == "text" else "IMAGE_TO_3D_MODEL"
+        if entry is None or entry[1] != mode:
+            supported = ", ".join(spec[mode] for spec in MODEL_3D_FAMILIES.values())
+            raise AtlasCloudError(
+                f"Unsupported {mode}-to-3D model '{_short(model_id, 80)}' in {valve}. Supported: {supported}."
+            )
+        family = entry[0]
+        return {"id": model_id.strip(), "family": family, "mode": mode, **MODEL_3D_FAMILIES[family]}
+
+    @staticmethod
+    def _build_3d_payload(
+        spec: Dict[str, Any],
+        *,
+        prompt: str,
+        image: Optional[str],
+        enable_pbr: bool,
+        face_limit: Optional[int],
+    ) -> Dict[str, Any]:
+        """Request body for one model family. Only documented fields are sent."""
+        family = spec["family"]
+        payload: Dict[str, Any] = {"model": spec["id"]}
+        if spec["mode"] == "image":
+            payload[spec["image_field"]] = image
+        else:
+            payload["prompt"] = prompt
+        if family == "hunyuan3d-rapid":
+            payload["enable_pbr"] = bool(enable_pbr)
+            payload["format"] = "GLB"
+        elif family == "hunyuan3d-pro":
+            payload["enable_pbr"] = bool(enable_pbr)
+            if face_limit:
+                payload["face_count"] = max(40000, min(int(face_limit), 1500000))
+        elif family == "tripo-h3.1":
+            payload["texture"] = True
+            payload["pbr"] = bool(enable_pbr)
+            if face_limit:
+                payload["face_limit"] = max(1000, min(int(face_limit), 2000000))
+        elif family == "meshy-v7":
+            if spec["mode"] == "text":
+                payload["mode"] = "full"  # mesh + texture stages ("preview" is untextured)
+            else:
+                payload["should_texture"] = True  # enable_pbr requires it
+            payload["enable_pbr"] = bool(enable_pbr)
+            payload["target_formats"] = ["glb"]
+        return payload
+
+    async def _persist_3d(
+        self,
+        prediction: Dict[str, Any],
+        *,
+        slug: str,
+        request: Any,
+        user: Any,
+        metadata: Optional[dict],
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """Download the GLB (+ preview render) right away (provider URLs expire)
+        and store them in Open WebUI. Raises AtlasCloudError / MediaStorageError."""
+        glb_url = select_glb_url(prediction)
+        preview_url = select_preview_url(prediction, exclude=glb_url)
+        user_model = await resolve_user(user)
+        if user_model is None:
+            raise MediaStorageError("The requesting Open WebUI user could not be resolved.")
+
+        data, _served = await fetch_media_bytes(glb_url, timeout=300.0, max_bytes=MAX_3D_MODEL_BYTES)
+        if not data.startswith(GLB_MAGIC):
+            raise AtlasCloudError("The Atlas Cloud model returned a file that is not a valid GLB.")
+        glb = await save_media_bytes(
+            data,
+            request=request,
+            user=user_model,
+            content_type=GLB_CONTENT_TYPE,
+            filename=f"{slug}.glb",
+            metadata=metadata,
+            prefix="atlascloud_3d",
+        )
+
+        preview: Optional[Dict[str, Any]] = None
+        if preview_url:
+            try:
+                img, served = await fetch_media_bytes(preview_url, timeout=120.0)
+                ctype = INPUT_TYPE_ALIASES.get(served, served)
+                if ctype not in ALLOWED_OUTPUT_TYPES["image"]:
+                    guessed = normalize_content_type(mimetypes.guess_type(_url_path(preview_url))[0], "")
+                    ctype = guessed if guessed in ALLOWED_OUTPUT_TYPES["image"] else ""
+                if ctype:
+                    preview = await save_media_bytes(
+                        img,
+                        request=request,
+                        user=user_model,
+                        content_type=ctype,
+                        filename=f"{slug}_preview",
+                        metadata=metadata,
+                        prefix="atlascloud_3d",
+                    )
+            except MediaStorageError as exc:  # the preview is optional
+                log.warning("3D preview image not stored: %s", exc)
+        return glb, preview
+
+    async def generate_3d_model(
+        self,
+        prompt: str = "",
+        image_url: str = "",
+        __event_emitter__: EventEmitter = None,
+        __user__: Optional[Dict[str, Any]] = None,
+        __messages__: Optional[List[Dict[str, Any]]] = None,
+        __files__: Optional[List[Dict[str, Any]]] = None,
+        __request__: Any = None,
+        __metadata__: Optional[Dict[str, Any]] = None,
+    ) -> Union[str, Tuple[HTMLResponse, Any]]:
+        """Generate a textured 3D model (GLB) with Atlas Cloud and show it in an interactive 3D viewer. Uses image-to-3D when an image is given in image_url or attached to the user's latest message, otherwise text-to-3D from the prompt. Takes a few minutes.
+
+        :param prompt: Description of a single object to model, e.g. "a weathered bronze knight helmet". Required when no image is given; with an image it only names the result.
+        :param image_url: Optional reference image to turn into 3D: an http(s) URL, a base64 data: URI or an Open WebUI /api/v1/files/<id>/content link (e.g. an image generated earlier in this chat). Leave empty to use an image attached to the latest message, or for text-to-3D.
+        """
+        config = self._resolve_config(__user__)
+        prompt = (prompt or "").strip()
+
+        target_image = (image_url or "").strip() if isinstance(image_url, str) else ""
+        if not target_image:
+            # Only the latest user message: an old image elsewhere in the chat must
+            # not silently turn a text-to-3D request into image-to-3D.
+            last_user = next(
+                (m for m in reversed(__messages__ or []) if isinstance(m, dict) and m.get("role") == "user"),
+                None,
+            )
+            extracted = self._extract_media_from_messages([last_user] if last_user else [], "image")
+            if not extracted and isinstance(__files__, list):
+                extracted = self._extract_media_from_messages([{"files": __files__}], "image")
+            if extracted:
+                target_image = extracted[0]
+
+        mode = "image" if target_image else "text"
+        try:
+            spec = self._resolve_3d_model(
+                config["image_to_3d_model"] if mode == "image" else config["text_to_3d_model"], mode
+            )
+            if mode == "text" and not prompt:
+                raise AtlasCloudError("Provide a prompt describing the object, or attach an image.")
+            if mode == "text" and spec["max_prompt"] and len(prompt) > spec["max_prompt"]:
+                raise AtlasCloudError(
+                    f"The prompt is too long for {spec['label']} (max {spec['max_prompt']} characters)."
+                )
+            if not config["api_key"]:
+                raise AtlasCloudError(
+                    "Atlas Cloud API key is not configured. Please set ATLASCLOUD_API_KEY in tool Valves or User Valves."
+                )
+
+            hosted_image: Optional[str] = None
+            if mode == "image":
+                await self._emit_status(
+                    __event_emitter__, "Processing reference image for 3D...", done=False
+                )
+                user_obj = await resolve_user(__user__)
+                headers = {"Authorization": f"Bearer {config['api_key']}"}
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=60), headers=headers
+                ) as session:
+                    hosted_image = await self._ensure_atlas_media_url(
+                        session, config["base_url"], target_image, "image", user_obj
+                    )
+
+            await self._emit_status(
+                __event_emitter__,
+                f"Generating 3D model with {spec['label']} ({mode}-to-3D), this takes a few minutes...",
+                done=False,
+            )
+            prediction = await self._submit_and_poll(
+                IMAGE_ENDPOINT,
+                self._build_3d_payload(
+                    spec,
+                    prompt=prompt,
+                    image=hosted_image,
+                    enable_pbr=config["enable_pbr_3d"],
+                    face_limit=config["face_limit_3d"],
+                ),
+                config,
+                __event_emitter__,
+                timeout=config["timeout_3d"],
+                heartbeat=30.0,
+            )
+            select_glb_url(prediction)  # fail fast before any download
+        except (AtlasCloudError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            error = self._error_text(exc)
+            await self._emit_status(__event_emitter__, f"Atlas Cloud error: {error}", done=True)
+            return f"Atlas Cloud 3D model generation failed: {error}"
+
+        await self._emit_status(__event_emitter__, "Saving 3D model to Open WebUI...", done=False)
+        slug = model_slug(prompt)
+        try:
+            glb, preview = await self._persist_3d(
+                prediction, slug=slug, request=__request__, user=__user__, metadata=__metadata__
+            )
+        except (AtlasCloudError, MediaStorageError) as exc:
+            msg = f"Atlas Cloud generated the 3D model, but it could not be saved to Open WebUI: {exc}"
+            await self._emit_status(__event_emitter__, msg, done=True)
+            return msg
+
+        await self._emit_status(__event_emitter__, "Atlas Cloud 3D model generated", done=True)
+        glb_link = glb["url"]
+        used = f"{spec['label']} ({spec['id']}), cost tier: {spec['cost']}"
+        if not config["return_html_embed"]:
+            return (
+                f"3D model generated and saved to Open WebUI: [Download {slug}.glb]({glb_link})\n"
+                f"Model: {used}."
+            )
+
+        title = (prompt[:80] if prompt else "Generated 3D Model") or "Generated 3D Model"
+        viewer = model_3d_viewer_embed(
+            glb_link,
+            preview["url"] if preview else None,
+            title,
+            prompt,
+            download_name=glb.get("name") or f"{slug}.glb",
+            model_label=f"{spec['label']} - {mode}-to-3D",
+        )
+        message = (
+            "The 3D model is shown to the user in the interactive 3D viewer above; do not repeat it "
+            f"as markdown. GLB download link: {glb_link}. Model used: {used}."
+        )
+        return embed_result(viewer, message)
