@@ -3,7 +3,7 @@ title: Atlas Cloud Media Generator
 description: Generate images, edit images, create videos (text-to-video, image-to-video, audio-to-video) and 3D models (text-to-3D, image-to-3D as GLB) through the Atlas Cloud Media API. Outputs are stored in Open WebUI file storage and shown in an inline viewer.
 author: binyangzhu000-sudo & Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-version: 1.3.6
+version: 1.3.7
 license: MIT
 required_open_webui_version: 0.9.0
 """
@@ -819,7 +819,7 @@ def video_player_embed(
 # --------------------------------------------------------------------------
 
 _MODEL_3D_CSS = """
-.mv-wrap { position: relative; width: 100%; max-width: 960px; margin: 0 auto; height: __H__px; border-radius: 12px; overflow: hidden;
+.mv-wrap { position: relative; width: 100%; max-width: 960px; margin: 0; height: __H__px; border-radius: 12px; overflow: hidden;
   background: radial-gradient(circle at 50% 35%, #ffffff 0%, #e9ebef 70%, #dfe2e7 100%); }
 .mv-wrap:fullscreen { height: 100%; max-width: none; border-radius: 0; }
 .mv-wrap:-webkit-full-screen { height: 100%; max-width: none; border-radius: 0; }
@@ -2432,6 +2432,8 @@ class Tools:
         )
         message = (
             "The 3D model is shown to the user in the interactive 3D viewer above; do not repeat it "
-            f"as markdown. GLB download link: {glb_link}. Model used: {used}."
+            f"as markdown. GLB download link: {glb_link}. Model used: {used}. "
+            "This request is complete: do not call generate_3d_model again unless the user asks "
+            "for a new or different model (each call is billed)."
         )
         return embed_result(viewer, message)

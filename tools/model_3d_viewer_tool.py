@@ -4,7 +4,7 @@ description: Show a GLB / glTF 3D model that is already in Open WebUI (an attach
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.5
+version: 0.1.6
 license: MIT
 required_open_webui_version: 0.9.0
 """
@@ -275,7 +275,7 @@ def _prompt_bubble(label: str, text: Optional[str]) -> str:
 # --------------------------------------------------------------------------
 
 _MODEL_3D_CSS = """
-.mv-wrap { position: relative; width: 100%; max-width: 960px; margin: 0 auto; height: __H__px; border-radius: 12px; overflow: hidden;
+.mv-wrap { position: relative; width: 100%; max-width: 960px; margin: 0; height: __H__px; border-radius: 12px; overflow: hidden;
   background: radial-gradient(circle at 50% 35%, #ffffff 0%, #e9ebef 70%, #dfe2e7 100%); }
 .mv-wrap:fullscreen { height: 100%; max-width: none; border-radius: 0; }
 .mv-wrap:-webkit-full-screen { height: 100%; max-width: none; border-radius: 0; }

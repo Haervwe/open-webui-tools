@@ -875,6 +875,10 @@ Text-to-3D on Meshy v7 is sent with `mode: "full"`, which gives a textured mesh;
    - **Image-to-3D:** Attach an image (or reference a generated one) and ask *"Turn this into a 3D model"*. Only an image attached to the latest message (or passed as `image_url`) switches to image-to-3D; older chat images are ignored. 3D generations take a few minutes.
 
 ![Atlas Cloud Media Generator](img/Atlas_cloud_tool.png)
+
+*Text-to-3D with Hunyuan3D Rapid, shown in the inline 3D viewer:*
+
+![Atlas Cloud 3D model generation](img/atlas_cloud_3d.png)
 *Atlas Cloud video generated from reference image with inline HTML video player in Open WebUI chat*
 
 ### Features
@@ -1914,6 +1918,8 @@ Shows a GLB / glTF 3D model that is already stored in Open WebUI in an interacti
 - With no file id, the tool uses the most recent `.glb` / `.gltf` attached in the chat.
 - Turn on Settings > Interface > "iframe Sandbox Allow Same Origin" to load the model inline. Without it, the viewer shows a download link instead.
 - A `.gltf` that points to separate `.bin` or texture files may not load. Use a self-contained `.glb`.
+
+![3D Model Viewer](img/3d_model_viewer.png)
 
 ---
 
