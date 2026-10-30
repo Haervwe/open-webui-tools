@@ -1,9 +1,55 @@
+"""
+title: Knowledge Base Manager
+description: Manage Open WebUI knowledge bases, nested directories and Markdown files from chat
+(list, tree, create, rename, move, upsert by path, read, search, delete). Every call goes through
+Open WebUI's own /api/v1 routes as the signed-in user, so Open WebUI's access control applies.
+Destructive operations require a confirmation click in the chat UI.
+author: izyazev
+author_url: https://github.com/izyazev/open-webui-knowledge-base-manager
+funding_url: https://github.com/Haervwe/open-webui-tools
+version: 1.1.0
+license: MIT
+required_open_webui_version: 0.9.6
+"""
+
 import asyncio
+import ipaddress
 import json
+import re
 from typing import Any, Optional
+from urllib.parse import quote, urlsplit
 
 import aiohttp
-from pydantic import Field
+from pydantic import BaseModel, Field
+
+# Open WebUI knowledge bases, knowledge directories and files all use uuid4 ids.
+# Anything else (e.g. "all", "search", "../users", "a?b", "x#") is rejected before
+# it can reach a URL path, so the model cannot be steered onto other API routes.
+_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
+class _Conn:
+    """aiohttp session bound to one resolved Open WebUI API base URL."""
+
+    def __init__(self, base_url, headers, cookies, error=None):
+        self.base_url = base_url
+        self.error = error
+        self.session = (
+            aiohttp.ClientSession(headers=headers, cookies=cookies)
+            if error is None
+            else None
+        )
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        if self.session is not None:
+            await self.session.close()
+        return False
 
 
 class Tools:
@@ -13,8 +59,25 @@ class Tools:
     until Open WebUI finishes processing and indexing.
     """
 
+    class Valves(BaseModel):
+        OWUI_API_BASE_URL: str = Field(
+            default="",
+            description=(
+                "Base URL of this Open WebUI instance's API, e.g. http://127.0.0.1:8080/api/v1. "
+                "Leave empty to use the address the current request was served on. The user's "
+                "Authorization header and cookies are only ever sent to this base."
+            ),
+        )
+        REQUIRE_UI_CONFIRMATION: bool = Field(
+            default=True,
+            description=(
+                "Ask the user to confirm deletions in the chat UI. When disabled, only the "
+                "model-supplied confirm flag gates deletions."
+            ),
+        )
+
     def __init__(self):
-        self.base_url = "http://127.0.0.1:8080/api/v1"
+        self.valves = self.Valves()
         self._short_timeout = aiohttp.ClientTimeout(total=30)
         self._long_timeout = aiohttp.ClientTimeout(total=120)
 
@@ -27,23 +90,127 @@ class Tools:
             headers["Authorization"] = authorization
         return headers, dict(request.cookies)
 
-    async def _request(
-        self, session, method, path, *, timeout=None, expected=(200,), **kwargs
-    ):
-        """Unified HTTP request sending and response handling."""
+    def _resolve_base_url(self, request):
+        """Return (base_url, err). base_url ends with /api/v1 and has no trailing slash."""
+        configured = (self.valves.OWUI_API_BASE_URL or "").strip().rstrip("/")
+        if configured:
+            parts = urlsplit(configured)
+            if parts.scheme not in ("http", "https") or not parts.hostname:
+                return None, "Error: OWUI_API_BASE_URL must be an absolute http(s) URL."
+            if parts.query or parts.fragment or parts.username or parts.password:
+                return (
+                    None,
+                    "Error: OWUI_API_BASE_URL must not contain credentials, query or fragment.",
+                )
+            return configured, None
+
+        scope = getattr(request, "scope", None) or {}
+        root_path = (scope.get("root_path") or "").rstrip("/")
+        server = scope.get("server")
+        if server and server[0] and server[1]:
+            # The socket uvicorn accepted this request on: Open WebUI itself,
+            # without hair-pinning through a public reverse proxy.
+            host, port = str(server[0]), int(server[1])
+            try:
+                ip = ipaddress.ip_address(host)
+                if ip.is_unspecified:
+                    ip = ipaddress.ip_address("::1" if ip.version == 6 else "127.0.0.1")
+                host = f"[{ip}]" if ip.version == 6 else str(ip)
+            except ValueError:
+                pass
+            headers = getattr(request, "headers", None) or {}
+            scheme = (
+                "https"
+                if scope.get("scheme") == "https" and "x-forwarded-proto" not in headers
+                else "http"
+            )
+            return f"{scheme}://{host}:{port}{root_path}/api/v1", None
+
+        base_url = getattr(request, "base_url", None)
+        if base_url:
+            return f"{str(base_url).rstrip('/')}/api/v1", None
+        return (
+            None,
+            "Error: cannot determine the Open WebUI API URL; set the OWUI_API_BASE_URL valve.",
+        )
+
+    def _check_id(self, value, name, allow_empty=False):
+        """Validate an Open WebUI id (uuid4). Returns an error string or None."""
+        if value is None or value == "":
+            return None if allow_empty else f"Error: {name} is required."
+        if not isinstance(value, str) or not _ID_RE.match(value):
+            return f"Error: invalid {name}: expected an Open WebUI id (uuid), got {str(value)[:80]!r}."
+        return None
+
+    def _check_ids(self, *, optional=(), **ids):
+        """Validate several ids at once; names listed in optional may be empty."""
+        for name, value in ids.items():
+            err = self._check_id(value, name, allow_empty=name in optional)
+            if err:
+                return err
+        return None
+
+    def _build_path(self, path, ids):
+        """Fill {placeholders} in path with validated, URL-quoted ids."""
+        ids = ids or {}
+        for name in _PLACEHOLDER_RE.findall(path):
+            if name not in ids:
+                return None, f"Error: internal path parameter {name} missing."
+            err = self._check_id(ids[name], name)
+            if err:
+                return None, err
+        built = _PLACEHOLDER_RE.sub(lambda m: quote(ids[m.group(1)], safe=""), path)
+        if not built.startswith("/") or "//" in built or "#" in built:
+            return None, "Error: invalid API path."
+        return built, None
+
+    def _api_error(self, status, body):
+        detail = body
         try:
-            async with session.request(
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and parsed.get("detail") is not None:
+                detail = parsed["detail"]
+                if not isinstance(detail, str):
+                    detail = json.dumps(detail)
+        except (ValueError, TypeError):
+            pass
+        return f"Open WebUI API error {status}: {str(detail)[:500]}"
+
+    async def _request(
+        self,
+        conn,
+        method,
+        path,
+        *,
+        ids=None,
+        timeout=None,
+        expected=(200,),
+        **kwargs,
+    ):
+        """Unified HTTP request sending and response handling.
+
+        path may contain {placeholders}; their values come from ids and are
+        validated as Open WebUI ids and URL-quoted before use.
+        """
+        if conn.error:
+            return None, conn.error
+        path, err = self._build_path(path, ids)
+        if err:
+            return None, err
+        url = f"{conn.base_url}{path}"
+        try:
+            async with conn.session.request(
                 method,
-                f"{self.base_url}{path}",
+                url,
                 timeout=timeout or self._short_timeout,
+                # Never follow redirects: the forwarded credentials must only
+                # reach the Open WebUI base URL.
+                allow_redirects=False,
                 **kwargs,
             ) as response:
                 if response.status not in expected:
                     body = await response.text()
-                    return (
-                        None,
-                        f"Open WebUI API error {response.status}: {body[:2000]}",
-                    )
+                    return None, self._api_error(response.status, body)
                 if response.status == 204:
                     return {}, None
                 try:
@@ -54,10 +221,30 @@ class Tools:
         except asyncio.TimeoutError:
             return None, "Error: Open WebUI API request timed out."
         except aiohttp.ClientError as exc:
-            return None, f"Error: Open WebUI connection failed: {exc}"
+            return None, f"Error: Open WebUI connection failed ({type(exc).__name__})."
 
-    def _error(self, message):
-        return message
+    async def _confirm(self, event_call, title, message, confirm=True):
+        """Ask the user to confirm a destructive action. Returns an error string or None."""
+        if confirm is not True:
+            return "Deletion cancelled: confirm must be true."
+        if not self.valves.REQUIRE_UI_CONFIRMATION:
+            return None
+        if event_call is None:
+            return (
+                "Deletion cancelled: user confirmation is required but the chat UI is not "
+                "available for this call."
+            )
+        try:
+            result = await event_call(
+                {"type": "confirmation", "data": {"title": title, "message": message}}
+            )
+        except Exception as exc:
+            return f"Deletion cancelled: confirmation request failed ({type(exc).__name__})."
+        if isinstance(result, dict) and result.get("error"):
+            return f"Deletion cancelled: confirmation not received ({result.get('error')})."
+        if result is not True:
+            return "Deletion cancelled by the user."
+        return None
 
     def _path_parts(self, path):
         path = (path or "").strip().replace("\\", "/").strip("/")
@@ -73,6 +260,15 @@ class Tools:
 
     async def _directory_listing(self, session, knowledge_id, directory_id=""):
         """Fetches all pages of a single directory's contents."""
+        if directory_id is None:
+            return None, "Error: directory id missing in Open WebUI response."
+        err = self._check_ids(
+            knowledge_id=knowledge_id,
+            directory_id=directory_id or "",
+            optional=("directory_id",),
+        )
+        if err:
+            return None, err
         page = 1
         all_items = []
         directories = []
@@ -81,7 +277,8 @@ class Tools:
             data, err = await self._request(
                 session,
                 "GET",
-                f"/knowledge/{knowledge_id}/files",
+                "/knowledge/{knowledge_id}/files",
+                ids={"knowledge_id": knowledge_id},
                 params={"directory_id": directory_id, "page": page},
             )
             if err:
@@ -123,6 +320,9 @@ class Tools:
             if len(matches) > 1:
                 return None, f"Multiple matching directories found: {part}"
             current = matches[0].get("id")
+            err = self._check_id(current, "directory_id")
+            if err:
+                return None, err
         return current, None
 
     async def _find_file_in_directory(
@@ -175,7 +375,8 @@ class Tools:
 
     async def _open_session(self, request):
         headers, cookies = self._auth(request)
-        return aiohttp.ClientSession(headers=headers, cookies=cookies)
+        base_url, err = self._resolve_base_url(request)
+        return _Conn(base_url, headers, cookies, error=err)
 
     async def list_knowledge_bases(self, __request__=None) -> str:
         """
@@ -293,7 +494,10 @@ class Tools:
             return "Error: Open WebUI request context is unavailable."
         async with await self._open_session(__request__) as session:
             current, err = await self._request(
-                session, "GET", f"/knowledge/{knowledge_id}"
+                session,
+                "GET",
+                "/knowledge/{knowledge_id}",
+                ids={"knowledge_id": knowledge_id},
             )
             if err:
                 return err
@@ -306,7 +510,8 @@ class Tools:
             data, err = await self._request(
                 session,
                 "POST",
-                f"/knowledge/{knowledge_id}/update",
+                "/knowledge/{knowledge_id}/update",
+                ids={"knowledge_id": knowledge_id},
                 expected=(200, 201),
                 json=payload,
                 timeout=self._short_timeout,
@@ -333,11 +538,17 @@ class Tools:
         name = name.strip()
         if not name:
             return "Error: directory name is empty."
+        err = self._check_ids(
+            knowledge_id=knowledge_id, parent_id=parent_id, optional=("parent_id",)
+        )
+        if err:
+            return err
         async with await self._open_session(__request__) as session:
             data, err = await self._request(
                 session,
                 "POST",
-                f"/knowledge/{knowledge_id}/dirs/create",
+                "/knowledge/{knowledge_id}/dirs/create",
+                ids={"knowledge_id": knowledge_id},
                 expected=(200, 201),
                 json={"name": name, "parent_id": parent_id or None},
             )
@@ -387,22 +598,47 @@ class Tools:
                     return f"Multiple matching directories found: {part}"
                 if matches:
                     current = matches[0].get("id")
+                    err = self._check_id(current, "directory_id")
+                    if err:
+                        return err
                     reused.append(part)
                     continue
                 data, err = await self._request(
                     session,
                     "POST",
-                    f"/knowledge/{knowledge_id}/dirs/create",
+                    "/knowledge/{knowledge_id}/dirs/create",
+                    ids={"knowledge_id": knowledge_id},
                     expected=(200, 201),
                     json={"name": part, "parent_id": current or None},
                 )
                 if err:
                     return err
-                current = data.get("id")
+                current = (data or {}).get("id")
+                err = self._check_id(current, "directory_id")
+                if err:
+                    return err
                 created.append(part)
         return f"Knowledge directory path ready.\npath={'/'.join(parts)}\ndirectory_id={current}\ncreated={', '.join(created) or 'none'}\nreused={', '.join(reused) or 'none'}"
 
     async def _upload(self, session, knowledge_id, directory_id, filename, content):
+        """Upload a Markdown file into a knowledge base and verify the result.
+
+        Open WebUI answers POST /files/ with the pre-processing file record even
+        when extraction, embedding or the knowledge link failed (those errors are
+        only stored in file.data.status/error), so the stored status and the
+        knowledge link are checked before reporting success. A failed upload is
+        deleted so it does not linger as an orphan in the user's files.
+
+        Returns (data, err); data is the file record plus "directory_id"
+        (where Open WebUI actually linked it; None = root).
+        """
+        err = self._check_ids(
+            knowledge_id=knowledge_id,
+            directory_id=directory_id or "",
+            optional=("directory_id",),
+        )
+        if err:
+            return None, err
         form = aiohttp.FormData()
         form.add_field(
             "file",
@@ -414,7 +650,7 @@ class Tools:
         if directory_id:
             meta["directory_id"] = directory_id
         form.add_field("metadata", json.dumps(meta), content_type="application/json")
-        return await self._request(
+        data, err = await self._request(
             session,
             "POST",
             "/files/?process=true&process_in_background=false",
@@ -422,6 +658,117 @@ class Tools:
             data=form,
             timeout=self._long_timeout,
         )
+        if err:
+            if "timed out" in err:
+                return None, (
+                    "Error: the upload timed out. The file may still have been created and "
+                    "indexed; list the directory before retrying to avoid a duplicate."
+                )
+            return None, err
+        data = data or {}
+        file_id = data.get("id")
+        err = self._check_id(file_id, "file_id")
+        if err:
+            return (
+                None,
+                f"Error: upload response did not contain a valid file id. {err}",
+            )
+
+        status, error = await self._file_status(session, file_id)
+        if status != "completed":
+            reason = error or f"processing status is {status!r}"
+            cleanup = await self._delete_orphan(session, file_id)
+            return None, (
+                f"Error: Open WebUI failed to process or link the uploaded file: {reason[:500]}"
+                f"{cleanup}"
+            )
+
+        linked, err = await self._find_linked_file(
+            session, knowledge_id, file_id, data.get("filename") or filename
+        )
+        if err:
+            return None, (
+                f"Error: the file was uploaded (file_id={file_id}) but its knowledge link "
+                f"could not be verified: {err}"
+            )
+        if linked is None:
+            cleanup = await self._delete_orphan(session, file_id)
+            return None, (
+                "Error: the file was uploaded but Open WebUI did not add it to the knowledge "
+                f"base (missing write access?).{cleanup}"
+            )
+        data["directory_id"] = linked.get("directory_id")
+        return data, None
+
+    async def _file_status(self, session, file_id, attempts=30, delay=1.0):
+        """Return (status, error) from the stored file record, waiting while pending."""
+        status, error = "unknown", None
+        for attempt in range(attempts):
+            record, err = await self._request(
+                session, "GET", "/files/{file_id}", ids={"file_id": file_id}
+            )
+            if err:
+                return "unknown", err
+            file_data = (record or {}).get("data") or {}
+            status = file_data.get("status") or "pending"
+            error = file_data.get("error")
+            if status in ("completed", "failed"):
+                return status, error
+            if attempt < attempts - 1:
+                await asyncio.sleep(delay)
+        return status, error
+
+    async def _find_linked_file(self, session, knowledge_id, file_id, filename):
+        """Return (item, err): the knowledge file entry for file_id, or None if not linked.
+
+        Searches by filename first (cheap), then scans the whole knowledge base so a
+        filename normalised by the server never causes a false "not linked".
+        """
+        for query in (filename, None):
+            page = 1
+            seen = 0
+            while page <= 1000:
+                params = {"page": page}
+                if query:
+                    params["query"] = query
+                data, err = await self._request(
+                    session,
+                    "GET",
+                    "/knowledge/{knowledge_id}/files",
+                    ids={"knowledge_id": knowledge_id},
+                    params=params,
+                )
+                if err:
+                    return None, err
+                batch = (data or {}).get("items", [])
+                for item in batch:
+                    if self._file_item(item).get("id") == file_id:
+                        return item, None
+                seen += len(batch)
+                total = (data or {}).get("total")
+                if not batch or total is None or seen >= total:
+                    break
+                page += 1
+            if not filename:
+                break
+        return None, None
+
+    async def _delete_orphan(self, session, file_id):
+        _, err = await self._request(
+            session,
+            "DELETE",
+            "/files/{file_id}",
+            ids={"file_id": file_id},
+            expected=(200, 204),
+        )
+        if err:
+            return (
+                f"\nThe uploaded file could not be removed (file_id={file_id}): {err}"
+            )
+        return "\nThe uploaded file was removed again."
+
+    def _dir_label(self, directory_id):
+        return directory_id or "ROOT"
 
     async def create_knowledge_markdown(
         self,
@@ -461,7 +808,7 @@ class Tools:
             )
         if err:
             return err
-        return f"Created and indexed knowledge file successfully.\nfilename={data.get('filename',filename)}\nfile_id={data.get('id')}\nknowledge_id={knowledge_id}\ndirectory_id={directory_id or 'ROOT'}"
+        return f"Created and indexed knowledge file successfully.\nfilename={data.get('filename',filename)}\nfile_id={data.get('id')}\nknowledge_id={knowledge_id}\ndirectory_id={self._dir_label(data.get('directory_id'))}"
 
     async def create_knowledge_markdown_at_path(
         self,
@@ -501,7 +848,7 @@ class Tools:
             )
         if err:
             return err
-        return f"Knowledge Markdown file created successfully.\npath={'/'.join(parts[:-1]+[filename])}\nfilename={data.get('filename',filename)}\nfile_id={data.get('id')}\ndirectory_id={directory or 'ROOT'}"
+        return f"Knowledge Markdown file created successfully.\npath={'/'.join(parts[:-1]+[filename])}\nfilename={data.get('filename',filename)}\nfile_id={data.get('id')}\ndirectory_id={self._dir_label(data.get('directory_id'))}"
 
     async def _ensure_dirs(self, session, knowledge_id, parts):
         current = ""
@@ -518,17 +865,24 @@ class Tools:
                 return None, f"Multiple matching directories found: {part}"
             if matches:
                 current = matches[0].get("id")
+                err = self._check_id(current, "directory_id")
+                if err:
+                    return None, err
                 continue
             data, err = await self._request(
                 session,
                 "POST",
-                f"/knowledge/{knowledge_id}/dirs/create",
+                "/knowledge/{knowledge_id}/dirs/create",
+                ids={"knowledge_id": knowledge_id},
                 expected=(200, 201),
                 json={"name": part, "parent_id": current or None},
             )
             if err:
                 return None, err
-            current = data.get("id")
+            current = (data or {}).get("id")
+            err = self._check_id(current, "directory_id")
+            if err:
+                return None, err
         return current, None
 
     async def _read_or_update_path(self, knowledge_id, path, content, update, request):
@@ -553,7 +907,8 @@ class Tools:
                 _, err = await self._request(
                     session,
                     "POST",
-                    f"/files/{item.get('id')}/data/content/update",
+                    "/files/{file_id}/data/content/update",
+                    ids={"file_id": item.get("id")},
                     expected=(200, 201),
                     json={"content": content},
                     timeout=self._long_timeout,
@@ -562,7 +917,10 @@ class Tools:
                     return err
                 return f"Knowledge file updated successfully.\npath={path}\nfile_id={item.get('id')}\ndirectory_id={directory or 'ROOT'}"
             data, err = await self._request(
-                session, "GET", f"/files/{item.get('id')}/data/content"
+                session,
+                "GET",
+                "/files/{file_id}/data/content",
+                ids={"file_id": item.get("id")},
             )
         if err:
             return err
@@ -589,7 +947,8 @@ class Tools:
             _, e = await self._request(
                 s,
                 "POST",
-                f"/files/{file_id}/data/content/update",
+                "/files/{file_id}/data/content/update",
+                ids={"file_id": file_id},
                 expected=(200, 201),
                 json={"content": content},
                 timeout=self._long_timeout,
@@ -613,7 +972,9 @@ class Tools:
         if __request__ is None:
             return "Error: Open WebUI request context is unavailable."
         async with await self._open_session(__request__) as s:
-            data, e = await self._request(s, "GET", f"/files/{file_id}/data/content")
+            data, e = await self._request(
+                s, "GET", "/files/{file_id}/data/content", ids={"file_id": file_id}
+            )
         if e:
             return e
         c = (data or {}).get("content", "")
@@ -710,7 +1071,8 @@ class Tools:
                 _, err = await self._request(
                     s,
                     "POST",
-                    f"/files/{item.get('id')}/data/content/update",
+                    "/files/{file_id}/data/content/update",
+                    ids={"file_id": item.get("id")},
                     expected=(200, 201),
                     json={"content": content},
                     timeout=self._long_timeout,
@@ -750,7 +1112,8 @@ class Tools:
             _, e = await self._request(
                 s,
                 "POST",
-                f"/files/{file_id}/rename",
+                "/files/{file_id}/rename",
+                ids={"file_id": file_id},
                 expected=(200, 201),
                 json={"filename": new_filename},
             )
@@ -771,15 +1134,21 @@ class Tools:
         """
         Rename a directory inside an Open WebUI knowledge base.
         """
+        new_name = (new_name or "").strip()
+        if not new_name:
+            return "Error: new directory name is empty."
+        if "/" in new_name or "\\" in new_name:
+            return "Error: directory name must not contain directory separators."
         if __request__ is None:
             return "Error: Open WebUI request context is unavailable."
         async with await self._open_session(__request__) as s:
             d, e = await self._request(
                 s,
                 "POST",
-                f"/knowledge/{knowledge_id}/dirs/{directory_id}/update",
+                "/knowledge/{knowledge_id}/dirs/{directory_id}/update",
+                ids={"knowledge_id": knowledge_id, "directory_id": directory_id},
                 expected=(200, 201),
-                json={"name": new_name.strip()},
+                json={"name": new_name},
             )
         return (
             e
@@ -803,13 +1172,21 @@ class Tools:
 
         Use an empty target_parent_id to move the directory to the root.
         """
+        err = self._check_ids(
+            target_parent_id=target_parent_id, optional=("target_parent_id",)
+        )
+        if err:
+            return err
+        if target_parent_id and target_parent_id == directory_id:
+            return "Error: a directory cannot be moved into itself."
         if __request__ is None:
             return "Error: Open WebUI request context is unavailable."
         async with await self._open_session(__request__) as s:
             d, e = await self._request(
                 s,
                 "POST",
-                f"/knowledge/{knowledge_id}/dirs/{directory_id}/update",
+                "/knowledge/{knowledge_id}/dirs/{directory_id}/update",
+                ids={"knowledge_id": knowledge_id, "directory_id": directory_id},
                 expected=(200, 201),
                 json={"parent_id": target_parent_id or None},
             )
@@ -828,6 +1205,7 @@ class Tools:
             description="Must be true. Set true only when the user explicitly requested permanent deletion of the file.",
         ),
         __request__=None,
+        __event_call__=None,
     ) -> str:
         """
         Permanently delete an Open WebUI knowledge file.
@@ -836,14 +1214,38 @@ class Tools:
         and its indexed embeddings.
 
         Use only when the user explicitly asks to delete the file.
+        The user is asked to confirm the deletion in the chat UI.
         """
         if confirm is not True:
             return "Deletion cancelled: confirm must be true."
+        err = self._check_id(file_id, "file_id")
+        if err:
+            return err
         if __request__ is None:
             return "Error: Open WebUI request context is unavailable."
         async with await self._open_session(__request__) as s:
+            record, e = await self._request(
+                s, "GET", "/files/{file_id}", ids={"file_id": file_id}
+            )
+            if e:
+                return e
+            name = (record or {}).get("filename") or "Unnamed"
+            e = await self._confirm(
+                __event_call__,
+                "Delete file permanently?",
+                f'Permanently delete the file "{name}" (id {file_id})? It is removed '
+                "from every knowledge base that uses it, together with its embeddings. "
+                "This cannot be undone.",
+                confirm,
+            )
+            if e:
+                return e
             _, e = await self._request(
-                s, "DELETE", f"/files/{file_id}", expected=(200, 204)
+                s,
+                "DELETE",
+                "/files/{file_id}",
+                ids={"file_id": file_id},
+                expected=(200, 204),
             )
         return (
             e or f"Knowledge file permanently deleted successfully.\nfile_id={file_id}"
@@ -862,12 +1264,13 @@ class Tools:
             description="Must be true. Use true only when the user explicitly requested permanent deletion of this file.",
         ),
         __request__=None,
+        __event_call__=None,
     ) -> str:
         """
         Permanently delete an existing knowledge file by its exact path.
 
         Safety:
-        - confirm must be true;
+        - confirm must be true and the user confirms in the chat UI;
         - exact directory path and filename must resolve;
         - ambiguous matches are never deleted.
         """
@@ -887,8 +1290,25 @@ class Tools:
             )
             if err:
                 return err
+            err = self._check_id(item.get("id"), "file_id")
+            if err:
+                return err
+            err = await self._confirm(
+                __event_call__,
+                "Delete file permanently?",
+                f"Permanently delete \"{'/'.join(parts)}\" (id {item.get('id')})? It is "
+                "removed from every knowledge base that uses it, together with its "
+                "embeddings. This cannot be undone.",
+                confirm,
+            )
+            if err:
+                return err
             _, err = await self._request(
-                s, "DELETE", f"/files/{item.get('id')}", expected=(200, 204)
+                s,
+                "DELETE",
+                "/files/{file_id}",
+                ids={"file_id": item.get("id")},
+                expected=(200, 204),
             )
         return (
             err
@@ -902,20 +1322,48 @@ class Tools:
         ),
         directory_id: str = Field(..., description="ID of the directory to delete."),
         __request__=None,
+        __event_call__=None,
     ) -> str:
         """
         Delete a directory from an Open WebUI knowledge base.
 
-        Files inside the directory are moved to its parent directory
-        instead of being deleted.
+        Nested subdirectories are removed too; all files inside are moved to
+        the parent directory instead of being deleted. The user is asked to confirm in the chat UI.
         """
+        err = self._check_ids(knowledge_id=knowledge_id, directory_id=directory_id)
+        if err:
+            return err
         if __request__ is None:
             return "Error: Open WebUI request context is unavailable."
         async with await self._open_session(__request__) as s:
+            listing, e = await self._directory_listing(s, knowledge_id, directory_id)
+            if e:
+                return e
+            name = (
+                next(
+                    (
+                        b.get("name")
+                        for b in listing["breadcrumbs"]
+                        if b.get("id") == directory_id
+                    ),
+                    None,
+                )
+                or directory_id
+            )
+            e = await self._confirm(
+                __event_call__,
+                "Delete knowledge directory?",
+                f'Delete the directory "{name}" (id {directory_id}) and its '
+                f"{len(listing['directories'])} direct subdirectory(ies)? Files inside "
+                "(including nested ones) are kept and moved to the parent directory.",
+            )
+            if e:
+                return e
             _, e = await self._request(
                 s,
                 "DELETE",
-                f"/knowledge/{knowledge_id}/dirs/{directory_id}/delete",
+                "/knowledge/{knowledge_id}/dirs/{directory_id}/delete",
+                ids={"knowledge_id": knowledge_id, "directory_id": directory_id},
                 expected=(200, 204),
                 params={"move_files": "true"},
             )
@@ -939,12 +1387,10 @@ class Tools:
         Search files across all Open WebUI knowledge bases available
         to the current user.
 
-        By default searches metadata/filenames.
-        Set include_content=true to return file content preview for found files.
+        By default searches filenames.
+        Set include_content=true to also match the extracted file text and to
+        return a content preview for found files.
         max_content_items limits how many files will have their content fetched (default: 10).
-
-        Note: Open WebUI search API searches by filename, not by file content.
-        Full-text search within file content is not supported by the current API.
         """
         query = query.strip()
         if not query:
@@ -984,7 +1430,10 @@ class Tools:
                     # response. Therefore, with include_content we fetch it with
                     # a separate request.
                     content_data, content_error = await self._request(
-                        s, "GET", f"/files/{file_id}/data/content"
+                        s,
+                        "GET",
+                        "/files/{file_id}/data/content",
+                        ids={"file_id": file_id},
                     )
                     if content_error:
                         result.append(f"  content_preview_error={content_error}")
@@ -1013,28 +1462,40 @@ class Tools:
         If exact_filename is provided, prefer an exact filename match.
         If several files still match, return their IDs instead of guessing.
         """
+        query = (query or "").strip()
+        exact_filename = (exact_filename or "").strip()
+        if not query:
+            return "Error: search query is empty."
         if __request__ is None:
             return "Error: Open WebUI request context is unavailable."
+        # Search results come 30 per page; when an exact filename is requested,
+        # look through more pages so the match is not missed.
+        max_pages = 20 if exact_filename else 1
         async with await self._open_session(__request__) as s:
-            d, e = await self._request(
-                s,
-                "GET",
-                "/knowledge/search/files",
-                params={
-                    "query": query.strip(),
-                    "include_content": "false",
-                    "page": 1,
-                },
-            )
-            if e:
-                return e
-            items = (d or {}).get("items", [])
+            items = []
+            for page in range(1, max_pages + 1):
+                d, e = await self._request(
+                    s,
+                    "GET",
+                    "/knowledge/search/files",
+                    params={
+                        "query": query,
+                        "include_content": "false",
+                        "page": page,
+                    },
+                )
+                if e:
+                    return e
+                batch = (d or {}).get("items", [])
+                items.extend(batch)
+                total = (d or {}).get("total")
+                if not batch or total is None or len(items) >= total:
+                    break
             if exact_filename:
                 exact = [
                     x
                     for x in items
-                    if x.get("filename", "").casefold()
-                    == exact_filename.strip().casefold()
+                    if x.get("filename", "").casefold() == exact_filename.casefold()
                 ]
                 if exact:
                     items = exact
@@ -1047,7 +1508,7 @@ class Tools:
                 )
             x = items[0]
             data, e = await self._request(
-                s, "GET", f"/files/{x.get('id')}/data/content"
+                s, "GET", "/files/{file_id}/data/content", ids={"file_id": x.get("id")}
             )
         return (
             e
@@ -1077,7 +1538,12 @@ class Tools:
         count = 0
         visited = set()
         async with await self._open_session(__request__) as s:
-            meta, e = await self._request(s, "GET", f"/knowledge/{knowledge_id}")
+            meta, e = await self._request(
+                s,
+                "GET",
+                "/knowledge/{knowledge_id}",
+                ids={"knowledge_id": knowledge_id},
+            )
             if e:
                 return e
             lines.append(
@@ -1132,12 +1598,13 @@ class Tools:
         ),
         allow_nonempty: bool = False,
         __request__=None,
+        __event_call__=None,
     ) -> str:
         """
         Permanently delete an Open WebUI knowledge base.
 
         Safety rules:
-        - confirm must be true;
+        - confirm must be true and the user confirms in the chat UI;
         - by default refuses to delete a knowledge base containing files;
         - set allow_nonempty=true only when the user explicitly wants
           a non-empty knowledge base deleted.
@@ -1147,7 +1614,12 @@ class Tools:
         if __request__ is None:
             return "Error: Open WebUI request context is unavailable."
         async with await self._open_session(__request__) as s:
-            meta, e = await self._request(s, "GET", f"/knowledge/{knowledge_id}")
+            meta, e = await self._request(
+                s,
+                "GET",
+                "/knowledge/{knowledge_id}",
+                ids={"knowledge_id": knowledge_id},
+            )
             if e:
                 return e
             has_content, e = await self._knowledge_has_content(s, knowledge_id)
@@ -1155,10 +1627,26 @@ class Tools:
                 return e
             if has_content and not allow_nonempty:
                 return "Deletion refused: knowledge base contains files. Use allow_nonempty=true only when explicitly intended."
+            e = await self._confirm(
+                __event_call__,
+                "Delete knowledge base permanently?",
+                f"Permanently delete the knowledge base \"{meta.get('name', 'Unnamed')}\" "
+                f"(id {knowledge_id})"
+                + (
+                    " including all of its directories and file links"
+                    if has_content
+                    else " (it contains no files)"
+                )
+                + "? Its search index is removed. This cannot be undone.",
+                confirm,
+            )
+            if e:
+                return e
             _, e = await self._request(
                 s,
                 "DELETE",
-                f"/knowledge/{knowledge_id}/delete",
+                "/knowledge/{knowledge_id}/delete",
+                ids={"knowledge_id": knowledge_id},
                 expected=(200, 204),
             )
         return (
