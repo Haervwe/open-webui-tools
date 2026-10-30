@@ -857,7 +857,9 @@ The implementation lives at `tools/muapi_media_tool.py`.
 - `IMAGE_TO_VIDEO_MODEL` (str): Image-to-video endpoint slug (default: `seedance-2.5-image-to-video`).
 - `POLL_INTERVAL_SECONDS` (float): Seconds between result checks (default: `3.0`).
 - `GENERATION_TIMEOUT_SECONDS` (float): Maximum wait for a generation (default: `600.0`).
-- `RETURN_HTML_EMBED` (bool): Return an inline HTML video player for video results (default: `True`).
+- `RETURN_HTML_EMBED` (bool): Return an inline HTML viewer for image and video results (default: `True`).
+- `MAX_DOWNLOAD_MB` (int): Maximum size of a single output downloaded into Open WebUI storage (default: `200`).
+- `ALLOW_PROVIDER_URL_FALLBACK` (bool): If saving an output to Open WebUI storage fails, show the MuAPI URL instead of an error (default: `False`). MuAPI URLs may expire.
 
 ### Usage
 
@@ -869,14 +871,16 @@ The implementation lives at `tools/muapi_media_tool.py`.
    - **Text-to-video:** *"Generate a 5-second video of ocean waves at sunset"*
    - **Image-to-video:** Attach an image or provide an `image_url`, then ask *"Animate this image into a video"*
 
-Image-to-video inputs must be absolute HTTP(S) URLs that MuAPI can fetch. Attached image URLs are used automatically when Open WebUI provides them in the message context.
+Every generated image and video is downloaded into Open WebUI file storage and shown from `/api/v1/files/{id}/content`, so results stay available after MuAPI's links expire and they follow Open WebUI access control, including shared chats. MuAPI URLs are not passed to the model. Large videos must fit within Open WebUI's maximum upload size (`rag.file.max_size`).
+
+For image-to-video, an image attached in the chat (Open WebUI passes it as a `data:` URI or an Open WebUI file) is uploaded to MuAPI through its `/upload_file` endpoint (10 MB limit) and the hosted URL is used. A public HTTP(S) `image_url` is passed to MuAPI as-is.
 
 ### Features
 
 - Async submission and polling with status updates in the chat
 - Text-to-image, text-to-video, and image-to-video operations
 - Per-user API key and model overrides through User Valves
-- Optional inline HTML video playback or direct download links
+- Outputs stored in Open WebUI and shown in an inline image/video viewer, or as plain file links
 - No live request is required during installation; configure the key only when you are ready to generate
 
 ### API references
