@@ -6,11 +6,13 @@ author_urls:
   - https://github.com/Haervwe/
   - https://github.com/tan-yong-sheng/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.0
+version: 0.3.2
+required_open_webui_version: 0.6.0
 """
 
 import aiohttp
 import asyncio
+import inspect
 from typing import Any, Optional, Callable, Awaitable
 from pydantic import BaseModel, Field
 import urllib.parse
@@ -138,27 +140,52 @@ class Tools:
                                 },
                             }
                         )
-                    embedding_func = __request__.app.state.EMBEDDING_FUNCTION
-                    query_embedding = await embedding_func(topic)
-                    if isinstance(query_embedding, dict) and "result" in query_embedding:
-                        query_embedding = query_embedding["result"]
-                    elif isinstance(query_embedding, list) and len(query_embedding) > 0 and isinstance(query_embedding[0], list):
-                         query_embedding = query_embedding[0]
-                         
+                    app_state = getattr(getattr(__request__, "app", None), "state", None)
+                    embedding_func = getattr(app_state, "EMBEDDING_FUNCTION", None)
+                    if not callable(embedding_func):
+                        # Open WebUI sets EMBEDDING_FUNCTION to None until RAG is configured.
+                        raise RuntimeError("Open WebUI embedding function is not available")
+
+                    async def _embed(value):
+                        # EMBEDDING_FUNCTION is a sync lambda before v0.6.37, async after.
+                        res = embedding_func(value)
+                        if inspect.isawaitable(res):
+                            res = await res
+                        return res
+
+                    def _vec(value):
+                        if isinstance(value, dict) and "result" in value:
+                            value = value["result"]
+                        if isinstance(value, list) and value and isinstance(value[0], list):
+                            value = value[0]
+                        return value if isinstance(value, list) else None
+
+                    # Only non-empty abstracts are embedded (embedding APIs reject "").
+                    ranked = [entry for entry in entries if (entry.get("abstract") or "").strip()]
+                    texts = [topic] + [entry["abstract"] for entry in ranked]
+                    vectors = None
+                    try:
+                        # One batched call (list input is supported by v0.12.5 engines).
+                        batch = await _embed(texts)
+                        if (
+                            isinstance(batch, list)
+                            and len(batch) == len(texts)
+                            and all(isinstance(v, list) for v in batch)
+                        ):
+                            vectors = batch
+                    except Exception as e:
+                        print(f"Batched embedding failed, falling back to per-item: {e}")
+
+                    if vectors is None:
+                        vectors = [_vec(await _embed(text)) for text in texts]
+
+                    query_embedding = vectors[0]
                     for entry in entries:
-                        abstract = entry.get("abstract", "")
-                        if abstract:
-                            entry_embedding = await embedding_func(abstract)
-                            # Handle different response shapes from EMBEDDING_FUNCTION
-                            if isinstance(entry_embedding, dict) and "result" in entry_embedding:
-                                entry_embedding = entry_embedding["result"]
-                            elif isinstance(entry_embedding, list) and len(entry_embedding) > 0 and isinstance(entry_embedding[0], list):
-                                entry_embedding = entry_embedding[0]
-                                
+                        entry["_score"] = -1.0
+                    for entry, entry_embedding in zip(ranked, vectors[1:]):
+                        if entry_embedding:
                             entry["_score"] = _cosine_similarity(query_embedding, entry_embedding)
-                        else:
-                            entry["_score"] = -1.0
-                            
+
                     entries = sorted(entries, key=lambda x: x.get("_score", 0), reverse=True)
                 except Exception as e:
                     print(f"Failed to rank using embeddings: {e}")

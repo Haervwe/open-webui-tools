@@ -3,16 +3,16 @@ title: Prompt Enhancer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.6.6
+version: 0.6.7
 required_open_webui_version: 0.9.1
 important note: if you are going to sue this filter with custom pipes, do not use the show enhanced prompt valve setting
 """
 
+import html
 import logging
 import re
 from pydantic import BaseModel, Field
 from typing import Callable, Awaitable, Any, Optional
-import json
 from fastapi import Request
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
@@ -26,7 +26,8 @@ name = "enhancer"
 def setup_logger():
     logger = logging.getLogger(name)
     if not logger.handlers:
-        logger.setLevel(logging.DEBUG)
+        # INFO: the debug lines carry full prompts and chat context.
+        logger.setLevel(logging.INFO)
         handler = logging.StreamHandler()
         handler.set_name(name)
         formatter = logging.Formatter(
@@ -39,6 +40,21 @@ def setup_logger():
 
 
 logger = setup_logger()
+
+
+# Reports the embed's content height to Open WebUI's FullHeightIframe
+# (it listens for {type: "iframe:height", height: <px>} from this iframe).
+_IFRAME_HEIGHT_JS = """<script>
+(function () {
+  function post() {
+    var h = Math.ceil(document.documentElement.getBoundingClientRect().height);
+    try { parent.postMessage({ type: "iframe:height", height: h }, "*"); } catch (e) {}
+  }
+  window.addEventListener("load", post);
+  if (window.ResizeObserver) { new ResizeObserver(post).observe(document.documentElement); }
+  post();
+})();
+</script>"""
 
 
 def remove_tagged_content(text: str) -> str:
@@ -114,12 +130,13 @@ Now, enhance the following prompt using the Context and The user prompt, return 
         if __task__ and __task__ != TASKS.DEFAULT:
             return body
 
-        messages = body["messages"]
+        messages = body.get("messages") or []
+        if not messages:
+            return body
         user_message = get_last_user_message(messages)
         if messages[-1]["role"] != "user":
-            print(messages[-1]["content"])
             return body
-        if self.valves.show_status:
+        if self.valves.show_status and __event_emitter__:
             await __event_emitter__(
                 {
                     "type": "status",
@@ -141,7 +158,6 @@ Now, enhance the following prompt using the Context and The user prompt, return 
         )
         context = "\n".join(f"""Tools: {body.get("tool_ids")}""")
         context += f'\nCurrent Date and Time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-        print(body.get("metadata"))
         # Build context block
         context_str = f'\n\nContext:\n"""{context}"""\n\n' if context else ""
 
@@ -157,14 +173,26 @@ Now, enhance the following prompt using the Context and The user prompt, return 
         if self.valves.model_id:
             model_to_use = self.valves.model_id
         else:
-            print("""##########################""")
-            print(json.dumps(__model__, indent=4))
-            base_model = __model__.get("base_model_id", "")
-            model_to_use = base_model if base_model else __model__["info"]["id"]
+            model_info = (__model__ or {}).get("info") or {}
+            model_to_use = (
+                model_info.get("base_model_id")
+                or (__model__ or {}).get("base_model_id")
+                or (__model__ or {}).get("id")
+                or model_info.get("id")
+                or (body.get("model") if isinstance(body.get("model"), str) else "")
+            )
+        if not model_to_use:
+            logger.warning("Prompt enhancer: no model to use, skipping.")
+            return body
 
-        # Check if the selected model has "-pipe" or "pipe" in its name.
+        # Check if the selected model has "-pipe" or "pipe" in its name, or is
+        # flagged as a pipe by Open WebUI (function models carry a "pipe" key).
         is_pipeline_model = False
-        if "-pipe" in model_to_use.lower() or "pipe" in model_to_use.lower():
+        selected_is_pipe = bool((__model__ or {}).get("pipe"))
+        if (
+            "pipe" in model_to_use.lower()
+            or (selected_is_pipe and not self.valves.model_id)
+        ):
             is_pipeline_model = True
             logger.warning(
                 f"Selected model '{model_to_use}' appears to be a pipeline model.  Consider using the base model."
@@ -175,7 +203,44 @@ Now, enhance the following prompt using the Context and The user prompt, return 
             logger.warning(
                 f"Pipeline model '{model_to_use}' selected without explicit model_id.  Using main model instead."
             )
-            model_to_use = body["model"]["base_model_id"]  # Fallback to main model
+            # Fall back to the request's main model (body["model"] is the model id string).
+            fallback = body.get("model")
+            if isinstance(fallback, dict):
+                fallback = fallback.get("base_model_id") or fallback.get("id")
+            pipe_ids = {
+                str(m)
+                for m in (
+                    model_to_use,
+                    (__model__ or {}).get("id"),
+                    ((__model__ or {}).get("info") or {}).get("id"),
+                )
+                if m
+            }
+            if (
+                not isinstance(fallback, str)
+                or not fallback
+                or "pipe" in fallback.lower()
+                or fallback in pipe_ids
+            ):
+                # The only fallback is the pipe itself (e.g. the planner):
+                # never start a whole pipe workflow just to enhance a prompt.
+                logger.warning(
+                    "Prompt enhancer: no non-pipe model available for '%s'; "
+                    "set the model_id valve. Skipping enhancement.",
+                    model_to_use,
+                )
+                if self.valves.show_status and __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": "Prompt enhancement skipped: set the Enhancer model_id valve to use it with pipe models.",
+                                "done": True,
+                            },
+                        }
+                    )
+                return body
+            model_to_use = fallback
             is_pipeline_model = False
 
         # Construct payload for LLM request
@@ -205,7 +270,7 @@ Now, enhance the following prompt using the Context and The user prompt, return 
             messages[-1]["content"] = enhanced_prompt
             body["messages"] = messages
 
-            if self.valves.show_status:
+            if self.valves.show_status and __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
@@ -215,7 +280,9 @@ Now, enhance the following prompt using the Context and The user prompt, return 
                         },
                     }
                 )
-            if self.valves.show_enhanced_prompt:
+            if self.valves.show_enhanced_prompt and __event_emitter__:
+                # LLM output: always escape before it goes into the embed HTML.
+                safe_prompt = html.escape(enhanced_prompt, quote=True)
                 html_content = f"""<!DOCTYPE html>
 <html style="margin:0; padding:0; overflow:hidden;">
 <head>
@@ -260,6 +327,7 @@ Now, enhance the following prompt using the Context and The user prompt, return 
         }}
         .prompt-text {{
             color: #444;
+            white-space: pre-wrap;
         }}
     </style>
 </head>
@@ -267,9 +335,10 @@ Now, enhance the following prompt using the Context and The user prompt, return 
     <div class="container">
         <div class="prompt-bubble">
             <div class="prompt-label">Enhanced Prompt:</div>
-            <div class="prompt-text">{enhanced_prompt}</div>
+            <div class="prompt-text">{safe_prompt}</div>
         </div>
     </div>
+    {_IFRAME_HEIGHT_JS}
 </body>
 </html>"""
 
@@ -284,7 +353,7 @@ Now, enhance the following prompt using the Context and The user prompt, return 
 
         except ValueError as ve:
             logger.error("Value Error: %s", str(ve))
-            if self.valves.show_status:
+            if self.valves.show_status and __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
@@ -296,7 +365,7 @@ Now, enhance the following prompt using the Context and The user prompt, return 
                 )
         except Exception as e:
             logger.error("Unexpected error: %s", str(e))
-            if self.valves.show_status:
+            if self.valves.show_status and __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",

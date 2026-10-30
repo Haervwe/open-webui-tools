@@ -4,9 +4,9 @@ description: Interactive RPG companion with 3D dice rolling overlays, character 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.1
+version: 1.1.0
 license: MIT
-required_open_webui_version: 0.9.1
+required_open_webui_version: 0.10.0
 """
 
 import random
@@ -15,13 +15,117 @@ import json
 import logging
 from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple, Union
 from pydantic import BaseModel, Field
-from open_webui.routers.images import image_generations, GenerateImageForm
+from open_webui.routers.images import (
+    image_generations,
+    get_image_config,
+    GenerateImageForm,
+)
+from open_webui.utils.access_control import has_permission
 from open_webui.models.users import Users
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rpg_tool_set")
+
+# ---------------------------------------------------------------------------
+# Open WebUI image generation helpers
+# ---------------------------------------------------------------------------
+
+# Mirrors open_webui.utils.chat_id (v0.12.5): these chat ids are not saved chats.
+_NON_SAVED_CHAT_ID_PREFIXES = ("temporary:", "local:", "channel:")
+
+
+def _image_link_metadata(
+    metadata: Optional[dict],
+    chat_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Metadata for image_generations so upload_image links the portrait to the
+    chat message (saved chat) or adds it to the channel. Temporary chats: None."""
+    meta = metadata if isinstance(metadata, dict) else {}
+    cid = chat_id or meta.get("chat_id")
+    mid = message_id or meta.get("message_id")
+    if not isinstance(cid, str) or not cid:
+        return None
+    if cid.startswith("channel:"):
+        channel_id = cid[len("channel:"):]
+        return {"channel_id": channel_id, "message_id": mid} if channel_id else None
+    if cid.startswith(_NON_SAVED_CHAT_ID_PREFIXES) or not (isinstance(mid, str) and mid):
+        return None
+    return {"chat_id": cid, "message_id": mid}
+
+
+async def _image_generation_denied(user: Any) -> Optional[str]:
+    """Same gate as POST /api/v1/images/generations (routers/images.py):
+    image generation must be enabled by the admin, and non-admin users need
+    the features.image_generation permission. Returns a reason, or None."""
+    image_config = await get_image_config()
+    if not getattr(image_config, "ENABLE_IMAGE_GENERATION", False):
+        return "image generation is disabled by the administrator"
+    if getattr(user, "role", None) != "admin" and not await has_permission(
+        user.id,
+        "features.image_generation",
+        getattr(image_config, "USER_PERMISSIONS", None) or {},
+    ):
+        return "you do not have permission to generate images"
+    return None
+
+
+# Reports the content height to Open WebUI (FullHeightIframe listens for
+# 'iframe:height'; embeds are sandboxed without same-origin by default, so it
+# cannot measure them itself). Also swaps a portrait that cannot be loaded in
+# the sandbox (no file cookie) for the class icon.
+_EMBED_RUNTIME_JS = r"""<script>(function () {
+  var pending = false;
+  function post() {
+    if (pending) return;
+    pending = true;
+    (window.requestAnimationFrame || setTimeout)(function () {
+      pending = false;
+      var root = document.getElementById('rpg-root') || document.body;
+      var cs = getComputedStyle(document.body);
+      var h = Math.ceil(root.getBoundingClientRect().height +
+        (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0));
+      try { window.parent.postMessage({ type: 'iframe:height', height: h }, '*'); } catch (e) {}
+    });
+  }
+  var imgs = document.querySelectorAll('img[data-rpg-fallback]');
+  for (var i = 0; i < imgs.length; i++) (function (img) {
+    function fail() {
+      img.style.display = 'none';
+      var alt = img.nextElementSibling;
+      if (alt) alt.style.display = '';
+      post();
+    }
+    if (img.complete && img.naturalWidth === 0) fail();
+    else { img.addEventListener('error', fail); img.addEventListener('load', post); }
+  })(imgs[i]);
+  window.addEventListener('load', post);
+  window.addEventListener('resize', post);
+  if (window.ResizeObserver) {
+    try { new ResizeObserver(post).observe(document.getElementById('rpg-root') || document.body); } catch (e) {}
+  }
+  post();
+})();</script>"""
+
+
+def _embed_page(fragment: str) -> str:
+    """Wrap an embed fragment so it reports its height to the chat UI."""
+    return (
+        '<div id="rpg-root" style="display:flow-root;">'
+        + fragment
+        + "</div>"
+        + _EMBED_RUNTIME_JS
+    )
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 
 # ---------------------------------------------------------------------------
 # Dice notation parser
@@ -508,18 +612,28 @@ def generate_character_embed(
     name = _esc(char_data.get("name", "Unknown Hero"))
     race = _esc(char_data.get("race", "Human"))
     cls = _esc(char_data.get("class", "Fighter"))
-    level = char_data.get("level", 1)
-    hp = char_data.get("hp", 10)
+    # Form values come from the browser: coerce numbers before interpolating.
+    level = _as_int(char_data.get("level", 1), 1)
+    hp = _as_int(char_data.get("hp", 10), 10)
     portrait_key = char_data.get("portrait", "warrior")
     portrait_svg = PORTRAIT_SVGS.get(portrait_key, PORTRAIT_SVGS["warrior"])
     image_url = char_data.get("image_url", "")
+    icon_html = f'<svg viewBox="0 0 24 24" style="width:30px;height:30px;fill:{c0};">{portrait_svg}</svg>'
 
-    if image_url:
-        portrait_html = f'<img src="{_esc(image_url)}" style="width:100%;height:100%;object-fit:cover;border-radius:12px;" />'
+    # Only Open WebUI file URLs (/api/v1/files/{id}/content) are rendered.
+    if isinstance(image_url, str) and re.match(r"^/api/v1/files/[\w-]+/content$", image_url):
+        portrait_html = (
+            f'<img src="{_esc(image_url)}" alt="Portrait" data-rpg-fallback="1" '
+            'style="width:100%;height:100%;object-fit:cover;border-radius:12px;" />'
+            f'<span style="display:none;">{icon_html}</span>'
+        )
     else:
-        portrait_html = f'<svg viewBox="0 0 24 24" style="width:30px;height:30px;fill:{c0};">{portrait_svg}</svg>'
+        portrait_html = icon_html
 
-    abilities = char_data.get("abilities", {})
+    raw_abilities = char_data.get("abilities", {})
+    if not isinstance(raw_abilities, dict):
+        raw_abilities = {}
+    abilities = {ab: _as_int(raw_abilities.get(ab, 10), 10) for ab in ABILITY_NAMES}
 
     stats_html = ""
     for ab in ABILITY_NAMES:
@@ -1548,7 +1662,7 @@ class Tools:
         embed_html = generate_roll_embed(result, context)
         return (
             HTMLResponse(
-                content=embed_html,
+                content=_embed_page(embed_html),
                 headers={"Content-Disposition": "inline"},
             ),
             tool_result_message,
@@ -1560,6 +1674,9 @@ class Tools:
         __user__: dict[str, Any] | None = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __event_call__: Optional[Callable[[Any], Awaitable[Any]]] = None,
+        __metadata__: Optional[dict] = None,
+        __chat_id__: Optional[str] = None,
+        __message_id__: Optional[str] = None,
     ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Open the interactive character creation form. The player fills in their name, race, class, level, and rolls ability scores.
@@ -1601,8 +1718,18 @@ class Tools:
             except Exception as e:
                 logger.warning(f"RPG Tool: character creator failed ({e})")
 
-        if char_data is None:
+        if not isinstance(char_data, dict):
             return "Character creation was cancelled."
+
+        # Form values come from the browser: keep the numeric fields numeric.
+        char_data["level"] = _as_int(char_data.get("level", 1), 1)
+        char_data["hp"] = _as_int(char_data.get("hp", 10), 10)
+        raw_abilities = char_data.get("abilities")
+        if not isinstance(raw_abilities, dict):
+            raw_abilities = {}
+        char_data["abilities"] = {
+            ab: _as_int(raw_abilities.get(ab, 10), 10) for ab in ABILITY_NAMES
+        }
 
         # Handle Image Generation
         if char_data.get("generate_image") and __request__ and __user__:
@@ -1617,18 +1744,41 @@ class Tools:
                     }
                 )
             try:
-                race = char_data.get("race", "Human")
-                cls = char_data.get("class", "Fighter")
-                prompt = f"A high-fantasy engaging portrait of a {race} {cls}. RPG character art style, detailed, digital painting."
-                images = await image_generations(
-                    request=__request__,
-                    form_data=GenerateImageForm(prompt=prompt),
-                    user=await Users.get_user_by_id(__user__["id"]),
+                user = await Users.get_user_by_id(__user__["id"])
+                # Same checks as the HTTP route; image_generations() has none.
+                denied = (
+                    await _image_generation_denied(user)
+                    if user
+                    else "the user could not be resolved"
                 )
-                if images and len(images) > 0:
-                    char_data["image_url"] = images[0]["url"]
+                if denied:
+                    logger.info(f"RPG Tool: portrait skipped ({denied})")
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"Portrait skipped: {denied}",
+                                    "done": False,
+                                },
+                            }
+                        )
+                else:
+                    race = char_data.get("race", "Human")
+                    cls = char_data.get("class", "Fighter")
+                    prompt = f"A high-fantasy engaging portrait of a {race} {cls}. RPG character art style, detailed, digital painting."
+                    images = await image_generations(
+                        request=__request__,
+                        form_data=GenerateImageForm(prompt=prompt),
+                        metadata=_image_link_metadata(
+                            __metadata__, __chat_id__, __message_id__
+                        ),
+                        user=user,
+                    )
+                    if images and len(images) > 0:
+                        char_data["image_url"] = images[0]["url"]
             except Exception as e:
-                logger.error(f"Image generation failed: {e}")
+                logger.error(f"Image generation failed: {type(e).__name__}: {e}")
 
         if __event_emitter__:
             await __event_emitter__(
@@ -1649,7 +1799,7 @@ class Tools:
         embed_html = generate_character_embed(char_data)
         return (
             HTMLResponse(
-                content=embed_html,
+                content=_embed_page(embed_html),
                 headers={"Content-Disposition": "inline"},
             ),
             tool_result_message,
@@ -1704,7 +1854,7 @@ class Tools:
         embed_html = generate_roll_embed(result, context)
         return (
             HTMLResponse(
-                content=embed_html,
+                content=_embed_page(embed_html),
                 headers={"Content-Disposition": "inline"},
             ),
             tool_result_message,
@@ -1809,7 +1959,7 @@ class Tools:
         embed_html = generate_choice_embed(prompt_text, selected, c0, is_custom)
         return (
             HTMLResponse(
-                content=embed_html,
+                content=_embed_page(embed_html),
                 headers={"Content-Disposition": "inline"},
             ),
             tool_result_message,
@@ -1910,7 +2060,7 @@ class Tools:
         embed_html = generate_confirm_embed(prompt_text, confirmed, action, c0)
         return (
             HTMLResponse(
-                content=embed_html,
+                content=_embed_page(embed_html),
                 headers={"Content-Disposition": "inline"},
             ),
             tool_result_message,

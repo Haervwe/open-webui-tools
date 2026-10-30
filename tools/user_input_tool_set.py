@@ -4,26 +4,44 @@ description: Interactive tools for text, choices, or images with ultra-rounded O
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.6.3
+version: 1.7.0
 license: MIT
 required_open_webui_version: 0.9.1
 """
 import json
 import logging
 import base64
+import asyncio
+import ipaddress
+import mimetypes
+import socket
+import aiohttp
 import httpx
 import os
-from pathlib import Path
 from typing import Optional, Any, Callable, Awaitable, List
-from fastapi import Request, UploadFile
+from fastapi import HTTPException, Request, UploadFile
 import io
 from open_webui.models.chats import Chats
 from open_webui.models.files import Files
-from open_webui.config import UPLOAD_DIR
+from open_webui.storage.provider import Storage
 from open_webui.routers.images import get_image_data, upload_image
 from open_webui.models.users import UserModel
-from urllib.parse import urlparse
-from fastapi.concurrency import run_in_threadpool
+from urllib.parse import urljoin, urlparse
+
+# Open WebUI's own SSRF guards (same ones the web loaders and get_image_data use).
+try:
+    from open_webui.retrieval.web.utils import validate_url as _owui_validate_url
+except ImportError:  # pragma: no cover - very old Open WebUI
+    _owui_validate_url = None
+try:
+    # Connector that re-checks every resolved address at connect time (DNS rebinding).
+    from open_webui.retrieval.web.utils import get_ssrf_safe_session as _owui_ssrf_session
+except ImportError:  # pragma: no cover - Open WebUI < 0.10
+    _owui_ssrf_session = None
+try:
+    from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL as _AIOHTTP_SSL
+except ImportError:  # pragma: no cover
+    _AIOHTTP_SSL = True
 
 
 logging.basicConfig(level=logging.INFO)
@@ -595,27 +613,159 @@ def _upload_url(ret: Any) -> Any:
 
 
 async def _get_base64_from_file_id(file_id: str) -> Optional[str]:
-    """Resolves a file ID to a base64 data URL."""
+    """Resolves a file ID to a base64 data URL (works with local, S3, GCS and Azure storage)."""
     try:
         file = await Files.get_file_by_id(file_id)
         if not file or not file.path:
             return None
-        
-        file_path = Path(file.path)
-        if not file_path.is_absolute():
-            file_path = UPLOAD_DIR / file_path
-            
-        if not file_path.exists():
+
+        # Storage.get_file returns a local path, downloading from cloud storage if needed.
+        file_path = await asyncio.to_thread(Storage.get_file, file.path)
+        if not file_path or not await asyncio.to_thread(os.path.isfile, file_path):
             return None
-            
-        with open(file_path, "rb") as f:
-            data = f.read()
-            encoded = base64.b64encode(data).decode("utf-8")
-            mime_type = file.meta.get("content_type", "image/png") if file.meta else "image/png"
-            return f"data:{mime_type};base64,{encoded}"
+
+        def _read() -> bytes:
+            with open(file_path, "rb") as f:
+                return f.read()
+
+        data = await asyncio.to_thread(_read)
+        encoded = base64.b64encode(data).decode("utf-8")
+        mime_type = file.meta.get("content_type", "image/png") if file.meta else "image/png"
+        return f"data:{mime_type};base64,{encoded}"
     except Exception as e:
         logger.error(f"User Input Tool Set: Failed to resolve base64 for {file_id}: {e}")
         return None
+
+
+# Mirrors open_webui.utils.chat_id.NON_SAVED_CHAT_ID_PREFIXES (0.12.x): temporary
+# chats ("temporary:", legacy "local:") and channel chats ("channel:") have no chat row.
+_NON_SAVED_CHAT_ID_PREFIXES = ("temporary:", "local:", "channel:")
+
+try:
+    from open_webui.utils.chat_id import is_saved_chat_id as _owui_is_saved_chat_id
+except Exception:  # older Open WebUI without the helper
+    _owui_is_saved_chat_id = None
+
+
+def _is_persistent_chat(chat_id: Optional[str]) -> bool:
+    """Only saved chats have a DB row to attach files/messages to."""
+    if not chat_id:
+        return False
+    chat_id = str(chat_id)
+    if chat_id.startswith(_NON_SAVED_CHAT_ID_PREFIXES):
+        return False
+    if _owui_is_saved_chat_id is not None:
+        try:
+            return bool(_owui_is_saved_chat_id(chat_id))
+        except Exception:
+            pass
+    return True
+
+
+# ---------------------------------------------------------------------------
+# SSRF-safe URL fetching
+# ---------------------------------------------------------------------------
+
+MAX_URL_FETCH_BYTES = 50 * 1024 * 1024  # hard cap on bytes read from a user-supplied URL
+MAX_URL_REDIRECTS = 5
+URL_FETCH_TIMEOUT = 30  # seconds
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+class UrlFetchError(Exception):
+    """A user-supplied URL was rejected or could not be fetched."""
+
+
+def _fallback_validate_url(url: str) -> None:
+    """Used only if Open WebUI's validate_url is unavailable: http(s) + public addresses only."""
+    if any(ch in url for ch in ("\\", "\t", "\n", "\r")):
+        raise UrlFetchError("URL contains invalid characters.")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise UrlFetchError("Only http(s) URLs are allowed.")
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except (socket.gaierror, UnicodeError):
+        raise UrlFetchError("Could not resolve host.") from None
+    for info in infos:
+        addr = ipaddress.ip_address(str(info[4][0]).split("%")[0])
+        mapped = getattr(addr, "ipv4_mapped", None)
+        if not addr.is_global or (mapped is not None and not mapped.is_global):
+            raise UrlFetchError("URL points to a private or local address.")
+
+
+async def _validate_fetch_url(url: str) -> None:
+    if not isinstance(url, str) or not url.lower().startswith(("http://", "https://")):
+        raise UrlFetchError("Only http(s) URLs are allowed.")
+    try:
+        if _owui_validate_url is not None:
+            # Honors ENABLE_LOCAL_WEB_FETCH and WEB_FETCH_FILTER_LIST like built-in fetches.
+            await asyncio.to_thread(_owui_validate_url, url)
+        else:
+            await asyncio.to_thread(_fallback_validate_url, url)
+    except UrlFetchError:
+        raise
+    except Exception as e:
+        raise UrlFetchError(f"URL is not allowed: {e}") from None
+
+
+async def _safe_fetch_url(url: str, max_bytes: int = MAX_URL_FETCH_BYTES) -> tuple:
+    """
+    Fetch a user-supplied URL without SSRF exposure.
+    Every redirect hop is re-validated, the connection layer re-checks resolved
+    addresses (when Open WebUI provides it) and the body is capped at max_bytes.
+    Returns (content_bytes, content_type, final_url).
+    """
+    if _owui_ssrf_session is not None:
+        session_cm = _owui_ssrf_session()
+    else:
+        session_cm = aiohttp.ClientSession()
+    timeout = aiohttp.ClientTimeout(total=URL_FETCH_TIMEOUT)
+
+    async with session_cm as session:
+        current = url
+        for _ in range(MAX_URL_REDIRECTS + 1):
+            await _validate_fetch_url(current)
+            async with session.get(
+                current, allow_redirects=False, timeout=timeout, ssl=_AIOHTTP_SSL
+            ) as resp:
+                if resp.status in _REDIRECT_STATUSES:
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise UrlFetchError("Redirect without a Location header.")
+                    current = urljoin(current, location)
+                    continue
+                if resp.status >= 400:
+                    raise UrlFetchError(f"HTTP {resp.status} {resp.reason or ''}".strip())
+                if resp.content_length is not None and resp.content_length > max_bytes:
+                    raise UrlFetchError(
+                        f"File is too large (limit {max_bytes // (1024 * 1024)} MB)."
+                    )
+                buf = bytearray()
+                async for chunk in resp.content.iter_chunked(64 * 1024):
+                    buf.extend(chunk)
+                    if len(buf) > max_bytes:
+                        raise UrlFetchError(
+                            f"File is too large (limit {max_bytes // (1024 * 1024)} MB)."
+                        )
+                return bytes(buf), resp.headers.get("content-type", ""), current
+        raise UrlFetchError("Too many redirects.")
+
+
+def _looks_like_url(data: Any) -> bool:
+    return isinstance(data, str) and data.strip().lower().startswith(("http://", "https://"))
+
+
+def _name_from_url(url: str, content_type: str, default_stem: str) -> str:
+    """File name from the URL path; adds an extension from Content-Type when missing."""
+    name = os.path.basename(urlparse(url).path) or default_stem
+    if not os.path.splitext(name)[1]:
+        mime = (content_type or "").split(";")[0].strip().lower()
+        ext = mimetypes.guess_extension(mime) if mime else None
+        if ext:
+            name = f"{name}{ext}"
+    return name
+
 
 # ---------------------------------------------------------------------------
 # Tools Class
@@ -739,20 +889,15 @@ class Tools:
             if input_type == "url":
                 # Let backend fetch/process the image from URL as built-in tools do
                 try:
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.get(data, follow_redirects=True)
-                        resp.raise_for_status()
-                        content_type = resp.headers.get("content-type", "")
-                        if not content_type.startswith("image/"):
-                            if __event_emitter__:
-                                await __event_emitter__({"type": "status", "data": {"description": f"URL does not point to an image (Type: {content_type})", "done": True}})
-                            return json.dumps({"status": "error", "message": f"The provided URL does not point to a valid image file. Detected type: {content_type}"})
-                        image_data = resp.content
-                    
-                    # Use filename from URL if possible
+                    image_data, content_type, final_url = await _safe_fetch_url(data)
+                    content_type = (content_type or "").split(";")[0].strip()
+                    if not content_type.startswith("image/"):
+                        if __event_emitter__:
+                            await __event_emitter__({"type": "status", "data": {"description": f"URL does not point to an image (Type: {content_type})", "done": True}})
+                        return json.dumps({"status": "error", "message": f"The provided URL does not point to a valid image file. Detected type: {content_type}"})
 
-                    url_path = urlparse(data).path
-                    name = os.path.basename(url_path) or "image-from-url.png"
+                    # Use filename from URL if possible
+                    name = _name_from_url(final_url, content_type, "image-from-url")
                 except Exception as e:
                     if __event_emitter__:
                         await __event_emitter__({"type": "status", "data": {"description": f"Failed to fetch image from URL: {e}", "done": True}})
@@ -766,8 +911,8 @@ class Tools:
                     user,
                 )
             elif input_type == "doodle":
-                # Doodle is always base64 PNG
-                image_data, detected_type = await get_image_data(data)
+                # Doodle is always base64 PNG (never let it be a server-side URL fetch)
+                image_data, detected_type = (None, None) if _looks_like_url(data) else await get_image_data(data)
                 if image_data is None:
                     if __event_emitter__:
                         await __event_emitter__({"type": "status", "data": {"description": "Failed to load doodle image data", "done": True}})
@@ -784,7 +929,7 @@ class Tools:
                 )
             else:  # upload
                 # Uploaded file: decode data URL, preserve filename/content type
-                image_data, detected_type = await get_image_data(data)
+                image_data, detected_type = (None, None) if _looks_like_url(data) else await get_image_data(data)
                 if image_data is None:
                     if __event_emitter__:
                         await __event_emitter__({"type": "status", "data": {"description": "Failed to load uploaded image data", "done": True}})
@@ -815,45 +960,21 @@ class Tools:
             # Vision Secret Sauce: Attach to messages/history and inject Multimodal Content
             if __chat_id__ and __message_id__:
                 # 1. Permanent Vision Context (Database Persistence)
-                # Attach to both Assistant (current) and User (parent) messages for consistency
-                # Matches built-in tool pattern for Assistant + historical perception for User
-                try:
-                    # Assistant sync
-                    await Chats.add_message_files_by_id_and_message_id(__chat_id__, __message_id__, image_files)
-                    
-                    chat = await Chats.get_chat_by_id(__chat_id__)
-                    chat_data = chat.chat if hasattr(chat, 'chat') else (chat if isinstance(chat, dict) else {})
-                    
-                    if chat_data and "messages" in chat_data:
-                        messages = chat_data["messages"]
-                        messages_map = chat_data.get("messages_map", {}) or {m.get("id"): m for m in messages if m.get("id")}
-                        
-                        current_msg = messages_map.get(__message_id__)
+                # Attach the file reference to both the Assistant (current) and the User
+                # (parent) message in history.messages. Open WebUI resolves image files to
+                # vision input on later turns, so no base64 is persisted in the chat JSON.
+                if _is_persistent_chat(__chat_id__):
+                    try:
+                        # Assistant sync
+                        await Chats.add_message_files_by_id_and_message_id(__chat_id__, __message_id__, image_files)
+
+                        current_msg = await Chats.get_message_by_id_and_message_id(__chat_id__, __message_id__)
                         parent_id = current_msg.get("parentId") if current_msg else None
-                        
                         if parent_id:
                             logger.info(f"User Input Tool Set: Syncing to parent User message {parent_id}")
                             await Chats.add_message_files_by_id_and_message_id(__chat_id__, parent_id, image_files)
-                            
-                            parent_msg = next((m for m in messages if m.get("id") == parent_id), None)
-                            if parent_msg:
-                                # Convert string content to multimodal list if needed
-                                content = parent_msg.get("content", "")
-                                if isinstance(content, str):
-                                    parent_msg["content"] = [{"type": "text", "text": content}] if content else []
-                                
-                                for f in image_files:
-                                    f_id = f.get("id") or (f["url"].split("/files/")[1].split("/")[0] if "/api/v1/files/" in f.get("url", "") else None)
-                                    if f_id:
-                                        base64_url = await _get_base64_from_file_id(f_id)
-                                        if base64_url:
-                                            exists = any(part.get("image_url", {}).get("url") == base64_url for part in parent_msg["content"] if part.get("type") == "image_url")
-                                            if not exists:
-                                                parent_msg["content"].append({"type": "image_url", "image_url": {"url": base64_url}})
-                                
-                                await Chats.update_chat_by_id(__chat_id__, chat_data)
-                except Exception as e:
-                    logger.warning(f"User Input Tool Set: DB Sync failed: {e}")
+                    except Exception as e:
+                        logger.warning(f"User Input Tool Set: DB Sync failed: {e}")
 
                 # 2. IMMEDIATE Vision Perception (In-Memory In-place Update for current turn)
                 # This ensures the LLM handles vision during the follow-up request in the same turn
@@ -960,13 +1081,15 @@ class Tools:
 
             file_content = None
             if input_type == "url":
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.get(data, follow_redirects=True)
-                    resp.raise_for_status()
-                    file_content = resp.content
-                    content_type = resp.headers.get("content-type", "application/octet-stream")
-                    url_path = urlparse(data).path
-                    name = os.path.basename(url_path) or "document-from-url"
+                try:
+                    file_content, fetched_type, final_url = await _safe_fetch_url(data)
+                except Exception as e:
+                    if __event_emitter__:
+                        await __event_emitter__({"type": "status", "data": {"description": f"Failed to fetch document from URL: {e}", "done": True}})
+                    return f"Error: Failed to fetch document from URL: {e}"
+                content_type = fetched_type or "application/octet-stream"
+                # An extension is needed for the allowed-extensions check and the loader.
+                name = _name_from_url(final_url, content_type, "document-from-url")
             else:
                 # upload
                 if "," in data:
@@ -986,17 +1109,26 @@ class Tools:
             )
 
             # Call internal handler directly since it's now async
-            file_item_res = await upload_file_handler(
-                __request__,
-                file=upload_file,
-                metadata=json.dumps(metadata),
-                process=True,
-                process_in_background=False,
-                user=user,
-            )
-            
+            try:
+                file_item_res = await upload_file_handler(
+                    __request__,
+                    file=upload_file,
+                    metadata=json.dumps(metadata),
+                    process=True,
+                    process_in_background=False,
+                    user=user,
+                )
+            except HTTPException as e:
+                # e.g. 400 file type not allowed, 413 file too large
+                if __event_emitter__:
+                    await __event_emitter__({"type": "status", "data": {"description": f"Upload rejected: {e.detail}", "done": True}})
+                return f"Error: Document upload rejected: {e.detail}"
+
             # upload_file_handler returns a dict with 'status' and file model data if process=True
-            file_id = file_item_res.get("id")
+            if isinstance(file_item_res, dict):
+                file_id = file_item_res.get("id")
+            else:
+                file_id = getattr(file_item_res, "id", None)
             if not file_id:
                 return f"Error: Failed to upload and process document. Response: {file_item_res}"
 
@@ -1005,7 +1137,7 @@ class Tools:
             if not processed_file:
                 return "Error: Could not retrieve processed file from database."
 
-            extracted_text = processed_file.data.get("content", "")
+            extracted_text = (processed_file.data or {}).get("content", "")
             
             # Attach file to chat for UI visibility
             file_info = {
@@ -1018,11 +1150,22 @@ class Tools:
             if __files__ is not None:
                 __files__.append(file_info)
 
-            if __chat_id__ and __message_id__:
+            if _is_persistent_chat(__chat_id__) and __message_id__:
                 try:
                     await Chats.add_message_files_by_id_and_message_id(__chat_id__, __message_id__, [file_info])
                 except Exception as e:
                     logger.warning(f"Failed to sync document to chat: {e}")
+                # Link the file to the chat (chat_file row) so shared-chat viewers can read it.
+                if user is not None and hasattr(Chats, "insert_chat_files"):
+                    try:
+                        await Chats.insert_chat_files(
+                            chat_id=__chat_id__,
+                            message_id=__message_id__,
+                            file_ids=[file_id],
+                            user_id=user.id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to link document to chat: {e}")
 
             if __event_emitter__:
                 await __event_emitter__({"type": "chat:message:files", "data": {"files": [file_info]}})

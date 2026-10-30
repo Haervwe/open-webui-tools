@@ -2,7 +2,7 @@
 title: Test Model Dropdown Pipe
 author: haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.1
+version: 0.4.2
 license: MIT
 required_open_webui_version: 0.9.1
 description: >
@@ -55,10 +55,12 @@ def _fetch_base_model_ids() -> List[str]:
         # Fallback: MODELS dict (populated lazily, may be empty at import time)
         models_state = getattr(app.state, "MODELS", None)
         if models_state:
+            # app.state.MODELS is a (Cached)RedisDict when WEBSOCKET_MANAGER=redis:
+            # not a dict subclass and not iterable, but it has .values()
             items = (
                 list(models_state.values())
-                if isinstance(models_state, dict)
-                else list(models_state)
+                if hasattr(models_state, "values")
+                else []
             )
             ids = [
                 m["id"]

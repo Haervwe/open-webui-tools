@@ -3,7 +3,7 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.10.5
+version: 3.10.6
 required_open_webui_version: 0.11.0
 
 Features:
@@ -36,10 +36,15 @@ Known Issues:
 - Filter for subagents are not tested.
 - Parallel subagents managing files on the same environment (Code intepreter / terminal agents) concurrently may inherently cause issues.
 - Parallel subagents in local environments that require loading and unloading another external models (Local LLMs + Comfyui)risk OOM errors.
+- MCP: connections are resolved like OWUI's connect_mcp_server (enable flag, ENABLE_TOOL_SERVERS,
+  access check, build_tool_server_headers, oauth_2.1/oauth_2.1_static, system_oauth refresh via
+  OAuthTokenAuth on 0.12+) but use the planner's pooled clients; MCP elicitation prompts are not
+  forwarded, and MCP image/audio content is summarized as a text placeholder for the model.
 """
 
 import ast
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -65,7 +70,7 @@ from typing import (
 from pydantic import BaseModel, Field
 from contextvars import ContextVar
 
-from fastapi import Request, UploadFile
+from fastapi import HTTPException, Request, UploadFile
 from starlette.datastructures import Headers
 import io
 import contextlib
@@ -100,6 +105,148 @@ try:  # 0.12+
     from open_webui.env import ENABLE_TOOL_SERVERS
 except ImportError:
     ENABLE_TOOL_SERVERS = True
+
+try:  # 0.10+: shared MCP/OpenAPI header builder (auth types, header templating)
+    from open_webui.utils.tools import build_tool_server_headers as _owui_build_tool_server_headers
+except ImportError:
+    _owui_build_tool_server_headers = None
+
+try:  # 0.12+: per-request system OAuth token resolution/refresh for MCP
+    from open_webui.utils.mcp.client import OAuthTokenAuth as _OWUIOAuthTokenAuth
+except ImportError:
+    _OWUIOAuthTokenAuth = None
+
+try:
+    from open_webui.storage.provider import Storage as _OWUIStorage
+except ImportError:
+    _OWUIStorage = None
+
+
+def _mcp_client_supports_auth() -> bool:
+    try:
+        return "auth" in inspect.signature(MCPClient.connect).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+try:
+    from open_webui.utils.chat_id import is_saved_chat_id as _owui_is_saved_chat_id
+except ImportError:
+    _owui_is_saved_chat_id = None
+
+# Temporary ("temporary:", legacy "local:") and channel ("channel:") chats have
+# no chat row; nothing may be persisted or linked for them.
+_NON_SAVED_CHAT_ID_PREFIXES = ("temporary:", "local:", "channel:")
+
+
+def _is_saved_chat_id(chat_id: Any) -> bool:
+    if not chat_id or not isinstance(chat_id, str):
+        return False
+    if _owui_is_saved_chat_id is not None:
+        return bool(_owui_is_saved_chat_id(chat_id))
+    return not chat_id.startswith(_NON_SAVED_CHAT_ID_PREFIXES)
+
+
+_DATA_IMAGE_URI_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.S)
+_IMAGE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/svg+xml": ".svg",
+}
+
+
+def _file_content_url(request: Any, file_id: str) -> str:
+    try:
+        return str(request.app.url_path_for("get_file_content_by_id", id=file_id))
+    except Exception:
+        return f"/api/v1/files/{file_id}/content"
+
+
+async def _link_files_to_chat(
+    chat_id: Optional[str], message_id: Optional[str], file_ids: list, user: Any
+) -> None:
+    """Create chat_file rows (shared-chat access) for files produced in this message."""
+    file_ids = [fid for fid in dict.fromkeys(file_ids) if isinstance(fid, str) and fid]
+    if not file_ids or not message_id or not user or not _is_saved_chat_id(chat_id):
+        return
+    insert = getattr(Chats, "insert_chat_files", None)
+    if insert is None:
+        return
+    try:
+        await insert(
+            chat_id=chat_id,
+            message_id=message_id,
+            file_ids=file_ids,
+            user_id=user.id,
+        )
+    except Exception as e:
+        logger.warning("Could not link files to chat %s: %s", chat_id, e)
+
+
+async def planner_store_tool_result_files(
+    request: Any,
+    files: Optional[list],
+    chat_id: Optional[str],
+    message_id: Optional[str],
+    user: Any,
+) -> list:
+    """
+    Mirror OWUI middleware store_tool_result_image: persist base64 data-URI images
+    from tool results into OWUI storage (linked to the chat message) so the chat
+    JSON only carries a file URL. Falls back to the inline image if storage fails.
+    Also links any already-stored file ids to the chat (insert_chat_files).
+    """
+    if not files:
+        return files or []
+    out: list = []
+    link_ids: list = []
+    saved = _is_saved_chat_id(chat_id)
+    for f in files:
+        if not isinstance(f, dict):
+            out.append(f)
+            continue
+        url = f.get("url")
+        if (
+            saved
+            and request is not None
+            and user is not None
+            and f.get("type") == "image"
+            and isinstance(url, str)
+        ):
+            m = _DATA_IMAGE_URI_RE.match(url)
+            if m:
+                try:
+                    content_type = m.group(1).lower()
+                    data = base64.b64decode(m.group(2), validate=False)
+                    upload = UploadFile(
+                        file=io.BytesIO(data),
+                        filename=f"generated-image{_IMAGE_EXTENSIONS.get(content_type, '.png')}",
+                        headers=Headers({"content-type": content_type}),
+                    )
+                    file_item = await upload_file_handler(
+                        request,
+                        file=upload,
+                        metadata={"chat_id": chat_id, "message_id": message_id},
+                        process=False,
+                        user=user,
+                    )
+                    fid = getattr(file_item, "id", None)
+                    if fid:
+                        f = {**f, "id": fid, "url": _file_content_url(request, fid)}
+                except Exception as e:
+                    logger.warning(
+                        "Could not store tool image; retaining inline image: %s", e
+                    )
+        fid = f.get("id") or f.get("file_id")
+        if fid:
+            link_ids.append(fid)
+        out.append(f)
+    await _link_files_to_chat(chat_id, message_id, link_ids, user)
+    return out
 
 # --- Globals & Context ---
 logger = logging.getLogger(__name__)
@@ -339,6 +486,77 @@ def workspace_feature_flags(model: dict[str, Any]) -> dict[str, bool]:
     return feats
 
 
+async def _planner_build_mcp_headers(
+    connection: dict,
+    request: Any,
+    user: Any,
+    server_id: str,
+    metadata: dict,
+) -> dict:
+    """
+    Build MCP request headers with OWUI's build_tool_server_headers (0.10+):
+    bearer/session/system_oauth/oauth_2.1/oauth_2.1_static auth, custom header
+    template interpolation and user/session info forwarding. Falls back to a
+    local equivalent when the helper is unavailable or fails.
+    """
+    metadata = {k: v for k, v in (metadata or {}).items() if v}
+    if _owui_build_tool_server_headers is not None:
+        try:
+            headers, _cookies = await _owui_build_tool_server_headers(
+                connection, request, user, server_id=server_id, metadata=metadata
+            )
+            return dict(headers or {})
+        except Exception as e:
+            logger.warning(
+                "build_tool_server_headers failed for MCP %s, using fallback: %s",
+                server_id,
+                e,
+            )
+
+    auth_type = connection.get("auth_type", "bearer")
+    headers: dict[str, str] = {}
+    if auth_type == "bearer":
+        headers["Authorization"] = f"Bearer {connection.get('key', '')}"
+    elif auth_type == "session":
+        tok = getattr(getattr(request, "state", None), "token", None)
+        creds = getattr(tok, "credentials", None) if tok else None
+        if creds:
+            headers["Authorization"] = f"Bearer {creds}"
+    elif auth_type == "system_oauth":
+        try:
+            oauth_token = await get_system_oauth_token(request, user)
+        except Exception:
+            oauth_token = None
+        if oauth_token:
+            headers["Authorization"] = f"Bearer {oauth_token.get('access_token', '')}"
+    elif auth_type in ("oauth_2.1", "oauth_2.1_static"):
+        try:
+            splits = server_id.split(":")
+            sid = splits[-1] if len(splits) > 1 else server_id
+            mgr = getattr(request.app.state, "oauth_client_manager", None)
+            if mgr:
+                ot = await mgr.get_oauth_token(
+                    user.id, f"{connection.get('type', 'mcp')}:{sid}"
+                )
+                if ot:
+                    headers["Authorization"] = f"Bearer {ot.get('access_token', '')}"
+        except Exception as e:
+            logger.error("OAuth token for MCP: %s", e)
+
+    connection_headers = connection.get("headers", None)
+    if connection_headers and isinstance(connection_headers, dict):
+        for key, value in connection_headers.items():
+            headers["Authorization" if key.lower() == "authorization" else key] = value
+
+    if ENABLE_FORWARD_USER_INFO_HEADERS and user:
+        headers = include_user_info_headers(headers, user)
+        if metadata.get("chat_id"):
+            headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata["chat_id"]
+        if metadata.get("message_id"):
+            headers[FORWARD_SESSION_INFO_HEADER_MESSAGE_ID] = metadata["message_id"]
+    return headers
+
+
 async def planner_merge_mcp_tools_from_ids(
     request: Request,
     user: Any,
@@ -354,12 +572,6 @@ async def planner_merge_mcp_tools_from_ids(
     out: dict[str, Any] = {}
     if not tool_ids or not request:
         return out
-
-    oauth_token = None
-    try:
-        oauth_token = await get_system_oauth_token(request, user)
-    except Exception:
-        pass
 
     if not ENABLE_TOOL_SERVERS:
         return out
@@ -387,7 +599,7 @@ async def planner_merge_mcp_tools_from_ids(
             # v3.6.8: Optimize by skipping unknown IDs faster if we have many connections
             for server_connection in mcp_connections:
                 if server_connection.get("type", "") == "mcp":
-                    sid = server_connection.get("info", {}).get("id")
+                    sid = (server_connection.get("info") or {}).get("id")
                     if not sid:
                         continue
                     if tool_id == sid or tool_id.startswith(f"{sid}_"):
@@ -419,7 +631,7 @@ async def planner_merge_mcp_tools_from_ids(
                     "MCP server with id %s not found in connections. Available server IDs: %s",
                     server_id,
                     [
-                        s.get("info", {}).get("id")
+                        (s.get("info") or {}).get("id")
                         for s in mcp_connections
                         if s.get("type") == "mcp"
                     ],
@@ -440,79 +652,69 @@ async def planner_merge_mcp_tools_from_ids(
                 )
                 continue
 
-            auth_type = mcp_server_connection.get("auth_type", "")
-            headers: dict[str, str] = {}
-            if auth_type == "bearer":
-                headers["Authorization"] = (
-                    f"Bearer {mcp_server_connection.get('key', '')}"
+            # Session ids for header forwarding / template interpolation.
+            # v3.15: Support both original and double-underscore prefixed session keys
+            cid = None
+            if isinstance(metadata, dict):
+                cid = metadata.get("chat_id") or metadata.get("__chat_id__")
+            if not cid and isinstance(extra_params, dict):
+                cid = extra_params.get("chat_id") or extra_params.get("__chat_id__")
+            mid = None
+            if isinstance(metadata, dict):
+                mid = metadata.get("message_id") or metadata.get("__message_id__")
+            if not mid and isinstance(extra_params, dict):
+                mid = extra_params.get("message_id") or extra_params.get(
+                    "__message_id__"
                 )
-            elif auth_type == "none":
-                pass
-            elif auth_type == "session":
-                tok = getattr(getattr(request, "state", None), "token", None)
-                creds = getattr(tok, "credentials", None) if tok else None
-                if creds:
-                    headers["Authorization"] = f"Bearer {creds}"
-            elif auth_type == "system_oauth":
-                if oauth_token:
-                    headers["Authorization"] = (
-                        f"Bearer {oauth_token.get('access_token', '')}"
-                    )
-            elif auth_type == "oauth_2.1":
-                try:
-                    splits = server_id.split(":")
-                    sid = splits[-1] if len(splits) > 1 else server_id
-                    mgr = getattr(request.app.state, "oauth_client_manager", None)
-                    if mgr:
-                        ot = await mgr.get_oauth_token(user.id, f"mcp:{sid}")
-                        if ot:
-                            headers["Authorization"] = (
-                                f"Bearer {ot.get('access_token', '')}"
-                            )
-                except Exception as e:
-                    logger.error("OAuth token for MCP: %s", e)
+            header_meta = {"chat_id": cid, "message_id": mid}
 
-            connection_headers = mcp_server_connection.get("headers", None)
-            if connection_headers and isinstance(connection_headers, dict):
-                for key, value in connection_headers.items():
-                    headers[key] = value
+            auth_type = mcp_server_connection.get("auth_type", "")
 
-            if ENABLE_FORWARD_USER_INFO_HEADERS and user:
-                headers = include_user_info_headers(headers, user)
-                # v3.15: Support both original and double-underscore prefixed session keys
-                # Check both metadata (inner) and extra_params (wide) for resilience
-                cid = None
-                if isinstance(metadata, dict):
-                    cid = metadata.get("chat_id") or metadata.get("__chat_id__")
-                if not cid and isinstance(extra_params, dict):
-                    cid = extra_params.get("chat_id") or extra_params.get("__chat_id__")
+            async def _get_headers(
+                _conn=mcp_server_connection, _sid=server_id, _meta=header_meta
+            ):
+                return await _planner_build_mcp_headers(
+                    _conn, request, user, _sid, _meta
+                )
 
-                if cid:
-                    headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = cid
+            # v3.10.6: Mirror connect_mcp_server: system_oauth resolves (and
+            # refreshes) the token per HTTP request via OAuthTokenAuth.
+            auth = None
+            auth_key = None
+            if (
+                auth_type == "system_oauth"
+                and _OWUIOAuthTokenAuth is not None
+                and _mcp_client_supports_auth()
+            ):
+                auth = _OWUIOAuthTokenAuth(_get_headers)
+                auth_key = f"system_oauth:{getattr(user, 'id', '')}:{server_id}"
+                headers: dict[str, str] = {}
+            else:
+                headers = await _get_headers()
 
-                mid = None
-                if isinstance(metadata, dict):
-                    mid = metadata.get("message_id") or metadata.get("__message_id__")
-                if not mid and isinstance(extra_params, dict):
-                    mid = extra_params.get("message_id") or extra_params.get(
-                        "__message_id__"
-                    )
+            if auth_type in ("oauth_2.1", "oauth_2.1_static") and not headers.get(
+                "Authorization"
+            ):
+                raise RuntimeError(
+                    f"MCP server '{server_id}' requires OAuth authorization"
+                )
 
-                if mid:
-                    headers[FORWARD_SESSION_INFO_HEADER_MESSAGE_ID] = mid
+            connect_kwargs: dict[str, Any] = {
+                "url": mcp_server_connection.get("url", ""),
+                "headers": headers if headers else None,
+            }
+            if auth is not None:
+                connect_kwargs["auth"] = auth
 
             if mcp_handler is not None:
-                client = await mcp_handler(
-                    url=mcp_server_connection.get("url", ""),
-                    headers=headers if headers else None,
-                )
+                if auth is not None:
+                    client = await mcp_handler(**connect_kwargs, auth_key=auth_key)
+                else:
+                    client = await mcp_handler(**connect_kwargs)
             else:
                 # Fallback to local client (original behavior, legacy or fallback)
                 client = MCPClient()
-                await client.connect(
-                    url=mcp_server_connection.get("url", ""),
-                    headers=headers if headers else None,
-                )
+                await client.connect(**connect_kwargs)
 
             # v3.6: Ensure each client has a lock to prevent concurrent tool calls on the same connection,
             # which can cause deadlocks in some MCP servers or client implementations.
@@ -558,6 +760,10 @@ async def planner_merge_mcp_tools_from_ids(
                                 elif c.get("type") == "image":
                                     texts.append(
                                         f"[Image Content: {c.get('mimeType', 'image')}]"
+                                    )
+                                elif c.get("type") == "audio":
+                                    texts.append(
+                                        f"[Audio Content: {c.get('mimeType', 'audio')}]"
                                     )
                                 elif c.get("type") == "resource":
                                     res = c.get("resource") or {}
@@ -2061,13 +2267,43 @@ class StatePersistence:
                 logger.warning(f"State file with ID {file_id} not found in database.")
                 return
 
-            file_path = getattr(file_obj, "path", None)
-            if not file_path and hasattr(file_obj, "meta"):
-                file_path = file_obj.meta.get("path")
+            # v3.10.6 (security): the file reference comes from client-supplied
+            # message files / chat history and was matched only by display name.
+            # Only restore a state file this user owns and that was written for
+            # THIS chat by the planner (server-side filename / upload metadata).
+            if not self._is_trusted_state_file(file_obj, chat_id):
+                logger.warning(
+                    "Ignoring planner state file %s: not owned by this user or not "
+                    "bound to chat %s.",
+                    file_id,
+                    self.context.chat_id or chat_id,
+                )
+                return
 
-            if file_path and os.path.exists(file_path):
-                with open(file_path, "r", encoding="utf-8") as f_in:
-                    data = json.load(f_in)
+            file_path = getattr(file_obj, "path", None)
+            data = None
+            if file_path:
+                # Read through OWUI storage (local/S3/GCS/Azure) like routers/files.
+                local_path = file_path
+                if _OWUIStorage is not None:
+                    try:
+                        local_path = await asyncio.to_thread(
+                            _OWUIStorage.get_file, file_path
+                        )
+                    except Exception as e:
+                        logger.warning(f"Storage.get_file failed for state file: {e}")
+                        local_path = file_path
+                if local_path and os.path.exists(local_path):
+                    def _read_json(path=local_path):
+                        with open(path, "r", encoding="utf-8") as f_in:
+                            return json.load(f_in)
+
+                    data = await asyncio.to_thread(_read_json)
+                    if not isinstance(data, dict):
+                        logger.warning("Planner state file is not a JSON object.")
+                        return
+
+            if data is not None:
 
                 # Restore tasks
                 if "tasks" in data:
@@ -2152,6 +2388,26 @@ class StatePersistence:
         except Exception as e:
             logger.error(f"Failed to recover planner state: {e}", exc_info=True)
 
+    def _is_trusted_state_file(self, file_obj: Any, chat_id: Optional[str]) -> bool:
+        """Owner + chat binding check for planner state files (see recover_from_files)."""
+        user_id = getattr(self.user, "id", None)
+        if not user_id or getattr(file_obj, "user_id", None) != user_id:
+            return False
+        target_chat = self.context.chat_id or chat_id
+        if not target_chat:
+            return False
+        meta = getattr(file_obj, "meta", None) or {}
+        meta_data = meta.get("data") if isinstance(meta, dict) else None
+        bound_chat = meta_data.get("chat_id") if isinstance(meta_data, dict) else None
+        if bound_chat:
+            return bound_chat == target_chat
+        # Legacy state files (uploaded with empty metadata) are bound to the chat
+        # through the server-side filename planner_state_<chat_id>.json.
+        filename = getattr(file_obj, "filename", None) or (
+            meta.get("name") if isinstance(meta, dict) else None
+        )
+        return filename == f"planner_state_{target_chat}.json"
+
     async def save_to_file(self, chat_id: str) -> None:
         """Exact same logic as the old _save_state_to_file."""
         emitter = self.context.event_emitter
@@ -2181,9 +2437,47 @@ class StatePersistence:
                 headers=Headers({"content-type": "application/json"}),
             )
 
-            file_item = await upload_file_handler(
-                request=request, file=file_upload, metadata={}, process=False, user=user
-            )
+            target_chat_id = self.context.chat_id or chat_id
+            target_msg_id = self.context.message_id
+
+            # v3.10.6: bind the upload to this chat/message (meta.data) so restore
+            # can verify it, and link it via chat_file for shared-chat access.
+            try:
+                file_item = await upload_file_handler(
+                    request=request,
+                    file=file_upload,
+                    metadata={
+                        k: v
+                        for k, v in {
+                            "chat_id": target_chat_id,
+                            "message_id": target_msg_id,
+                        }.items()
+                        if v
+                    },
+                    process=False,
+                    user=user,
+                )
+            except Exception as up_err:
+                # Only HTTPException details are user-safe; storage provider
+                # errors can carry bucket/endpoint details, so log them only.
+                if isinstance(up_err, HTTPException):
+                    detail = up_err.detail
+                    if up_err.status_code == 413:
+                        msg = (
+                            "Planner state was not saved: state file exceeds the "
+                            f"configured upload size limit ({detail})."
+                        )
+                    else:
+                        msg = f"Planner state was not saved: {detail}"
+                    logger.error(msg)
+                else:
+                    msg = "Planner state was not saved (storage error)."
+                    logger.error(f"Planner state upload failed: {up_err!r}")
+                try:
+                    await self.ui.emit_status(msg, done=True)
+                except Exception:
+                    pass
+                return None
 
             if file_item:
                 file_id = getattr(file_item, "id", None)
@@ -2195,11 +2489,13 @@ class StatePersistence:
                     if isinstance(internal_files, list):
                         internal_files.append(file_info)
 
-                    # 2. Synchronize directly with the database for multi-turn persistence
-                    target_chat_id = self.context.chat_id or chat_id
-                    target_msg_id = self.context.message_id
+                    await _link_files_to_chat(
+                        target_chat_id, target_msg_id, [str(file_id)], user
+                    )
 
-                    if target_chat_id and target_msg_id:
+                    # 2. Synchronize directly with the database for multi-turn persistence
+
+                    if _is_saved_chat_id(target_chat_id) and target_msg_id:
                         try:
                             # Direct DB update
                             # v3.15.8+: Chats.add_message_files_by_id_and_message_id is now async in 0.9.1
@@ -2238,10 +2534,18 @@ class MCPHub:
         self._connecting_mcp: dict[str, asyncio.Future] = {}
 
     async def get_or_create_client(
-        self, url: str, headers: Optional[dict] = None
+        self,
+        url: str,
+        headers: Optional[dict] = None,
+        auth: Any = None,
+        auth_key: Optional[str] = None,
     ) -> "StreamableHTTPMCPClient":
         headers_json = json.dumps(headers, sort_keys=True) if headers else "{}"
-        conn_key = hashlib.sha256(f"{url}|{headers_json}".encode()).hexdigest()
+        # auth_key distinguishes per-request auth (system_oauth) pools, whose
+        # static headers are empty.
+        conn_key = hashlib.sha256(
+            f"{url}|{headers_json}|{auth_key or ''}".encode()
+        ).hexdigest()
 
         async with self._mcp_lock:
             if conn_key in self.mcp_clients:
@@ -2260,6 +2564,7 @@ class MCPHub:
                             headers,
                             context=self.context,
                             timeout=int(self.valves.SUBAGENT_TIMEOUT),
+                            auth=auth,
                         )
                         await client.connect()
                         async with self._mcp_lock:
@@ -2307,10 +2612,13 @@ class PlannerMCPClient:
         self._call_lock = asyncio.Lock()
         self.context = context
 
-    async def connect(self, url: str, headers: Optional[dict] = None) -> None:
+    async def connect(
+        self, url: str, headers: Optional[dict] = None, auth: Any = None
+    ) -> None:
         """
         Connects with Planner-specific isolation headers injected.
         Does not affect MCPClient class or any other instance.
+        `auth` (httpx Auth, e.g. OAuthTokenAuth) is forwarded on 0.12+.
         """
         isolated_headers = dict(headers) if headers else {}
         uid = uuid.uuid4().hex[:8]
@@ -2320,7 +2628,10 @@ class PlannerMCPClient:
         orig_ua = isolated_headers.get("User-Agent", "OpenWebUI-MCP-Client")
         isolated_headers["User-Agent"] = f"{orig_ua} (Planner-{uid})"
 
-        await self._client.connect(url=url, headers=isolated_headers)
+        if auth is not None:
+            await self._client.connect(url=url, headers=isolated_headers, auth=auth)
+        else:
+            await self._client.connect(url=url, headers=isolated_headers)
 
     async def list_tool_specs(self) -> list[dict]:
         return await self._client.list_tool_specs()
@@ -2375,10 +2686,16 @@ class StreamableHTTPMCPClient:
     """
 
     def __init__(
-        self, url: str, headers: Optional[dict], context: PlannerContext, timeout: int = 120
+        self,
+        url: str,
+        headers: Optional[dict],
+        context: PlannerContext,
+        timeout: int = 120,
+        auth: Any = None,
     ):
         self.url = url
         self.headers = headers or {}
+        self.auth = auth
         self.timeout = timeout
         self.context = context
         self._client: Optional[PlannerMCPClient] = None
@@ -2387,7 +2704,9 @@ class StreamableHTTPMCPClient:
     async def connect(self):
         async with asyncio.timeout(60.0):
             self._client = PlannerMCPClient(context=self.context)
-            await self._client.connect(url=self.url, headers=self.headers)
+            await self._client.connect(
+                url=self.url, headers=self.headers, auth=self.auth
+            )
 
     async def list_tool_specs(self) -> list[dict]:
         return await self._call_with_timeout(self._client.list_tool_specs)
@@ -4591,6 +4910,17 @@ class SubagentManager:
                 if tuple_files:
                     tc_files.extend(tuple_files)
 
+            # v3.10.6: store base64 tool images in OWUI storage (+ chat link)
+            # instead of inlining data: URIs into the chat JSON.
+            if tc_files:
+                tc_files = await planner_store_tool_result_files(
+                    self.context.request,
+                    tc_files,
+                    self.context.chat_id or self.metadata.get("chat_id"),
+                    self.context.message_id or self.metadata.get("message_id"),
+                    user_obj,
+                )
+
             # Step 2: Extract clean history content for the LLM (v3.15)
             # We respect UI components by extracting the 'message' field.
             if isinstance(r_val, dict):
@@ -6310,6 +6640,17 @@ class PlannerEngine:
                     r_val = tc_return
                     if isinstance(tc_return, tuple):
                         r_val, tc_files, tc_embeds = tc_return
+
+                    # v3.10.6: store base64 tool images in OWUI storage (+ chat
+                    # link) instead of inlining data: URIs into the chat JSON.
+                    if tc_files:
+                        tc_files = await planner_store_tool_result_files(
+                            self.context.request,
+                            tc_files,
+                            self.context.chat_id or chat_id,
+                            self.context.message_id,
+                            user_obj,
+                        )
 
                     # Extract clean history content for the LLM (v3.15 parity with subagents)
                     if isinstance(r_val, dict):

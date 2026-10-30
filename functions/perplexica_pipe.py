@@ -3,7 +3,7 @@ title: Perplexica Pipe
 author: haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/open-webui
-version: 0.3.3
+version: 0.3.4
 required_open_webui_version: 0.9.1
 license: MIT
 requirements: aiohttp
@@ -116,6 +116,21 @@ class Pipe:
             }
         )
 
+    @staticmethod
+    def get_response_content(response) -> str:
+        """OWUI >= 0.12 returns upstream errors as a Response object (not a dict)."""
+        if not isinstance(response, dict):
+            body = getattr(response, "body", b"") or b""
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Completion failed ({getattr(response, 'status_code', 'unknown')}): {str(body)[:500]}"
+            )
+        if response.get("error"):
+            raise RuntimeError(f"Completion failed: {response['error']}")
+        choices = response.get("choices") or [{}]
+        return (choices[0].get("message") or {}).get("content") or ""
+
     # ---------- Main entry ----------
     async def pipe(
         self,
@@ -135,16 +150,20 @@ class Pipe:
         self.__current_event_emitter__ = __event_emitter__
 
         if __task__ and __task__ != TASKS.DEFAULT:
-            response = await generate_chat_completion(
-                self.__request__,
-                {
-                    "model": self.valves.task_model,
-                    "messages": body.get("messages"),
-                    "stream": False,
-                },
-                user=self.__user__,
-            )
-            return f"{name}: {response['choices'][0]['message']['content']}"
+            try:
+                response = await generate_chat_completion(
+                    self.__request__,
+                    {
+                        "model": self.valves.task_model,
+                        "messages": body.get("messages"),
+                        "stream": False,
+                    },
+                    user=self.__user__,
+                )
+                return f"{name}: {self.get_response_content(response)}"
+            except Exception as e:
+                print(f"[Perplexica] Error processing task {__task__}: {e}")
+                return f"{name}: Error processing {__task__}"
 
         if not user_input:
             return "No search query provided"

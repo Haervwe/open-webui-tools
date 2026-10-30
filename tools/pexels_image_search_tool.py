@@ -4,13 +4,17 @@ description: Tool to search and retrieve high-quality photos and videos from Pex
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.2
+version: 1.2.0
+required_open_webui_version: 0.8.11
 license: MIT
 """
 
 import aiohttp
-from typing import Any, Optional, Callable, Awaitable, Dict
+import html
+import re
+from typing import Any, Optional, Callable, Awaitable, Dict, List, Tuple, Union
 from pydantic import BaseModel, Field
+from fastapi.responses import HTMLResponse
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -85,118 +89,257 @@ def get_headers(api_key: str) -> Dict[str, str]:
     return {"Authorization": api_key, "User-Agent": "open-webui-pexels-tool/1.0"}
 
 
+# --------------------------------------------------------------------------
+# Inline search-result gallery (sandboxed srcdoc embed, Open WebUI >= 0.8.11)
+# Third-party images are loaded directly (they are search results, not
+# generated media) with referrerpolicy="no-referrer"; every value is escaped.
+# --------------------------------------------------------------------------
+
+
+def _esc(value: Any) -> str:
+    """HTML-escape any text for element content or a quoted attribute."""
+    return html.escape("" if value is None else str(value), quote=True)
+
+
+def _http_url(value: Any) -> str:
+    """Return value if it is an absolute http(s) URL, else ''."""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if re.match(r"^https?://[^\s/\\]+", value, re.IGNORECASE) and not re.search(
+        r"[\s\"'<>`]", value
+    ):
+        return value
+    return ""
+
+
+_GALLERY_CSS = """
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { background: transparent; overflow: hidden; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #333; }
+.hdr { font-size: 12px; font-weight: 600; color: #666; margin: 0 0 8px 2px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.card { border-radius: 12px; overflow: hidden; background: rgba(0,0,0,0.04); border: 1px solid rgba(0,0,0,0.08); }
+.card a.media { display: block; position: relative; line-height: 0; background: rgba(0,0,0,0.06); }
+.card img { width: 100%; height: 160px; object-fit: cover; display: block; border: none; }
+.card .badge { position: absolute; right: 6px; bottom: 6px; padding: 2px 7px; border-radius: 99px;
+  font-size: 10px; font-weight: 700; line-height: 1.6; color: #fff; background: rgba(0,0,0,0.6); }
+.card .cap { padding: 7px 10px 9px; font-size: 11px; line-height: 1.4; color: #555; word-wrap: break-word; }
+.card .cap a { color: inherit; font-weight: 600; text-decoration: none; }
+.card .cap a:hover { text-decoration: underline; }
+.card.broken img { display: none; }
+.card.broken a.media { line-height: 1.5; padding: 24px 10px; font-size: 11px; color: #777; text-align: center; }
+.foot { margin: 8px 0 0 2px; font-size: 11px; color: #777; }
+.foot a { color: inherit; }
+@media (prefers-color-scheme: dark) {
+  body { color: #ddd; }
+  .hdr { color: #aaa; }
+  .card { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.1); }
+  .card a.media { background: rgba(255,255,255,0.06); }
+  .card .cap { color: #bbb; }
+  .foot, .card.broken a.media { color: #999; }
+}
+"""
+
+_GALLERY_JS = r"""
+(function () {
+  var pending = false;
+  function post() {
+    if (pending) return;
+    pending = true;
+    (window.requestAnimationFrame || setTimeout)(function () {
+      pending = false;
+      var r = document.getElementById('owui-root') || document.body;
+      try { parent.postMessage({ type: 'iframe:height', height: Math.ceil(r.getBoundingClientRect().height) }, '*'); } catch (e) {}
+    });
+  }
+  var imgs = document.querySelectorAll('.card img');
+  for (var i = 0; i < imgs.length; i++) {
+    imgs[i].addEventListener('load', post);
+    imgs[i].addEventListener('error', function (e) {
+      var card = e.target.closest('.card');
+      if (card) {
+        card.className += ' broken';
+        var a = card.querySelector('a.media');
+        if (a) a.appendChild(document.createTextNode('Image unavailable - open source'));
+      }
+      post();
+    });
+  }
+  window.addEventListener('load', post);
+  window.addEventListener('resize', post);
+  if (window.ResizeObserver) { try { new ResizeObserver(post).observe(document.getElementById('owui-root')); } catch (e) {} }
+  post();
+})();
+"""
+
+
+def search_gallery_embed(
+    items: list,
+    *,
+    title: str = "Image results",
+    footer: str = "",
+    footer_url: str = "",
+) -> str:
+    """Build the gallery HTML.
+
+    :param items: dicts {"image", "link"?, "caption"?, "caption_url"?, "badge"?, "alt"?}
+        (all URLs must be absolute http(s); anything else is dropped).
+    """
+    cards = []
+    for it in items:
+        img = _http_url(it.get("image"))
+        if not img:
+            continue
+        link = _http_url(it.get("link")) or img
+        alt = it.get("alt") or it.get("caption") or title
+        badge = it.get("badge")
+        caption = it.get("caption") or ""
+        caption_url = _http_url(it.get("caption_url"))
+        cap_html = ""
+        if caption:
+            cap_inner = (
+                f'<a href="{_esc(caption_url)}" target="_blank" rel="noopener noreferrer">{_esc(caption)}</a>'
+                if caption_url
+                else _esc(caption)
+            )
+            cap_html = f'<div class="cap">{cap_inner}</div>'
+        cards.append(
+            '<div class="card">'
+            f'<a class="media" href="{_esc(link)}" target="_blank" rel="noopener noreferrer">'
+            f'<img src="{_esc(img)}" alt="{_esc(alt)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">'
+            + (f'<span class="badge">{_esc(badge)}</span>' if badge else "")
+            + "</a>"
+            + cap_html
+            + "</div>"
+        )
+    foot = ""
+    if footer:
+        footer_link = _http_url(footer_url)
+        foot = (
+            f'<div class="foot"><a href="{_esc(footer_link)}" target="_blank" rel="noopener noreferrer">{_esc(footer)}</a></div>'
+            if footer_link
+            else f'<div class="foot">{_esc(footer)}</div>'
+        )
+    return (
+        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"UTF-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+        '<meta name="referrer" content="no-referrer">\n'
+        f"<title>{_esc(title)}</title>\n<style>{_GALLERY_CSS}</style>\n</head>\n<body>\n"
+        f'<div id="owui-root"><div class="hdr">{_esc(title)}</div>'
+        f'<div class="grid">{"".join(cards)}</div>{foot}</div>\n'
+        f"<script>{_GALLERY_JS}</script>\n</body>\n</html>"
+    )
+
+
+def gallery_response(html_content: str, context: Any) -> Tuple[HTMLResponse, Any]:
+    """(inline HTMLResponse embed, LLM context) - see Open WebUI process_tool_result."""
+    return (
+        HTMLResponse(content=html_content, headers={"Content-Disposition": "inline"}),
+        context,
+    )
+
+
 def format_search_results(data: Dict[str, Any], query: str) -> str:
-    """Format search results into a readable string."""
-    photos = data.get("photos", [])
-    total_results = data.get("total_results", 0)
-    page = data.get("page", 1)
+    """Compact text for the LLM (the images themselves are shown in the gallery embed)."""
+    photos = data.get("photos", []) or []
+    total_results = data.get("total_results", 0) or 0
+    page = data.get("page", 1) or 1
 
     if not photos:
         return f"No photos found for query: '{query}'"
 
-    result = f"**Pexels Photo Search Results for '{query}'**\n"
-    result += f"Found {total_results:,} total results (Page {page}, showing {len(photos)} photos)\n\n"
-
-    # Strong instruction for image display
-    result += "🚨 **IMPORTANT: USE THE IMAGE PREVIEW SECTIONS BELOW TO DISPLAY IMAGES DIRECTLY IN CHAT!** 🚨\n"
-    result += "**The images are already formatted with ![alt](url) markdown - just copy and use them!**\n\n"
-
-    # Add Pexels attribution as required by their API guidelines
-    result += "📸 **Photos provided by [Pexels](https://www.pexels.com)**\n\n"
-
+    result = (
+        f"Pexels photos for '{query}': showing {len(photos)} of {total_results:,} "
+        f"(page {page}). They are already displayed to the user in an image gallery "
+        "with photographer credits; do not repeat them as markdown images or links.\n\n"
+    )
     for i, photo in enumerate(photos, 1):
-        result += f"**{i}. Photo by {photo['photographer']}**\n"
+        photographer = photo.get("photographer") or "Unknown"
+        alt = (photo.get("alt") or "").strip() or "No description available"
         result += (
-            f"   • **Description:** {photo.get('alt', 'No description available')}\n"
+            f"{i}. Photo by {photographer} - {alt} "
+            f"({photo.get('width', '?')}x{photo.get('height', '?')}) - {photo.get('url', '')}\n"
         )
-        result += f"   • **Dimensions:** {photo['width']} × {photo['height']} pixels\n"
-        result += f"   • **Photographer:** [{photo['photographer']}]({photo['photographer_url']})\n"
-        result += f"   • **Pexels Page:** [View Photo]({photo['url']})\n"
-        result += "   • **Image Preview:**\n"
-        result += f"     ![{photo.get('alt', 'Photo by ' + photo['photographer'])}]({photo['src']['large2x']})\n"
-        result += "   • **Download URLs:**\n"
-        result += (
-            f"     - **Large (best quality):** [Download]({photo['src']['large2x']})\n"
-        )
-        result += f"     - **Medium:** [Download]({photo['src']['medium']})\n"
-        result += f"     - **Small:** [Download]({photo['src']['small']})\n"
-        result += f"     - **Original:** [Download]({photo['src']['original']})\n"
-        result += f"   • **Average Color:** {photo.get('avg_color', 'N/A')}\n\n"
 
-    # Add next page info if available
     if data.get("next_page"):
-        result += (
-            f"*More results available - use page {page + 1} to see additional photos*\n"
-        )
-
-    # Attribution reminder
-    result += "\n**Attribution Requirements:**\n"
-    result += "• Always credit the photographer when using these images\n"
-    result += "• Include a link back to Pexels (https://www.pexels.com)\n"
-    result += "• Example: 'Photo by [Photographer Name] on Pexels'\n\n"
-
-    # Final strong instruction for image display
-    result += "🚨 **REMINDER: DISPLAY THE IMAGES USING THE ![alt](url) FORMAT FROM THE IMAGE PREVIEW SECTIONS ABOVE!** 🚨\n"
-    result += "**DO NOT just provide download links - USE THE MARKDOWN IMAGE FORMAT TO SHOW IMAGES IN CHAT!**\n"
-
+        result += f"\nMore results are available on page {page + 1}.\n"
+    result += (
+        "\nAttribution: credit the photographer and Pexels when using these photos "
+        "(e.g. 'Photo by <name> on Pexels').\n"
+    )
     return result
 
 
 def format_video_results(data: Dict[str, Any], query: str) -> str:
-    """Format video search results into a readable string."""
-    videos = data.get("videos", [])
-    total_results = data.get("total_results", 0)
-    page = data.get("page", 1)
+    """Compact text for the LLM (previews are shown in the gallery embed)."""
+    videos = data.get("videos", []) or []
+    total_results = data.get("total_results", 0) or 0
+    page = data.get("page", 1) or 1
 
     if not videos:
         return f"No videos found for query: '{query}'"
 
-    result = f"**Pexels Video Search Results for '{query}'**\n"
-    result += f"Found {total_results:,} total results (Page {page}, showing {len(videos)} videos)\n\n"
-
-    # Add Pexels attribution as required by their API guidelines
-    result += "🎬 **Videos provided by [Pexels](https://www.pexels.com)**\n\n"
-
+    result = (
+        f"Pexels videos for '{query}': showing {len(videos)} of {total_results:,} "
+        f"(page {page}). Preview thumbnails linking to each video page are already "
+        "displayed to the user; do not repeat them as markdown images or links.\n\n"
+    )
     for i, video in enumerate(videos, 1):
-        result += f"**{i}. Video by {video['user']['name']}**\n"
-        result += f"   • **Duration:** {video['duration']} seconds\n"
-        result += f"   • **Dimensions:** {video['width']} × {video['height']} pixels\n"
-        result += f"   • **Videographer:** [{video['user']['name']}]({video['user']['url']})\n"
-        result += f"   • **Pexels Page:** [View Video]({video['url']})\n"
-        result += f"   • **Preview Image:** [View]({video['image']})\n"
-        result += "   • **Download URLs:**\n"
-
-        # Sort video files by quality (HD first, then SD)
-        video_files = sorted(
-            video["video_files"],
-            key=lambda x: (x["quality"] == "hd", x.get("width", 0)),
-            reverse=True,
-        )
-
-        for vf in video_files[:3]:  # Show top 3 quality options
-            quality = (
-                vf.get("quality", "unknown").upper() if vf.get("quality") else "UNKNOWN"
-            )
-            if vf.get("width") and vf.get("height"):
-                result += f"     - **{quality} ({vf['width']}×{vf['height']}):** [Download]({vf['link']})\n"
-            else:
-                result += f"     - **{quality}:** [Download]({vf['link']})\n"
-
-        result += f"   • **Video ID:** {video['id']}\n\n"
-
-    # Add next page info if available
-    if data.get("next_page"):
+        user = video.get("user") or {}
         result += (
-            f"*More results available - use page {page + 1} to see additional videos*\n"
+            f"{i}. Video by {user.get('name') or 'Unknown'} - {video.get('duration', '?')}s "
+            f"({video.get('width', '?')}x{video.get('height', '?')}) - ID {video.get('id', '?')} "
+            f"- {video.get('url', '')}\n"
         )
 
-    # Attribution reminder
-    result += "\n**Attribution Requirements:**\n"
-    result += "• Always credit the videographer when using these videos\n"
-    result += "• Include a link back to Pexels (https://www.pexels.com)\n"
-    result += "• Example: 'Video by [Videographer Name] on Pexels'\n"
-
+    if data.get("next_page"):
+        result += f"\nMore results are available on page {page + 1}.\n"
+    result += (
+        "\nAttribution: credit the videographer and Pexels when using these videos "
+        "(e.g. 'Video by <name> on Pexels').\n"
+    )
     return result
+
+
+def photo_gallery(data: Dict[str, Any], title: str) -> str:
+    items = []
+    for photo in data.get("photos", []) or []:
+        src = photo.get("src") or {}
+        photographer = photo.get("photographer") or "Unknown"
+        items.append(
+            {
+                "image": src.get("large") or src.get("medium") or src.get("large2x"),
+                "link": photo.get("url"),
+                "alt": photo.get("alt") or f"Photo by {photographer}",
+                "caption": f"Photo by {photographer}",
+                "caption_url": photo.get("photographer_url"),
+            }
+        )
+    return search_gallery_embed(
+        items, title=title, footer="Photos provided by Pexels", footer_url="https://www.pexels.com"
+    )
+
+
+def video_gallery(data: Dict[str, Any], title: str) -> str:
+    items = []
+    for video in data.get("videos", []) or []:
+        user = video.get("user") or {}
+        name = user.get("name") or "Unknown"
+        duration = video.get("duration")
+        items.append(
+            {
+                "image": video.get("image"),
+                "link": video.get("url"),
+                "alt": f"Video by {name}",
+                "badge": f"{duration}s" if duration is not None else None,
+                "caption": f"Video by {name}",
+                "caption_url": user.get("url"),
+            }
+        )
+    return search_gallery_embed(
+        items, title=title, footer="Videos provided by Pexels", footer_url="https://www.pexels.com"
+    )
 
 
 class Tools:
@@ -239,7 +382,7 @@ class Tools:
         page: int = 1,
         __user__: Optional[Dict[str, Any]] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Search Pexels for high-quality photos matching the query.
 
@@ -253,7 +396,7 @@ class Tools:
             page: Page number for pagination (default 1)
 
         Returns:
-            Formatted string containing photo details with URLs and attribution info
+            Photos shown to the user in an inline gallery, plus a short list (photographer, description, Pexels page) for you
         """
 
         # Validate API key
@@ -332,10 +475,14 @@ class Tools:
                 for photo in data["photos"]:
                     await emit_citation(
                         __event_emitter__,
-                        f"Photo by {photo['photographer']} on Pexels - {photo['alt'] or 'No description available'}",
+                        f"Photo by {photo['photographer']} on Pexels - {photo.get('alt') or 'No description available'}",
                         photo["url"],
                         f"Pexels Photo by {photo['photographer']}",
                     )
+
+                return gallery_response(
+                    photo_gallery(data, f"Pexels photos: {query}"), result
+                )
 
             return result
 
@@ -356,7 +503,7 @@ class Tools:
         page: int = 1,
         __user__: Optional[Dict[str, Any]] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Get curated photos from Pexels - trending, high-quality photos selected by the Pexels team.
 
@@ -365,7 +512,7 @@ class Tools:
             page: Page number for pagination (default 1)
 
         Returns:
-            Formatted string containing curated photo details with URLs and attribution info
+            Curated photos shown to the user in an inline gallery, plus a short list for you
         """
 
         # Validate API key
@@ -428,10 +575,14 @@ class Tools:
                 for photo in data["photos"]:
                     await emit_citation(
                         __event_emitter__,
-                        f"Curated photo by {photo['photographer']} on Pexels - {photo['alt'] or 'No description available'}",
+                        f"Curated photo by {photo['photographer']} on Pexels - {photo.get('alt') or 'No description available'}",
                         photo["url"],
                         f"Pexels Curated Photo by {photo['photographer']}",
                     )
+
+                return gallery_response(
+                    photo_gallery(data, "Pexels curated photos"), result
+                )
 
             return result
 
@@ -451,7 +602,7 @@ class Tools:
         per_page: Optional[int] = None,
         __user__: Optional[Dict[str, Any]] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Search for stock videos on Pexels.
 
@@ -464,7 +615,7 @@ class Tools:
             per_page: Number of videos per page (default from valves, max 15 recommended for LLMs)
 
         Returns:
-            Formatted video search results with download URLs
+            Video previews shown to the user in an inline gallery, plus a short list (videographer, duration, ID, Pexels page) for you
         """
         # Check API key
         error_msg = validate_api_key(self.valves.PEXELS_API_KEY)
@@ -540,7 +691,12 @@ class Tools:
                                 f"Pexels Video by {video['user']['name']}",
                             )
 
-                    return format_video_results(data, query)
+                    result = format_video_results(data, query)
+                    if data.get("videos"):
+                        return gallery_response(
+                            video_gallery(data, f"Pexels videos: {query}"), result
+                        )
+                    return result
 
         except aiohttp.ClientError as e:
             error_msg = f"Network error while searching videos: {str(e)}"

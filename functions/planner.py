@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.2.2
+version: 2.2.3
 required_open_webui_version: 0.9.1
 """
 
@@ -23,8 +23,32 @@ from open_webui.utils.tools import get_tools  # type: ignore
 from open_webui.models.users import Users, User
 from open_webui.models.tools import Tools
 
+try:
+    from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL  # type: ignore
+except Exception:  # pragma: no cover - fail closed if the setting is unavailable
+    BYPASS_ADMIN_ACCESS_CONTROL = False
+
 
 name = "Planner"
+
+
+def ensure_completion_dict(response: Any) -> dict[str, Any]:
+    """OWUI returns upstream errors as a Response object instead of raising.
+    Turn anything that is not an OpenAI-style dict into a readable error."""
+    if isinstance(response, dict) and response.get("choices"):
+        return response
+    if isinstance(response, dict):
+        detail = response.get("error") or response.get("detail") or response
+        raise RuntimeError(f"Model returned no choices: {str(detail)[:500]}")
+    body = getattr(response, "body", None)
+    if isinstance(body, (bytes, bytearray)):
+        detail = body.decode("utf-8", "replace")
+    elif body is not None:
+        detail = str(body)
+    else:
+        detail = type(response).__name__
+    status = getattr(response, "status_code", "?")
+    raise RuntimeError(f"Model call failed (HTTP {status}): {detail[:500]}")
 
 
 def setup_logger():
@@ -564,6 +588,7 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                 "messages": messages,
                 "temperature": temperature,
                 "tools": _tools,
+                "stream": False,
             }
             logger.debug(f"{_tools}")
             if format and not tools:
@@ -573,6 +598,7 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                 form_data,
                 user=self.__user__,
             )
+            response = ensure_completion_dict(response)
             response_content = response["choices"][0]["message"].get("content", "")
             tool_calls: list[dict[str, Any]] | None = None
             logger.debug(f"{tool_calls}")
@@ -883,16 +909,47 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
 
         return "\n".join(mermaid)
 
+    async def get_accessible_tools(self) -> list[Any]:
+        """List only the workspace tools the current user may read.
+
+        Mirrors OWUI's /api/v1/tools listing: admins with
+        BYPASS_ADMIN_ACCESS_CONTROL see everything, everyone else gets their
+        own tools plus tools shared with them (user/group/public read grants).
+        Fails closed (empty list) if the user cannot be resolved.
+        """
+        user = getattr(self, "__user__", None)
+        user_id = getattr(user, "id", None)
+        if not user_id:
+            logger.warning("Planner: no user resolved; exposing no tools")
+            return []
+        if getattr(user, "role", None) == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
+            return list(await Tools.get_tools(defer_content=True))
+        try:
+            return list(
+                await Tools.get_tools_by_user_id(
+                    user_id, permission="read", defer_content=True
+                )
+            )
+        except Exception as e:
+            logger.error(f"Planner: failed to list accessible tools: {e}")
+            return []
+
+    def _tool_catalogue(self, tools_list: list[Any]) -> list[dict[str, Any]]:
+        catalogue: list[dict[str, Any]] = []
+        for tool in tools_list:
+            meta = getattr(tool, "meta", None)
+            catalogue.append(
+                {
+                    "tool_id": tool.id,
+                    "tool_name": tool.name,
+                    "tool_description": getattr(meta, "description", None) or "",
+                }
+            )
+        return catalogue
+
     async def create_plan(self, goal: str) -> Plan:
-        tools_list = await Tools.get_tools()
-        tools: list[dict[str, Any]] = [
-            {
-                "tool_id": tool.id,
-                "tool_name": tool.name,
-                "tool_description": tool.meta.description,
-            }
-            for tool in tools_list
-        ]
+        tools_list = await self.get_accessible_tools()
+        tools: list[dict[str, Any]] = self._tool_catalogue(tools_list)
         """Create an execution plan for the given goal"""
         system_prompt = f"""
 You are an expert planning agent. Your task is to create a logical and efficient execution plan to achieve a user's goal.
@@ -1296,15 +1353,8 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
             "info", "Starting tool validation for plan actions...", False
         )
 
-        tools_list = await Tools.get_tools()
-        tools: list[dict[str, Any]] = [
-            {
-                "tool_id": tool.id,
-                "tool_name": tool.name,
-                "tool_description": tool.meta.description,
-            }
-            for tool in tools_list
-        ]
+        tools_list = await self.get_accessible_tools()
+        tools: list[dict[str, Any]] = self._tool_catalogue(tools_list)
 
         actions_needing_tools = [
             action
@@ -2984,6 +3034,7 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,
             )
+            response = ensure_completion_dict(response)
             return f"{name}: {response['choices'][0]['message']['content']}"
 
         self.__current_event_emitter__ = __event_emitter__  # type: ignore

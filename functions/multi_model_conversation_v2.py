@@ -3,7 +3,7 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.9.4
+version: 2.9.5
 required_open_webui_version: 0.11.0
 """
 
@@ -25,6 +25,24 @@ from open_webui.utils.middleware import process_tool_result
 from open_webui.utils.chat import (
     generate_chat_completion as generate_raw_chat_completion,
 )
+from open_webui.models.chats import Chats
+
+try:  # OWUI >= 0.12: moves tool images to managed storage and links them to the chat
+    from open_webui.utils.middleware import store_tool_result_image
+except ImportError:  # pragma: no cover - older OWUI keeps images inline
+    store_tool_result_image = None
+
+try:
+    from open_webui.utils.chat_id import is_saved_chat_id
+except ImportError:  # pragma: no cover - older OWUI
+
+    def is_saved_chat_id(chat_id) -> bool:
+        return bool(chat_id) and not str(chat_id).startswith(
+            ("temporary:", "local:", "channel:")
+        )
+
+
+FILE_CONTENT_URL_RE = re.compile(r"/api/v1/files/([^/?#]+)/content")
 
 name = "Conversation"
 
@@ -839,6 +857,10 @@ return (function() {
             result_str = tool_return[0] if len(tool_return) > 0 else ""
             result_files = tool_return[1] if len(tool_return) > 1 else None
             result_embeds = tool_return[2] if len(tool_return) > 2 else None
+            # Move extracted base64 images to managed storage so the saved
+            # <details> tag carries a file URL instead of the raw image data
+            if result_files:
+                result_files = await self._store_tool_files(result_files)
 
             # Replace executing tag with completed tag
             total_emitted = total_emitted.replace(executing_tag, "")
@@ -864,20 +886,155 @@ return (function() {
             )
         return results, total_emitted
 
+    async def _store_tool_files(self, files: list) -> list:
+        """Store data-URI images in OWUI storage (linked to this chat message)."""
+        stored = []
+        for file_item in files:
+            if not isinstance(file_item, dict):
+                continue
+            file_item = dict(file_item)
+            url = file_item.get("url")
+            if (
+                store_tool_result_image is not None
+                and file_item.get("type") == "image"
+                and isinstance(url, str)
+                and url.startswith("data:")
+            ):
+                try:
+                    file_item["url"] = await store_tool_result_image(
+                        self.__request__, url, self.__metadata__, self.__user__
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not store tool image, keeping inline: {e}")
+            stored.append(file_item)
+        return stored
+
+    async def _link_files_to_chat(self, files: list) -> None:
+        """Link already-uploaded files (by id or /api/v1/files/<id>/content URL) to the chat."""
+        chat_id = self.__metadata__.get("chat_id")
+        message_id = self.__metadata__.get("message_id")
+        if not (is_saved_chat_id(chat_id) and message_id and self.__user__):
+            return
+        file_ids = []
+        for file_item in files:
+            file_id = file_item.get("id") if isinstance(file_item.get("id"), str) else None
+            if not file_id and isinstance(file_item.get("url"), str):
+                match = FILE_CONTENT_URL_RE.search(file_item["url"])
+                file_id = match.group(1) if match else None
+            if file_id:
+                file_ids.append(file_id)
+        if not file_ids:
+            return
+        try:
+            # Skips ids already linked and ids the user cannot read
+            await Chats.insert_chat_files(
+                chat_id, message_id, file_ids, self.__user__.id
+            )
+        except Exception as e:
+            logger.debug(f"Could not link tool files to chat: {e}")
+
+    @staticmethod
+    def get_response_content(response) -> str:
+        """OWUI >= 0.12 returns upstream errors as a Response object (not a dict)."""
+        if not isinstance(response, dict):
+            body = getattr(response, "body", b"") or b""
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Completion failed ({getattr(response, 'status_code', 'unknown')}): {str(body)[:500]}"
+            )
+        if response.get("error"):
+            raise RuntimeError(f"Completion failed: {response['error']}")
+        choices = response.get("choices") or [{}]
+        return (choices[0].get("message") or {}).get("content") or ""
+
+    @staticmethod
+    def _tool_file_key(file_item) -> Optional[str]:
+        """Identity of a file entry: its id, or else its url."""
+        if not isinstance(file_item, dict):
+            return None
+        for field in ("id", "url"):
+            value = file_item.get(field)
+            if isinstance(value, str) and value:
+                return f"{field}:{value}"
+        return None
+
     async def _emit_accumulated_tool_files(self):
-        """Emit a single combined chat:message:files event with all accumulated tool files."""
-        if self._accumulated_tool_files and self.__current_event_emitter__:
+        """Persist the files participant tools produced on this message, then show them.
+
+        'chat:message:files' only updates the live UI (OWUI never saves it for
+        normal chats), so store base64 images, link the files to the chat and add
+        them to the message in the DB first, as OWUI's own middleware does.
+        Some tools (OWUI's builtin generate_image/edit_image, user_input_tool_set)
+        already save their files and then emit the FULL saved list, so only the
+        entries not yet on the message are added.
+        """
+        if not self._accumulated_tool_files:
+            return
+        captured = self._accumulated_tool_files
+        # Clear first so the next participant doesn't re-emit previous files
+        self._accumulated_tool_files = []
+
+        chat_id = self.__metadata__.get("chat_id")
+        message_id = self.__metadata__.get("message_id")
+        saved_chat = bool(is_saved_chat_id(chat_id) and message_id)
+
+        current_files = None
+        seen = set()
+        if saved_chat:
+            try:
+                message = await Chats.get_message_by_id_and_message_id(
+                    chat_id, message_id
+                )
+                current_files = list((message or {}).get("files") or [])
+            except Exception as e:
+                logger.debug(f"Could not read the message's files: {e}")
+            for existing in current_files or []:
+                key = self._tool_file_key(existing)
+                if key:
+                    seen.add(key)
+
+        new_items = []
+        for file_item in captured:
+            key = self._tool_file_key(file_item)
+            if key is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
+            new_items.append(file_item)
+
+        files = await self._store_tool_files(new_items) if new_items else []
+        message_files = files
+        if saved_chat:
+            message_files = current_files if current_files is not None else []
+            if files:
+                await self._link_files_to_chat(files)
+                try:
+                    saved = await Chats.add_message_files_by_id_and_message_id(
+                        chat_id, message_id, files
+                    )
+                    # Full list: the UI replaces message.files for saved chats
+                    message_files = (
+                        saved if saved is not None else message_files + files
+                    )
+                except Exception as e:
+                    logger.error(f"Could not save tool files to the message: {e}")
+                    message_files = message_files + files
+
+        if not message_files:
+            return
+
+        if self.__current_event_emitter__:
+            # Not 'files': the socket emitter would save these a second time
             await self.__current_event_emitter__(
                 {
                     "type": "chat:message:files",
-                    "data": {"files": list(self._accumulated_tool_files)},
+                    "data": {"files": message_files},
                 }
             )
             logger.debug(
-                f"Emitted combined chat:message:files with {len(self._accumulated_tool_files)} file(s)"
+                f"Persisted {len(files)} new tool file(s), emitted {len(message_files)}"
             )
-            # Clear after emitting so the next participant doesn't re-emit previous files
-            self._accumulated_tool_files = []
 
     async def emit_message(self, message: str):
         if self.__current_event_emitter__:
@@ -991,12 +1148,16 @@ return (function() {
             # Adapt history for the target model to ensure strictly alternating turns
             adapted_task_history = self._adapt_history(conversation_history, target_alias)
             
-            response = await generate_chat_completions(
-                self.__request__,
-                {"model": target_model, "messages": adapted_task_history, "stream": False},
-                user=self.__user__,
-            )
-            return f"{name}: {response['choices'][0]['message']['content']}"
+            try:
+                response = await generate_chat_completions(
+                    self.__request__,
+                    {"model": target_model, "messages": adapted_task_history, "stream": False},
+                    user=self.__user__,
+                )
+                return f"{name}: {self.get_response_content(response)}"
+            except Exception as e:
+                logger.error(f"Error processing task {__task__}: {e}")
+                return f"{name}: Error processing {__task__}"
 
         # 1. Determine Configuration
         config = self._extract_config_from_metadata(body)
@@ -1056,8 +1217,11 @@ return (function() {
 
         async def _tool_event_proxy(event):
             event_type = event.get("type", "")
-            if event_type == "chat:message:files":
-                files = event.get("data", {}).get("files", [])
+            if event_type in ("chat:message:files", "files"):
+                # Collected and persisted once per tool round by
+                # _emit_accumulated_tool_files (a raw 'files' event would make
+                # the UI replace the message's earlier files with just these)
+                files = (event.get("data") or {}).get("files") or []
                 self._accumulated_tool_files.extend(files)
                 logger.debug(
                     f"Captured {len(files)} file(s) from tool, "
@@ -1398,9 +1562,9 @@ return (function() {
                             },
                             user=self.__user__,
                         )
-                        selected_alias = manager_response["choices"][0]["message"][
-                            "content"
-                        ].strip()
+                        selected_alias = self.get_response_content(
+                            manager_response
+                        ).strip()
                     except Exception as e:
                         logger.error(f"Manager failed to select: {e}")
                         selected_alias = ""

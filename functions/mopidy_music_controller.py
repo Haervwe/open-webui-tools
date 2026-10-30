@@ -3,7 +3,7 @@ title: Mopidy_Music_Controller
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.7.3
+version: 0.7.4
 required_open_webui_version: 0.9.1
 description: A pipe to control Mopidy music server to play songs from local library or YouTube, manage playlists, and handle various music commands. Requires Mopidy-Iris UI to be installed for the player interface.
 needs a Local and/or a Youtube API endpoint configured in mopidy.
@@ -115,6 +115,21 @@ class Pipe:
     def pipes(self) -> List[Dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
 
+    @staticmethod
+    def get_response_content(response) -> str:
+        """OWUI >= 0.12 returns upstream errors as a Response object (not a dict)."""
+        if not isinstance(response, dict):
+            body = getattr(response, "body", b"") or b""
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Completion failed ({getattr(response, 'status_code', 'unknown')}): {str(body)[:500]}"
+            )
+        if response.get("error"):
+            raise RuntimeError(f"Completion failed: {response['error']}")
+        choices = response.get("choices") or [{}]
+        return (choices[0].get("message") or {}).get("content") or ""
+
     async def emit_message(self, message: str):
         # Collected and returned by pipe(): OWUI >= 0.12 replaces the reply with
         # the pipe output on completion, so "message" events alone get wiped.
@@ -218,12 +233,12 @@ class Pipe:
             padding: 0;
             box-sizing: border-box;
         }}
-        body {{
+        html, body {{
             background: #000;
             overflow: hidden;
-            height: 100vh;
         }}
         iframe {{
+            display: block;
             width: 100%;
             height: 800px;
             min-height: 800px;
@@ -233,6 +248,27 @@ class Pipe:
 </head>
 <body>
     <iframe src="{iris_full_url}" allow="autoplay; clipboard-write" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
+    <script>
+        // Open WebUI cannot measure a sandboxed (cross-origin) embed, so report
+        // our height to the parent FullHeightIframe or the player gets clipped.
+        (function () {{
+            function reportHeight() {{
+                var h = Math.max(
+                    document.documentElement.scrollHeight || 0,
+                    document.body ? document.body.scrollHeight : 0
+                );
+                try {{
+                    window.parent.postMessage({{ type: "iframe:height", height: h }}, "*");
+                }} catch (e) {{}}
+            }}
+            window.addEventListener("load", reportHeight);
+            window.addEventListener("resize", reportHeight);
+            if (window.ResizeObserver) {{
+                new ResizeObserver(reportHeight).observe(document.body);
+            }}
+            reportHeight();
+        }})();
+    </script>
 </body>
 </html>"""
         return html
@@ -388,7 +424,7 @@ class Pipe:
                 },
                 user=self.__user__,
             )
-            content = response["choices"][0]["message"]["content"].strip()
+            content = self.get_response_content(response).strip()
             if self.valves.Debug_Logging:
                 logger.debug(f"LLM selected playlist: {content}")
             cleaned_content = content.replace('"', "").replace("'", "").strip().lower()
@@ -780,7 +816,7 @@ class Pipe:
                     user=self.__user__,
                 )
 
-                content = response["choices"][0]["message"]["content"]
+                content = self.get_response_content(response)
                 if self.valves.Debug_Logging:
                     logger.debug(f"LLM response (raw): {content}")
                 content = clean_thinking_tags(content)
@@ -1153,16 +1189,20 @@ class Pipe:
         if not self.__model__:
             return "No model configured: set the Model valve or an Open WebUI task model."
         if __task__ and __task__ != TASKS.DEFAULT:
-            response = await generate_chat_completions(
-                self.__request__,
-                {
-                    "model": self.__model__,
-                    "messages": body.get("messages"),
-                    "stream": False,
-                },
-                user=self.__user__,
-            )
-            return f"{name}: {response['choices'][0]['message']['content']}"
+            try:
+                response = await generate_chat_completions(
+                    self.__request__,
+                    {
+                        "model": self.__model__,
+                        "messages": body.get("messages"),
+                        "stream": False,
+                    },
+                    user=self.__user__,
+                )
+                return f"{name}: {self.get_response_content(response)}"
+            except Exception as e:
+                logger.error(f"Error processing task {__task__}: {e}")
+                return f"{name}: Error processing {__task__}"
 
         user_input = body.get("messages", [])[-1].get("content", "").strip()
         if self.valves.Debug_Logging:

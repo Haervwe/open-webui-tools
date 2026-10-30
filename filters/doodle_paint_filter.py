@@ -4,7 +4,7 @@ description: Toggleable filter that opens a paint canvas before sending each mes
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.2.1
+version: 1.3.0
 license: MIT
 required_open_webui_version: 0.9.1
 """
@@ -13,18 +13,168 @@ import open_webui.models.messages
 import logging
 import uuid
 import base64
+import binascii
 import io
+import re
 from pydantic import BaseModel, Field
-from typing import Callable, Awaitable, Any, Optional
+from typing import Callable, Awaitable, Any, Dict, Optional
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
+from starlette.datastructures import Headers
 from open_webui.constants import TASKS
 from open_webui.models.chats import Chats
-from open_webui.models.users import Users
+from open_webui.models.users import UserModel, Users
 from open_webui.routers.files import upload_file_handler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("doodle_paint")
+
+
+# --- Open WebUI storage helpers (adapted from the repo's canonical media
+# storage helpers for v0.12.5; plugins are single files, so they live here) ---
+
+# Mirrors open_webui.utils.chat_id: these chat ids are not saved chats.
+TEMPORARY_CHAT_ID_PREFIXES = ("temporary:", "local:")
+CHANNEL_CHAT_ID_PREFIX = "channel:"
+NON_SAVED_CHAT_ID_PREFIXES = (*TEMPORARY_CHAT_ID_PREFIXES, CHANNEL_CHAT_ID_PREFIX)
+
+# The canvas exports PNG; only accept raster image types we can name safely.
+DOODLE_EXTENSIONS = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+
+
+class MediaStorageError(Exception):
+    """Saving the doodle failed. ``str(exc)`` is safe to log/show."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def is_saved_chat_id(chat_id: Any) -> bool:
+    """True for a persisted chat (not temporary/local/channel)."""
+    return (
+        isinstance(chat_id, str)
+        and bool(chat_id)
+        and not chat_id.startswith(NON_SAVED_CHAT_ID_PREFIXES)
+    )
+
+
+async def resolve_user(user: Any) -> Optional[UserModel]:
+    """Accept the ``__user__`` dict (or a UserModel) and return a UserModel."""
+    if isinstance(user, UserModel):
+        return user
+    user_id = user.get("id") if isinstance(user, dict) else getattr(user, "id", None)
+    if not user_id:
+        return None
+    try:
+        return await Users.get_user_by_id(user_id)
+    except Exception as exc:
+        logger.warning("Doodle Paint: could not resolve user (%s)", type(exc).__name__)
+        return None
+
+
+def _upload_metadata(chat_id: Optional[str], message_id: Optional[str]) -> dict:
+    meta: Dict[str, Any] = {}
+    if chat_id and chat_id.startswith(CHANNEL_CHAT_ID_PREFIX):
+        channel_id = chat_id[len(CHANNEL_CHAT_ID_PREFIX):]
+        if channel_id:
+            meta["channel_id"] = channel_id  # upload_file_handler adds it to the channel
+    elif chat_id:
+        meta["chat_id"] = chat_id
+    if message_id:
+        meta["message_id"] = message_id
+    return meta
+
+
+async def save_media_bytes(
+    data: bytes,
+    *,
+    request: Any,
+    user: Any,
+    content_type: str,
+    filename: str,
+    chat_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Store ``data`` with upload_file_handler (process=False) and, for a saved
+    chat, link it with ``Chats.insert_chat_files`` so shared-chat viewers can
+    read it. Raises MediaStorageError on failure (never a silent fallback)."""
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        raise MediaStorageError("The doodle is empty.")
+    if request is None:
+        raise MediaStorageError("Open WebUI request context is unavailable.")
+    user_model = await resolve_user(user)
+    if user_model is None:
+        raise MediaStorageError("The requesting Open WebUI user could not be resolved.")
+
+    upload = UploadFile(
+        file=io.BytesIO(bytes(data)),
+        filename=filename,
+        headers=Headers({"content-type": content_type}),
+    )
+    try:
+        file_item = await upload_file_handler(
+            request,
+            file=upload,
+            metadata=_upload_metadata(chat_id, message_id),
+            process=False,
+            user=user_model,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 413:
+            detail = exc.detail if isinstance(exc.detail, str) else ""
+            limit = re.search(r"less than ([0-9.]+ ?MB)", detail or "")
+            raise MediaStorageError(
+                "The doodle ({:.1f} MB) exceeds Open WebUI's upload size limit{}. "
+                "Ask an admin to raise Admin Settings > Documents > Max Upload Size.".format(
+                    len(data) / (1024 * 1024), f" ({limit.group(1)})" if limit else ""
+                ),
+                status_code=413,
+            ) from None
+        raise MediaStorageError(
+            f"Open WebUI rejected the file (HTTP {exc.status_code}).",
+            status_code=exc.status_code,
+        ) from None
+    except Exception as exc:
+        logger.exception("Doodle Paint: upload_file_handler failed")
+        raise MediaStorageError(
+            f"Saving the doodle to Open WebUI failed ({type(exc).__name__})."
+        ) from None
+
+    if isinstance(file_item, dict):
+        file_id = file_item.get("id")
+    else:
+        file_id = getattr(file_item, "id", None)
+    if not isinstance(file_id, str) or not file_id:
+        raise MediaStorageError("Open WebUI did not return a file ID.")
+
+    linked = False
+    if is_saved_chat_id(chat_id) and message_id:
+        try:
+            linked = bool(
+                await Chats.insert_chat_files(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    file_ids=[file_id],
+                    user_id=user_model.id,
+                )
+            )
+        except Exception as exc:  # not fatal: the owner can still read the file
+            logger.warning("Doodle Paint: could not link file to chat (%s)", type(exc).__name__)
+
+    return {
+        "id": file_id,
+        "url": f"/api/v1/files/{file_id}/content",
+        "name": filename,
+        "content_type": content_type,
+        "size": len(data),
+        "linked": linked,
+    }
 
 
 class Filter:
@@ -340,59 +490,62 @@ return (function() {{
 """
 
     async def _save_doodle_file(
-        self, data_url: str, user_id: str, request: Any
+        self,
+        data_url: str,
+        user: Any,
+        request: Any,
+        chat_id: Optional[str] = None,
+        message_id: Optional[str] = None,
     ) -> Optional[dict]:
         """
-        Save a doodle data-URL as a file using OWUI's upload_file_handler.
+        Save a doodle data-URL in OWUI storage (upload_file_handler) and link it
+        to the chat's user message (chat_file row) for saved chats.
 
         Returns a file entry dict suitable for message.files[], or None on
         failure.
         """
-        # Parse the data URL  →  "data:image/png;base64,<payload>"
+        # Parse the data URL  ->  "data:image/png;base64,<payload>"
         try:
             header, b64_data = data_url.split(",", 1)
         except ValueError:
             logger.warning("Doodle Paint: malformed data URL")
             return None
 
-        # Determine content type from header
+        # Determine content type from header (raster images only)
         content_type = "image/png"
-        if "image/" in header:
-            ct_part = header.split("image/")[1].split(";")[0]
-            content_type = f"image/{ct_part}"
+        match = re.match(r"^data:(image/[a-z0-9.+-]+)", header.strip().lower())
+        if match and match.group(1) in DOODLE_EXTENSIONS:
+            content_type = match.group(1)
+        extension = DOODLE_EXTENSIONS[content_type]
 
-        extension = content_type.split("/")[1]  # e.g. "png"
-        raw_bytes = base64.b64decode(b64_data)
+        try:
+            raw_bytes = base64.b64decode(b64_data, validate=False)
+        except (binascii.Error, ValueError):
+            logger.warning("Doodle Paint: invalid base64 payload")
+            return None
         filename = f"doodle_{uuid.uuid4().hex[:8]}.{extension}"
 
-        # Upload via OWUI's native handler (same as all other tools)
-        user = await Users.get_user_by_id(user_id)
-        if not user:
-            logger.error("Doodle Paint: could not resolve user")
+        try:
+            saved = await save_media_bytes(
+                raw_bytes,
+                request=request,
+                user=user,
+                content_type=content_type,
+                filename=filename,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+        except MediaStorageError as exc:
+            logger.error(f"Doodle Paint: {exc}")
             return None
 
-        file = UploadFile(
-            file=io.BytesIO(raw_bytes),
-            filename=filename,
-            headers={"content-type": content_type},
-        )
-        file_item = await upload_file_handler(
-            request=request, file=file, metadata={}, process=False, user=user
-        )
-
-        file_id = getattr(file_item, "id", None)
-        if not file_id:
-            logger.error("Doodle Paint: upload_file_handler returned no id")
-            return None
-
-        file_id = str(file_id)
         return {
             "type": "image",
-            "url": f"/api/v1/files/{file_id}/content",
-            "id": file_id,
-            "name": filename,
-            "content_type": content_type,
-            "size": len(raw_bytes),
+            "url": saved["url"],
+            "id": saved["id"],
+            "name": saved["name"],
+            "content_type": saved["content_type"],
+            "size": saved["size"],
         }
 
     async def inlet(
@@ -404,6 +557,7 @@ return (function() {{
         __model__: Optional[dict] = None,
         __request__: Optional[Any] = None,
         __chat_id__: Optional[str] = None,
+        __metadata__: Optional[dict] = None,
         __task__=None,
     ) -> dict:
         # Skip non-default tasks (title generation, search queries, etc.)
@@ -455,32 +609,44 @@ return (function() {{
         logger.info(f"Doodle Paint: image attached ({len(data_url)} chars)")
 
         # --- Save the doodle as a file in OWUI storage ---
-        user_id = __user__.get("id", "") if __user__ else ""
+        meta = __metadata__ if isinstance(__metadata__, dict) else {}
+        chat_id = __chat_id__ or meta.get("chat_id")
+        body_messages = body.get("messages") or []
+        last_msg = body_messages[-1] if body_messages else {}
+        # The doodle belongs to the user's message: prefer its id from the
+        # body, else the user_message_id core puts in the metadata.
+        user_msg_id = None
+        if isinstance(last_msg, dict) and last_msg.get("role") == "user":
+            user_msg_id = last_msg.get("id")
+        user_msg_id = user_msg_id or meta.get("user_message_id")
         file_entry = None
 
-        if user_id and __request__:
+        if __user__ and __request__:
             try:
-                file_entry = await self._save_doodle_file(data_url, user_id, __request__)
+                file_entry = await self._save_doodle_file(
+                    data_url,
+                    __user__,
+                    __request__,
+                    chat_id=chat_id,
+                    message_id=user_msg_id,
+                )
                 if file_entry:
                     logger.info(f"Doodle Paint: file saved (id={file_entry['id']})")
-                    
-                    if __chat_id__:
-                        messages = body.get("messages", [])
-                        if messages:
-                            last_msg = messages[-1]
-                            last_msg_id = last_msg.get("id")
-                            if last_msg_id:
-                                try:
-                                    await Chats.add_message_files_by_id_and_message_id(
-                                        __chat_id__,
-                                        last_msg_id,
-                                        [file_entry],
-                                    )
-                                    logger.info(f"Doodle Paint: file persisted to message {last_msg_id}")
-                                except Exception as e:
-                                    logger.error(f"Doodle Paint: failed to persist to chat {__chat_id__} message {last_msg_id}: {e}")
+
+                    if is_saved_chat_id(chat_id) and user_msg_id:
+                        try:
+                            await Chats.add_message_files_by_id_and_message_id(
+                                chat_id,
+                                user_msg_id,
+                                [file_entry],
+                            )
+                            logger.info(f"Doodle Paint: file persisted to message {user_msg_id}")
+                        except Exception as e:
+                            logger.error(
+                                f"Doodle Paint: failed to persist to chat {chat_id} message {user_msg_id}: {type(e).__name__}"
+                            )
             except Exception as e:
-                logger.error(f"Doodle Paint: failed to save file: {e}")
+                logger.error(f"Doodle Paint: failed to save file: {type(e).__name__}: {e}")
 
         # Inject the image into the last user message as multimodal content
         # This ensures the LLM sees the image on the current request

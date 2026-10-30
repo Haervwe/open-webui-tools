@@ -3,11 +3,16 @@ title: Full Document Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
+version: 0.2.1
+required_open_webui_version: 0.5.0
 """
 
-from pydantic import BaseModel, Field
+import logging
 import re
+
+from pydantic import BaseModel, Field
+
+log = logging.getLogger(__name__)
 
 
 class Filter:
@@ -42,8 +47,12 @@ class Filter:
         return text.strip()
 
     def inlet(self, body: dict, user=None) -> dict:
-        print(f"inlet:{__name__}")
-        print(f"inlet:body:{body}")
+        # Never log the body: it holds the whole chat and the document text.
+        log.debug(
+            "full_document inlet: %d message(s), %d file(s)",
+            len(body.get("messages") or []),
+            len(body.get("files") or []),
+        )
 
         # Check if files exist
         if body.get("files"):
@@ -56,16 +65,23 @@ class Filter:
                     cleaned_content = self.clean_text(content)
 
                     # Prepend cleaned file content to the first message
-                    original_content = body["messages"][0]["content"]
-                    body["messages"][0][
-                        "content"
-                    ] = f"{cleaned_content}\n\n{original_content}"
+                    original_content = body["messages"][0].get("content", "")
+                    if isinstance(original_content, list):
+                        # Multimodal message: prepend a text part instead of
+                        # stringifying the parts list.
+                        body["messages"][0]["content"] = [
+                            {"type": "text", "text": cleaned_content},
+                            *original_content,
+                        ]
+                    else:
+                        body["messages"][0][
+                            "content"
+                        ] = f"{cleaned_content}\n\n{original_content}"
 
                     # Remove the files from the body
                     body["files"] = []
                     break
 
-        ## print(f"modified body:{body}")
         return body
 
     def outlet(self, body: dict, user=None) -> dict:

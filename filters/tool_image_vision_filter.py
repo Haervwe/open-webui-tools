@@ -3,19 +3,20 @@ title: Tool Image Vision
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.1
+version: 1.1.0
 required_open_webui_version: 0.9.1
 """
 
+import asyncio
 import logging
 import base64
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 from pydantic import BaseModel, Field
 
 from open_webui.models.chats import Chats
 from open_webui.models.files import Files
-from open_webui.config import UPLOAD_DIR
+from open_webui.models.users import Users
+from open_webui.storage.provider import Storage
 from open_webui.constants import TASKS
 
 logger = logging.getLogger(__name__)
@@ -34,27 +35,61 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
 
-    async def get_base64_from_file_id(self, file_id: str) -> Optional[str]:
-        """Resolves a file ID to a base64 data URL."""
+    @staticmethod
+    def _read_bytes(path: str) -> bytes:
+        with open(path, "rb") as f:
+            return f.read()
+
+    async def _can_read_file(self, file: Any, user_id: Optional[str]) -> bool:
+        """Owner, admin, or anyone core's has_access_to_file allows.
+
+        Message ``files`` in the request body come from the client, so a file
+        id there is not proof the caller may read that file."""
+        if not user_id:
+            return False
+        if getattr(file, "user_id", None) == user_id:
+            return True
+        try:
+            user = await Users.get_user_by_id(user_id)
+            if not user:
+                return False
+            if user.role == "admin":
+                return True
+            from open_webui.utils.access_control.files import has_access_to_file
+
+            return bool(await has_access_to_file(file.id, "read", user))
+        except Exception as e:
+            logger.warning(f"ToolImageVisionFilter: access check failed ({type(e).__name__})")
+            return False
+
+    async def get_base64_from_file_id(
+        self, file_id: str, user_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Resolves a file ID to a base64 data URL.
+
+        Reads through Open WebUI's Storage provider (local, S3, GCS, Azure),
+        the same way core's /files/{id}/content does."""
         try:
             file = await Files.get_file_by_id(file_id)
             if not file or not file.path:
                 return None
-            
-            file_path = Path(file.path)
-            if not file_path.is_absolute():
-                file_path = UPLOAD_DIR / file_path
-                
-            if not file_path.exists():
+
+            if not await self._can_read_file(file, user_id):
+                logger.warning(f"ToolImageVisionFilter: no read access to file {file_id}, skipping")
                 return None
-                
-            with open(file_path, "rb") as f:
-                data = f.read()
-                encoded = base64.b64encode(data).decode("utf-8")
-                mime_type = file.meta.get("content_type", "image/png") if file.meta else "image/png"
-                return f"data:{mime_type};base64,{encoded}"
+
+            mime_type = (file.meta or {}).get("content_type") or "image/png"
+            if not str(mime_type).startswith("image/"):
+                return None
+
+            local_path = await asyncio.to_thread(Storage.get_file, file.path)
+            if not local_path:
+                return None
+            data = await asyncio.to_thread(self._read_bytes, local_path)
+            encoded = base64.b64encode(data).decode("utf-8")
+            return f"data:{mime_type};base64,{encoded}"
         except Exception as e:
-            logging.error(f"ToolImageVisionFilter: Failed to resolve base64 for {file_id}: {e}")
+            logger.error(f"ToolImageVisionFilter: Failed to resolve base64 for {file_id}: {type(e).__name__}: {e}")
             return None
 
     async def inlet(
@@ -63,6 +98,7 @@ class Filter:
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __chat_id__: Optional[str] = None,
         __task__: Optional[str] = None,
+        __user__: Optional[dict] = None,
         **kwargs
     ) -> Dict[str, Any]:
         logger.info(f"ToolImageVisionFilter: Ingress - task={__task__}, chat_id={__chat_id__}")
@@ -73,6 +109,8 @@ class Filter:
 
         if not __chat_id__:
             return body
+
+        user_id = __user__.get("id") if isinstance(__user__, dict) else None
 
         # Check for vision support in the model metadata
         metadata = body.get("metadata", {})
@@ -272,7 +310,7 @@ class Filter:
                         continue
 
                     # Resolve to base64 for LLM perception
-                    base64_url = await self.get_base64_from_file_id(f_id)
+                    base64_url = await self.get_base64_from_file_id(f_id, user_id)
                     if not base64_url:
                         logger.warning(f"ToolImageVisionFilter: Could not resolve base64 for {f_id}")
                         continue

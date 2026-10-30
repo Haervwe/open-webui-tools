@@ -6,6 +6,15 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def fake_storage(monkeypatch):
+    """Outputs are persisted to Open WebUI storage; fake that step here."""
+    async def persist(self, outputs, *, kind, expected_type, prefix, request, user, metadata):
+        return [{"id": f"f{i}", "url": f"/api/v1/files/f{i}/content", "name": f"{prefix}_{i}.bin",
+                 "content_type": expected_type} for i, _ in enumerate(outputs)]
+    monkeypatch.setattr(Tools, "_persist_outputs", persist)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 
 from atlascloud_media_tool import (
@@ -123,7 +132,9 @@ async def test_generate_image_submits_polls_and_formats_outputs():
     ), patch("atlascloud_media_tool.asyncio.sleep", new=AsyncMock()):
         result = await tool.generate_image("a lighthouse")
 
-    assert "![Generated image](https://cdn.example.test/image.jpg)" in result
+    html_response, context = result
+    assert "/api/v1/files/f0/content" in html_response.body.decode()
+    assert "cdn.example.test" not in str(context) and "cdn.example.test" not in html_response.body.decode()
     assert session.requests[0] == (
         "POST",
         "https://api.atlascloud.ai/api/v1/model/generateImage",
@@ -168,9 +179,9 @@ async def test_generate_video_submits_expected_options_and_returns_html_embed():
     assert isinstance(result, tuple) and len(result) == 2
     html_response, context = result
     html_body = html_response.body.decode("utf-8")
-    assert "<video" in html_body
-    assert "https://cdn.example.test/video.mp4" in html_body
-    assert "https://cdn.example.test/video.mp4" in context
+    assert 'id="videos"' in html_body
+    assert "/api/v1/files/f0/content" in html_body
+    assert "cdn.example.test" not in html_body and "cdn.example.test" not in str(context)
     assert session.requests[0] == (
         "POST",
         "https://api.atlascloud.ai/api/v1/model/generateVideo",
@@ -212,7 +223,7 @@ async def test_generate_video_from_image_submits_correct_payload():
 
     assert isinstance(result, tuple)
     html_response, context = result
-    assert "https://cdn.example.test/i2v.mp4" in context
+    assert context["files"] == ["/api/v1/files/f0/content"]
     assert session.requests[0] == (
         "POST",
         "https://api.atlascloud.ai/api/v1/model/generateVideo",
@@ -262,7 +273,7 @@ async def test_edit_image_with_attached_message():
             __messages__=messages,
         )
 
-    assert "![Edited image](https://cdn.example.test/edited.jpg)" in result
+    assert result[1]["files"] == ["/api/v1/files/f0/content"]
     assert session.requests[0] == (
         "POST",
         "https://api.atlascloud.ai/api/v1/model/generateImage",

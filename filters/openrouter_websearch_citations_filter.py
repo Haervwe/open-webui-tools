@@ -3,7 +3,8 @@ title: OpenRouter WebSearch Citations Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.0
+version: 0.2.0
+required_open_webui_version: 0.7.0
 description: Enables web search for OpenRouter models by adding plugins and options to the request payload.
 """
 
@@ -34,6 +35,10 @@ class Filter:
             description="Search context size: 'low' (minimal), 'medium' (moderate), 'high' (extensive)",
             json_schema_extra={"enum": ["low", "medium", "high"]},
         )
+        emit_url_citations: bool = Field(
+            False,
+            description="Also emit url_citation annotations as citation events. Open WebUI 0.7+ already shows them as sources, so enabling this duplicates every source; only turn it on for older servers.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -41,7 +46,10 @@ class Filter:
         self.icon = """data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxjaXJjbGUgY3g9IjExIiBjeT0iMTEiIHI9IjgiLz48cGF0aCBkPSJtMjEgMjEtNC4zNS00LjM1Ii8+PC9zdmc+"""
 
     async def inlet(
-        self, body: Dict[str, Any], __event_emitter__: Callable[[Dict[str, Any]], Awaitable[None]], __user__: Optional[Dict[str, Any]] = None
+        self,
+        body: Dict[str, Any],
+        __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        __user__: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if self.toggle:
             plugin = {"id": "web"}
@@ -52,54 +60,75 @@ class Filter:
             plugin["search_prompt"] = search_prompt
             body["plugins"] = [plugin]
             body["web_search_options"] = {"search_context_size": self.valves.search_context_size}
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": "Web search enabled for this query",
-                        "done": True,
-                        "hidden": True,
-                    },
-                }
-            )
-        return body
-
-    async def stream(self, event: Dict[str, Any], __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None) -> Dict[str, Any]:
-        for choice in event.get("choices", []):
-            delta = choice.get("delta", {})
-            if "annotations" in delta:
-                for annotation in delta["annotations"]:
-                    citation_data: Dict[str, Any] = {}
-                    url: Optional[str] = None
-                    title: Optional[str] = None
-                    document: List[str] = []
-                    metadata: List[Dict[str, Any]] = []
-
-                    if annotation.get("type") == "url_citation":
-                        url_info = annotation.get("url_citation", {})
-                        url = url_info.get("url")
-                        title = url_info.get("title")
-
-                        if title:
-                            document.append(title)
-
-                        meta = {"source": url, "title": title}
-                        if "start_index" in url_info:
-                            meta["start_index"] = url_info["start_index"]
-                        if "end_index" in url_info:
-                            meta["end_index"] = url_info["end_index"]
-                        metadata.append(meta)
-
-                    if not document and annotation:
-                        document.append(str(annotation))
-                    citation_data = {
-                        "document": document,
-                        "metadata": metadata,
-                        "source": {
-                            "name": title or url or "Citation",
-                            "url": url or "",
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Web search enabled for this query",
+                            "done": True,
+                            "hidden": True,
                         },
                     }
-                    if __event_emitter__:
-                        await __event_emitter__({"type": "citation", "data": citation_data})
+                )
+        return body
+
+    async def stream(
+        self,
+        event: Dict[str, Any],
+        __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> Dict[str, Any]:
+        if not __event_emitter__:
+            return event
+        for index, choice in enumerate(event.get("choices") or []):
+            delta = choice.get("delta") or {}
+            annotations = delta.get("annotations")
+            if not isinstance(annotations, list):
+                continue
+            for annotation in annotations:
+                if not isinstance(annotation, dict):
+                    continue
+                # Open WebUI 0.7+ (utils/middleware.py "Handle delta annotations")
+                # already emits a "source" event for every url_citation in
+                # choices[0]; emitting it again here only doubles each source's
+                # documents/metadata.
+                if (
+                    not self.valves.emit_url_citations
+                    and index == 0
+                    and annotation.get("type") == "url_citation"
+                    and "url_citation" in annotation
+                ):
+                    continue
+
+                url: Optional[str] = None
+                title: Optional[str] = None
+                document: List[str] = []
+                metadata: List[Dict[str, Any]] = []
+
+                if annotation.get("type") == "url_citation":
+                    url_info = annotation.get("url_citation") or {}
+                    url = url_info.get("url")
+                    title = url_info.get("title")
+
+                    if title:
+                        document.append(title)
+
+                    meta = {"source": url, "title": title}
+                    if "start_index" in url_info:
+                        meta["start_index"] = url_info["start_index"]
+                    if "end_index" in url_info:
+                        meta["end_index"] = url_info["end_index"]
+                    metadata.append(meta)
+
+                if not document:
+                    document.append(str(annotation))
+                citation_data: Dict[str, Any] = {
+                    "document": document,
+                    "metadata": metadata,
+                    "source": {
+                        "name": title or url or "Citation",
+                        "url": url or "",
+                    },
+                }
+                await __event_emitter__({"type": "citation", "data": citation_data})
         return event
