@@ -3,7 +3,7 @@ title: Atlas Cloud Media Generator
 description: Generate images, edit images, create videos (text-to-video, image-to-video, audio-to-video) and 3D models (text-to-3D, image-to-3D as GLB) through the Atlas Cloud Media API. Outputs are stored in Open WebUI file storage and shown in an inline viewer.
 author: binyangzhu000-sudo & Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-version: 1.3.0
+version: 1.3.6
 license: MIT
 required_open_webui_version: 0.9.0
 """
@@ -51,13 +51,16 @@ DEFAULT_TEXT_TO_3D_MODEL = "tencent/hunyuan3d-rapid/text-to-3d"
 DEFAULT_IMAGE_TO_3D_MODEL = "tencent/hunyuan3d-rapid/image-to-3d"
 
 # Supported 3D model families. "image_field" is the request field that carries
-# the reference image for the image-to-3d variant (it differs per provider).
+# the reference image for the image-to-3d variant (it differs per provider);
+# "inline_image_max" is the largest local image sent inline as a base64 data
+# URI instead of through uploadMedia (0 = always upload; field takes URLs only).
 MODEL_3D_FAMILIES: Dict[str, Dict[str, Any]] = {
     "hunyuan3d-rapid": {
         "label": "Hunyuan3D Rapid",
         "text": "tencent/hunyuan3d-rapid/text-to-3d",
         "image": "tencent/hunyuan3d-rapid/image-to-3d",
         "image_field": "image",
+        "inline_image_max": 4 * 1024 * 1024,
         "cost": "economy (about $0.02 per model)",
         "max_prompt": None,
     },
@@ -66,6 +69,7 @@ MODEL_3D_FAMILIES: Dict[str, Dict[str, Any]] = {
         "text": "tencent/hunyuan3d-pro/text-to-3d",
         "image": "tencent/hunyuan3d-pro/image-to-3d",
         "image_field": "image",
+        "inline_image_max": 4 * 1024 * 1024,
         "cost": "economy (about $0.02 per model)",
         "max_prompt": None,
     },
@@ -74,6 +78,7 @@ MODEL_3D_FAMILIES: Dict[str, Dict[str, Any]] = {
         "text": "tripo-h3.1/text-to-3d",
         "image": "tripo-h3.1/image-to-3d",
         "image_field": "image_url",
+        "inline_image_max": 0,
         "cost": "premium (about $0.10 per model)",
         "max_prompt": 1024,
     },
@@ -82,6 +87,7 @@ MODEL_3D_FAMILIES: Dict[str, Dict[str, Any]] = {
         "text": "meshy-v7/text-to-3d",
         "image": "meshy-v7/image-to-3d",
         "image_field": "image",
+        "inline_image_max": 4 * 1024 * 1024,
         "cost": "economy (about $0.02 per model)",
         "max_prompt": 800,
     },
@@ -813,10 +819,10 @@ def video_player_embed(
 # --------------------------------------------------------------------------
 
 _MODEL_3D_CSS = """
-.mv-wrap { position: relative; width: 100%; height: __H__px; border-radius: 12px; overflow: hidden;
+.mv-wrap { position: relative; width: 100%; max-width: 960px; margin: 0 auto; height: __H__px; border-radius: 12px; overflow: hidden;
   background: radial-gradient(circle at 50% 35%, #ffffff 0%, #e9ebef 70%, #dfe2e7 100%); }
-.mv-wrap:fullscreen { height: 100%; border-radius: 0; }
-.mv-wrap:-webkit-full-screen { height: 100%; border-radius: 0; }
+.mv-wrap:fullscreen { height: 100%; max-width: none; border-radius: 0; }
+.mv-wrap:-webkit-full-screen { height: 100%; max-width: none; border-radius: 0; }
 .mv-wrap model-viewer { position: absolute; inset: 0; width: 100%; height: 100%;
   background: transparent; --poster-color: transparent; --progress-bar-height: 0px; }
 .mv-poster { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
@@ -882,6 +888,23 @@ function loadModule() {
     document.head.appendChild(s);
   });
 }
+function reframe() {
+  if (!mv || !mv.updateFraming) return;
+  Promise.resolve(mv.updateFraming()).then(function () { if (mv && mv.jumpCameraToGoal) mv.jumpCameraToGoal(); });
+}
+var reframeTimer = null;
+window.addEventListener('resize', function () {
+  clearTimeout(reframeTimer);
+  reframeTimer = setTimeout(reframe, 150);
+});
+// In a chat the mouse wheel should scroll the conversation, not zoom the
+// model: zoom only with Ctrl/Cmd held or after clicking into the viewer.
+var engaged = false;
+wrap.addEventListener('pointerdown', function () { engaged = true; }, true);
+wrap.addEventListener('pointerleave', function () { engaged = false; });
+wrap.addEventListener('wheel', function (e) {
+  if (!engaged && !e.ctrlKey && !e.metaKey) e.stopPropagation();
+}, true);
 setStatus('Loading 3D viewer...');
 Promise.all([loadModule(), source(DATA.glb)]).then(function (res) {
   var src = res[1];
@@ -1322,11 +1345,18 @@ class Tools:
         )
 
         async with session.post(f"{base_url}{UPLOAD_ENDPOINT}", data=data) as resp:
-            res_data = self._data(await self._json_response(resp))
-            url = res_data.get("url") or res_data.get("file_url")
-            if not url or not isinstance(url, str):
-                raise AtlasCloudError("Atlas Cloud uploadMedia did not return a valid URL.")
-            return url
+            payload = await self._json_response(resp)
+            res_data = self._data(payload)
+            # The docs read a top-level "url"; accept the other common shapes too.
+            for source in (res_data, payload):
+                for key in ("url", "file_url", "download_url", "uri"):
+                    url = source.get(key) if isinstance(source, dict) else None
+                    if isinstance(url, str) and is_http_url(url):
+                        return url
+            raise AtlasCloudError(
+                "Atlas Cloud uploadMedia did not return a valid URL "
+                f"(response keys: {sorted(res_data)[:10]})."
+            )
 
     # ------------------------------------------------------------------
     # Reference media (image_url / audio_url) handling
@@ -1432,8 +1462,13 @@ class Tools:
         media_input: str,
         kind: str = "image",
         user_obj: Optional[UserModel] = None,
+        inline_max_bytes: int = 0,
     ) -> str:
-        """Turn an http(s) URL, data: URI or Open WebUI file reference into an Atlas Cloud media URL."""
+        """Turn an http(s) URL, data: URI or Open WebUI file reference into an Atlas Cloud media URL.
+
+        With inline_max_bytes, local media up to that size is returned as a
+        base64 data: URI instead of being uploaded (for fields that accept it).
+        """
         if not media_input or not isinstance(media_input, str) or not media_input.strip():
             raise AtlasCloudError(f"No valid {kind} input provided.")
 
@@ -1441,6 +1476,8 @@ class Tools:
 
         if s_input[:5].lower() == "data:":
             raw, content_type = self._decode_data_uri(s_input, kind)
+            if len(raw) <= inline_max_bytes:
+                return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
             return await self._upload_media(
                 session,
                 base_url,
@@ -1452,6 +1489,8 @@ class Tools:
         file_id = self._owui_file_id(s_input)
         if file_id:
             raw, content_type, name = await self._read_owui_file(file_id, kind, user_obj)
+            if len(raw) <= inline_max_bytes:
+                return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
             return await self._upload_media(
                 session, base_url, raw, filename=name, content_type=content_type
             )
@@ -2329,7 +2368,12 @@ class Tools:
                     timeout=aiohttp.ClientTimeout(total=60), headers=headers
                 ) as session:
                     hosted_image = await self._ensure_atlas_media_url(
-                        session, config["base_url"], target_image, "image", user_obj
+                        session,
+                        config["base_url"],
+                        target_image,
+                        "image",
+                        user_obj,
+                        inline_max_bytes=spec.get("inline_image_max", 0),
                     )
 
             await self._emit_status(

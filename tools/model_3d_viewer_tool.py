@@ -4,7 +4,7 @@ description: Show a GLB / glTF 3D model that is already in Open WebUI (an attach
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.0
+version: 0.1.5
 license: MIT
 required_open_webui_version: 0.9.0
 """
@@ -275,10 +275,10 @@ def _prompt_bubble(label: str, text: Optional[str]) -> str:
 # --------------------------------------------------------------------------
 
 _MODEL_3D_CSS = """
-.mv-wrap { position: relative; width: 100%; height: __H__px; border-radius: 12px; overflow: hidden;
+.mv-wrap { position: relative; width: 100%; max-width: 960px; margin: 0 auto; height: __H__px; border-radius: 12px; overflow: hidden;
   background: radial-gradient(circle at 50% 35%, #ffffff 0%, #e9ebef 70%, #dfe2e7 100%); }
-.mv-wrap:fullscreen { height: 100%; border-radius: 0; }
-.mv-wrap:-webkit-full-screen { height: 100%; border-radius: 0; }
+.mv-wrap:fullscreen { height: 100%; max-width: none; border-radius: 0; }
+.mv-wrap:-webkit-full-screen { height: 100%; max-width: none; border-radius: 0; }
 .mv-wrap model-viewer { position: absolute; inset: 0; width: 100%; height: 100%;
   background: transparent; --poster-color: transparent; --progress-bar-height: 0px; }
 .mv-poster { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
@@ -345,6 +345,23 @@ function loadModule() {
     document.head.appendChild(s);
   });
 }
+function reframe() {
+  if (!mv || !mv.updateFraming) return;
+  Promise.resolve(mv.updateFraming()).then(function () { if (mv && mv.jumpCameraToGoal) mv.jumpCameraToGoal(); });
+}
+var reframeTimer = null;
+window.addEventListener('resize', function () {
+  clearTimeout(reframeTimer);
+  reframeTimer = setTimeout(reframe, 150);
+});
+// In a chat the mouse wheel should scroll the conversation, not zoom the
+// model: zoom only with Ctrl/Cmd held or after clicking into the viewer.
+var engaged = false;
+wrap.addEventListener('pointerdown', function () { engaged = true; }, true);
+wrap.addEventListener('pointerleave', function () { engaged = false; });
+wrap.addEventListener('wheel', function (e) {
+  if (!engaged && !e.ctrlKey && !e.metaKey) e.stopPropagation();
+}, true);
 setStatus('Loading 3D viewer...');
 Promise.all([loadModule(), source(DATA.glb)]).then(function (res) {
   var src = res[1];

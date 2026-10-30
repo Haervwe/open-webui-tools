@@ -506,6 +506,48 @@ def test_image_to_3d_tripo_uses_image_url_field_and_clamps_faces():
     assert "Tripo H3.1" in result[1] and "$0.10" in result[1]
 
 
+def _png_data_uri():
+    import base64
+
+    return "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode("ascii")
+
+
+def test_image_to_3d_hunyuan_sends_local_image_inline_without_upload():
+    tool = _tool_3d()
+    store = _Store3D()
+    session = FakeSession([FakeResponse({"data": {"id": "p1"}}), FakeResponse(_completed_3d())])
+    result = _run_3d(tool, session, store, image_url=_png_data_uri())
+
+    assert isinstance(result, tuple)
+    assert not any("uploadMedia" in r[1] for r in session.requests)
+    assert session.requests[0][2]["image"] == _png_data_uri()
+
+
+def test_image_to_3d_tripo_uploads_local_image_and_reads_download_url():
+    tool = _tool_3d(IMAGE_TO_3D_MODEL="tripo-h3.1/image-to-3d")
+    store = _Store3D()
+    session = FakeSession([
+        FakeResponse({"code": 200, "data": {"download_url": f"https://{PROVIDER}/up/in.png"}}),
+        FakeResponse({"data": {"id": "p1"}}),
+        FakeResponse(_completed_3d()),
+    ])
+    result = _run_3d(tool, session, store, image_url=_png_data_uri())
+
+    assert isinstance(result, tuple)
+    assert session.requests[0][1].endswith("/model/uploadMedia")
+    assert session.requests[1][2]["image_url"] == f"https://{PROVIDER}/up/in.png"
+
+
+def test_upload_without_url_reports_response_keys():
+    tool = _tool_3d(IMAGE_TO_3D_MODEL="tripo-h3.1/image-to-3d")
+    store = _Store3D()
+    session = FakeSession([FakeResponse({"code": 200, "data": {"file_id": "abc"}})])
+    result = _run_3d(tool, session, store, image_url=_png_data_uri())
+
+    assert isinstance(result, str)
+    assert "did not return a valid URL" in result and "file_id" in result
+
+
 def test_image_to_3d_from_files_param():
     tool = _tool_3d()
     store = _Store3D()
