@@ -4,11 +4,13 @@ description: Google web search via the Serply API - organic results with titles,
 author: serply
 author_url: https://serply.io
 funding_url: https://github.com/Haervwe/open-webui-tools
-requirements:aiohttp
-version: 1.0.0
+requirements: aiohttp
+version: 1.0.1
+required_open_webui_version: 0.8.0
 license: MIT
 """
 
+import re
 import aiohttp
 from typing import Any, Optional, Callable, Awaitable
 from pydantic import BaseModel, Field
@@ -17,6 +19,44 @@ import logging
 logger = logging.getLogger(__name__)
 
 SERPLY_API_URL = "https://api.serply.io/v1/search"
+MAX_DESCRIPTION_CHARS = 500
+
+
+def _clean(text: Any, limit: Optional[int] = None) -> str:
+    """Flatten untrusted result text for markdown: drop newlines and markdown/link syntax chars."""
+    text = re.sub(r"\s+", " ", str(text or ""))
+    text = re.sub(r"[*`\[\]<>]", "", text).strip()
+    if limit and len(text) > limit:
+        text = text[: limit - 1].rstrip() + "..."
+    return text
+
+
+def _safe_link(value: Any) -> str:
+    """Return an http(s) URL safe to place on its own markdown line, or "" to drop it."""
+    link = str(value or "").strip()
+    if not link.lower().startswith(("http://", "https://")):
+        return ""
+    # Whitespace would let a crafted link start new markdown lines (headings, injected
+    # instructions); angle brackets / backticks could open HTML or code spans.
+    if re.search(r"[\s<>`]", link):
+        return ""
+    return link
+
+
+def _http_error_message(status: int) -> str:
+    if status in (401, 403):
+        return (
+            f"Serply API returned HTTP {status}: the API key was rejected. "
+            "Check SERPLY_API_KEY in the tool valves."
+        )
+    if status in (402, 429):
+        return (
+            f"Serply API returned HTTP {status}: rate limit or credit quota exceeded. "
+            "Wait and retry, or check your plan at https://serply.io."
+        )
+    if status >= 500:
+        return f"Serply API returned HTTP {status}: the Serply service is unavailable. Try again later."
+    return f"Serply API returned HTTP {status}."
 
 
 async def emit_status(
@@ -78,8 +118,11 @@ class Tools:
                 "(SERPLY_API_KEY). You can create one at https://serply.io."
             )
 
-        num = num_results if num_results is not None else self.valves.MAX_RESULTS
-        num = max(1, min(int(num), 10))
+        try:
+            num = int(num_results) if num_results is not None else self.valves.MAX_RESULTS
+        except (TypeError, ValueError):
+            num = self.valves.MAX_RESULTS
+        num = max(1, min(num, 10))
 
         await emit_status(__event_emitter__, f"Searching the web for: {query}")
 
@@ -97,11 +140,12 @@ class Tools:
                     SERPLY_API_URL, params=params, headers=headers
                 ) as response:
                     if response.status != 200:
-                        error_msg = (
-                            f"Serply API returned HTTP {response.status}. "
-                            "Check your API key and credits at https://serply.io."
-                        )
+                        error_msg = _http_error_message(response.status)
                         logger.error(error_msg)
+                        try:
+                            logger.debug("Serply error body: %s", (await response.text())[:200])
+                        except Exception:
+                            pass
                         await emit_status(__event_emitter__, error_msg, done=True)
                         return error_msg
                     data = await response.json()
@@ -115,10 +159,10 @@ class Tools:
 
             lines = []
             for i, r in enumerate(results, start=1):
-                title = (r.get("title") or "").strip()
-                link = r.get("link") or r.get("url") or ""
-                description = (r.get("description") or "").strip()
-                lines.append(f"{i}. **{title or link}**")
+                title = _clean(r.get("title"))
+                link = _safe_link(r.get("link") or r.get("url"))
+                description = _clean(r.get("description"), MAX_DESCRIPTION_CHARS)
+                lines.append(f"{i}. **{title or link or 'Untitled'}**")
                 if link:
                     lines.append(f"   {link}")
                 if description:

@@ -131,7 +131,20 @@ class TestResolveModelId(unittest.TestCase):
 
     def test_direct_model_id(self):
         pipe = Pipe()
+        pipe.valves.ENABLED_MODELS = ["MiniMax-M2.7"]
         assert pipe._resolve_model_id("minimax-MiniMax-M2.7") == "MiniMax-M2.7"
+
+    def test_non_enabled_legacy_id_rejected(self):
+        pipe = Pipe()
+        assert pipe._resolve_model_id("minimax-MiniMax-M2.7") is None
+
+    def test_catalog_model_accepted_even_if_disabled(self):
+        pipe = Pipe()
+        pipe.valves.ENABLED_MODELS = ["MiniMax-M3"]
+        assert (
+            pipe._resolve_model_id("minimax_pipe.minimax-MiniMax-M3.1-Flash")
+            == "MiniMax-M3.1-Flash"
+        )
 
     def test_m3_model(self):
         pipe = Pipe()
@@ -139,6 +152,7 @@ class TestResolveModelId(unittest.TestCase):
 
     def test_with_function_prefix(self):
         pipe = Pipe()
+        pipe.valves.ENABLED_MODELS = ["MiniMax-M2.7"]
         result = pipe._resolve_model_id(
             "minimax_pipe.minimax-MiniMax-M2.7"
         )
@@ -437,7 +451,7 @@ class TestResolveThinking(unittest.TestCase):
         return pipe
 
     def test_always_on_model_returns_none(self):
-        """M2.7 is always-on, so the thinking field must be omitted."""
+        """Legacy IDs such as M2.7 declare no thinking modes, so the field is omitted."""
         pipe = self._pipe()
         assert pipe._resolve_thinking("MiniMax-M2.7", {}) is None
 

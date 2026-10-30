@@ -1,6 +1,7 @@
 """Exercise the real pipe and HTTP serializer against an offline SSE server."""
 
 import copy
+import inspect
 import json
 import os
 import sys
@@ -16,9 +17,34 @@ import minimax_pipe
 from minimax_pipe import Pipe
 
 
+DEFAULT_SSE = 'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\ndata: [DONE]\n\n'
+
+FLASH_SSE = "".join(
+    f"data: {json.dumps({'choices': [{'delta': d}]})}\n\n"
+    for d in (
+        {"role": "assistant", "reasoning_content": "Let me "},
+        {"reasoning_content": "think."},
+        {"content": "Hel"},
+        {"content": "lo"},
+    )
+) + "data: [DONE]\n\n"
+
+M3_THINK_SSE = "".join(
+    f"data: {json.dumps({'choices': [{'delta': {'content': c}}]})}\n\n"
+    for c in ("<think>hidden", " plan</think>", "Hello")
+) + "data: [DONE]\n\n"
+
+
+class Transport(list):
+    """Captured upstream requests plus the SSE body the server replies with."""
+
+    sse = DEFAULT_SSE
+    status = 200
+
+
 @pytest_asyncio.fixture
 async def transport(monkeypatch):
-    requests = []
+    requests = Transport()
 
     async def complete(request):
         requests.append({
@@ -26,8 +52,10 @@ async def transport(monkeypatch):
             "authorization": request.headers.get("Authorization"),
             "payload": json.loads(await request.read()),
         })
+        if requests.status != 200:
+            return web.Response(status=requests.status, text="bad request")
         return web.Response(
-            text='data: {"choices":[{"delta":{"content":"Hello"}}]}\n\ndata: [DONE]\n\n',
+            text=requests.sse,
             content_type="text/event-stream",
         )
 
@@ -45,17 +73,30 @@ async def transport(monkeypatch):
         await runner.cleanup()
 
 
+async def collect(result):
+    """Drain a streaming pipe result into a list of yielded items."""
+    assert inspect.isasyncgen(result)
+    return [item async for item in result]
+
+
+def assert_no_message_events(emitter):
+    """Content must be pipe output, never chat:message* events (0.12.5 wipes them)."""
+    for call in emitter.call_args_list:
+        assert not call.args[0]["type"].startswith("chat:message")
+        assert call.args[0]["type"] != "chat:completion"
+
+
 async def send(pipe, body, requests):
     pipe.valves.MINIMAX_API_KEY = "offline-test-key"
     emitter = AsyncMock()
-    assert await pipe.pipe(body, __event_emitter__=emitter) is None
+    items = await collect(
+        await pipe.pipe({**body, "stream": True}, __event_emitter__=emitter)
+    )
+    assert "".join(i for i in items if isinstance(i, str)) == "Hello"
     assert len(requests) == 1
     assert requests[0]["path"] == "/v1/chat/completions"
     assert requests[0]["authorization"] == "Bearer offline-test-key"
-    assert any(call.args[0] == {
-        "type": "chat:message:delta",
-        "data": {"role": "assistant", "content": "Hello"},
-    } for call in emitter.call_args_list)
+    assert_no_message_events(emitter)
     return requests[0]["payload"]
 
 
@@ -158,11 +199,102 @@ async def test_saved_models_are_never_rewritten(transport, model):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M3-custom"])
-async def test_saved_chat_id_outside_current_picker_is_preserved(transport, model):
-    payload = await send(Pipe(), {
-        "model": "minimax_pipe.minimax-" + model, "messages": [],
-    }, transport)
-    assert payload["model"] == model
+async def test_model_outside_enabled_models_is_rejected(transport, model):
+    """ENABLED_MODELS stays an allowlist: non-enabled, non-catalog IDs never go upstream."""
+    pipe = Pipe()
+    pipe.valves.MINIMAX_API_KEY = "offline-test-key"
+    result = await pipe.pipe({
+        "model": "minimax_pipe.minimax-" + model, "messages": [], "stream": True,
+    })
+    assert result == f"Unknown MiniMax model: minimax_pipe.minimax-{model}"
+    assert transport == []
+
+
+@pytest.mark.asyncio
+async def test_flash_reasoning_content_yielded_as_reasoning_chunks(transport):
+    transport.sse = FLASH_SSE
+    pipe = Pipe()
+    pipe.valves.MINIMAX_API_KEY = "offline-test-key"
+    pipe.valves.STRIP_THINKING = False
+    emitter = AsyncMock()
+    items = await collect(await pipe.pipe({
+        "model": "minimax_pipe.minimax-MiniMax-M3.1-Flash",
+        "messages": [{"role": "user", "content": "Hi"}], "stream": True,
+    }, __event_emitter__=emitter))
+    assert items == [
+        {"choices": [{"index": 0, "delta": {"reasoning_content": "Let me "}}]},
+        {"choices": [{"index": 0, "delta": {"reasoning_content": "think."}}]},
+        "Hel",
+        "lo",
+    ]
+    assert_no_message_events(emitter)
+    assert emitter.call_args_list[-1].args[0]["data"] == {
+        "type": "info", "description": "Done", "done": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_flash_reasoning_content_dropped_when_stripping(transport):
+    transport.sse = FLASH_SSE
+    pipe = Pipe()
+    pipe.valves.MINIMAX_API_KEY = "offline-test-key"
+    assert pipe.valves.STRIP_THINKING is True
+    items = await collect(await pipe.pipe({
+        "model": "MiniMax-M3.1-Flash", "messages": [], "stream": True,
+    }))
+    assert items == ["Hel", "lo"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strip,expected", [
+    (True, "Hello"), (False, "<think>hidden plan</think>Hello"),
+])
+async def test_think_tags_in_stream(transport, strip, expected):
+    transport.sse = M3_THINK_SSE
+    pipe = Pipe()
+    pipe.valves.MINIMAX_API_KEY = "offline-test-key"
+    pipe.valves.STRIP_THINKING = strip
+    items = await collect(await pipe.pipe({
+        "model": "minimax-MiniMax-M3", "messages": [], "stream": True,
+    }))
+    assert "".join(items) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sse", [DEFAULT_SSE, FLASH_SSE, M3_THINK_SSE])
+@pytest.mark.parametrize("body_extra", [{}, {"stream": False}])
+async def test_non_stream_returns_content_string(transport, sse, body_extra):
+    transport.sse = sse
+    pipe = Pipe()
+    pipe.valves.MINIMAX_API_KEY = "offline-test-key"
+    pipe.valves.STRIP_THINKING = False
+    emitter = AsyncMock()
+    result = await pipe.pipe({
+        "model": "minimax-MiniMax-M3.1-Flash", "messages": [], **body_extra,
+    }, __event_emitter__=emitter)
+    # Reasoning never leaks into the plain-string (task/non-stream) answer.
+    expected = "<think>hidden plan</think>Hello" if sse is M3_THINK_SSE else "Hello"
+    assert result == expected
+    assert transport[0]["payload"]["stream"] is True
+    assert_no_message_events(emitter)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_upstream_error_is_returned_as_output(transport, stream):
+    transport.status = 400
+    pipe = Pipe()
+    pipe.valves.MINIMAX_API_KEY = "offline-test-key"
+    emitter = AsyncMock()
+    result = await pipe.pipe({
+        "model": "MiniMax-M3", "messages": [], "stream": stream,
+    }, __event_emitter__=emitter)
+    if stream:
+        result = "".join(await collect(result))
+    assert result == "MiniMax API error: HTTP 400: bad request"
+    assert "offline-test-key" not in result
+    last = emitter.call_args_list[-1].args[0]
+    assert last["type"] == "status" and last["data"]["type"] == "error"
 
 
 @pytest.mark.asyncio

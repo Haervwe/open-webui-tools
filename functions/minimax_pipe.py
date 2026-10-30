@@ -2,19 +2,19 @@
 title: MiniMax LLM Pipe
 author: octopus
 author_url: https://github.com/octo-patch
-version: 1.3.0
+version: 1.3.1
 required_open_webui_version: 0.6.0
 description: MiniMax LLM Pipe for Open WebUI — routes chat completions to MiniMax's
 OpenAI-compatible API (api.minimax.io/v1). Supports MiniMax-M3.1-Flash (default)
 and MiniMax-M3 with image and video input, model-aware thinking controls,
-streaming, temperature clamping, and automatic think-tag handling.
+streaming (content and reasoning returned as pipe output), temperature
+clamping, and automatic think-tag handling.
 """
 
 import aiohttp
 import json
 import logging
 import re
-import time
 import traceback
 from typing import (
     Any,
@@ -24,7 +24,7 @@ from typing import (
     Dict,
     List,
     Optional,
-    Tuple,
+    Union,
 )
 
 from fastapi import Request
@@ -61,6 +61,8 @@ FLASH_REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # which of these it supports in MINIMAX_MODELS[*]["thinking"].
 THINKING_MODE_ADAPTIVE = "adaptive"
 THINKING_MODE_DISABLED = "disabled"
+# Kept for backward compatibility: no built-in model declares it any more;
+# legacy/custom IDs simply have no "thinking" list and omit the field.
 THINKING_MODE_ALWAYS_ON = "always_on"
 
 # Temperature must be in (0.0, 1.0] for MiniMax
@@ -98,16 +100,23 @@ class Pipe:
     class Valves(BaseModel):
         MINIMAX_API_KEY: str = Field(
             default="",
-            description="MiniMax API key (get one at https://platform.minimaxi.com)",
+            description="MiniMax API key (get one at https://platform.minimax.io)",
             json_schema_extra={"input": {"type": "password"}},
         )
         ENABLED_MODELS: List[str] = Field(
             default_factory=lambda: [m["id"] for m in MINIMAX_MODELS],
-            description="Which MiniMax models to expose (model IDs)",
+            description=(
+                "Which MiniMax models to expose (model IDs). Only these "
+                "(plus the built-in catalog) are ever sent upstream."
+            ),
         )
         STRIP_THINKING: bool = Field(
             default=True,
-            description="Strip <think>…</think> blocks from MiniMax responses",
+            description=(
+                "Hide MiniMax reasoning: strips <think>…</think> blocks and "
+                "drops M3.1-Flash reasoning_content. When off, reasoning is "
+                "shown in Open WebUI's collapsible reasoning block."
+            ),
         )
         DEFAULT_TEMPERATURE: float = Field(
             default=0.7,
@@ -164,8 +173,15 @@ class Pipe:
             Callable[[Dict[str, Any]], Awaitable[None]]
         ] = None,
         __request__: Optional[Request] = None,
-    ) -> Optional[str]:
-        """Route a chat completion request to the MiniMax API."""
+    ) -> Union[str, AsyncGenerator[Union[str, Dict[str, Any]], None]]:
+        """
+        Route a chat completion request to the MiniMax API.
+
+        The response is returned as the pipe's output so Open WebUI persists
+        it: for streaming requests an async generator yielding content text
+        and OpenAI-style ``reasoning_content`` delta chunks, otherwise the
+        final content string.
+        """
 
         # --- Validate API key ---
         if not self.valves.MINIMAX_API_KEY:
@@ -173,17 +189,7 @@ class Pipe:
                 "MiniMax API key not configured. "
                 "Please set MINIMAX_API_KEY in the pipe's Valves settings."
             )
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "type": "error",
-                            "description": error_msg,
-                            "done": True,
-                        },
-                    }
-                )
+            await self._emit_status(__event_emitter__, "error", error_msg, True)
             return error_msg
 
         # --- Resolve model ID ---
@@ -191,17 +197,7 @@ class Pipe:
         model_id = self._resolve_model_id(pipe_id)
         if not model_id:
             error_msg = f"Unknown MiniMax model: {pipe_id}"
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "type": "error",
-                            "description": error_msg,
-                            "done": True,
-                        },
-                    }
-                )
+            await self._emit_status(__event_emitter__, "error", error_msg, True)
             return error_msg
 
         # --- Build payload ---
@@ -212,6 +208,8 @@ class Pipe:
             body.get("temperature", self.valves.DEFAULT_TEMPERATURE)
         )
 
+        # Upstream is always streamed; the pipe aggregates for non-stream
+        # callers (e.g. Open WebUI title/tag generation tasks).
         payload: Dict[str, Any] = {
             "model": model_id,
             "messages": messages,
@@ -243,56 +241,88 @@ class Pipe:
         }
 
         # --- Emit status ---
-        if __event_emitter__:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "type": "info",
-                        "description": f"Generating response with {model_id}...",
-                        "done": False,
-                    },
-                }
-            )
+        await self._emit_status(
+            __event_emitter__,
+            "info",
+            f"Generating response with {model_id}...",
+            False,
+        )
 
-        # --- Stream from MiniMax ---
+        if body.get("stream", False):
+            return self._stream_output(payload, headers, __event_emitter__)
+
+        # --- Non-streaming: aggregate content into a single string ---
+        content = ""
         try:
-            result = await self._stream_response(
-                payload, headers, __event_emitter__
-            )
+            async for kind, text in self._stream_response(payload, headers):
+                if kind == "content":
+                    content += text
         except Exception as exc:
-            error_msg = f"MiniMax API error: {exc}"
-            logger.error(f"{error_msg}\n{traceback.format_exc()}")
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "type": "error",
-                            "description": error_msg,
-                            "done": True,
-                        },
-                    }
-                )
-            return error_msg
+            return await self._report_error(exc, __event_emitter__)
 
-        # --- Done ---
-        if __event_emitter__:
-            await __event_emitter__(
+        await self._emit_status(__event_emitter__, "info", "Done", True)
+        return content
+
+    async def _stream_output(
+        self,
+        payload: Dict[str, Any],
+        headers: Dict[str, str],
+        emitter: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+    ) -> AsyncGenerator[Union[str, Dict[str, Any]], None]:
+        """
+        Yield the MiniMax stream as Open WebUI pipe output.
+
+        Content is yielded as plain text; reasoning is yielded as an
+        OpenAI-style chunk with ``delta.reasoning_content`` which Open WebUI's
+        middleware renders as a reasoning block.
+        """
+        try:
+            async for kind, text in self._stream_response(payload, headers):
+                if kind == "reasoning":
+                    yield {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"reasoning_content": text},
+                            }
+                        ]
+                    }
+                else:
+                    yield text
+        except Exception as exc:
+            yield await self._report_error(exc, emitter)
+            return
+
+        await self._emit_status(emitter, "info", "Done", True)
+
+    @staticmethod
+    async def _emit_status(
+        emitter: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+        status_type: str,
+        description: str,
+        done: bool,
+    ) -> None:
+        if emitter:
+            await emitter(
                 {
                     "type": "status",
                     "data": {
-                        "type": "info",
-                        "description": "Done",
-                        "done": True,
+                        "type": status_type,
+                        "description": description,
+                        "done": done,
                     },
                 }
             )
-            await __event_emitter__(
-                {"type": "chat:completion", "data": {"done": True}}
-            )
 
-        return None  # content already streamed via events
+    async def _report_error(
+        self,
+        exc: Exception,
+        emitter: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+    ) -> str:
+        error_msg = f"MiniMax API error: {exc}"
+        logger.error(f"{error_msg}\n{traceback.format_exc()}")
+        await self._emit_status(emitter, "error", error_msg, True)
+        return error_msg
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -418,9 +448,9 @@ class Pipe:
         """
         Resolve the thinking mode to forward to the API.
 
-        Only models that list adaptive/disabled thinking send the field; an
-        always-on model (e.g. M2.7) ignores it and returns None so the field
-        is omitted entirely.
+        Only built-in models that list adaptive/disabled thinking send the
+        field; legacy or custom IDs (e.g. a saved MiniMax-M2.7) declare no
+        thinking modes and return None so the field is omitted entirely.
         """
         supported: List[str] = []
         for model in MINIMAX_MODELS:
@@ -455,9 +485,12 @@ class Pipe:
         # legacy or custom MiniMax ID must not become a different active model.
         match = re.fullmatch(r"(?:[^.]+\.)?minimax-(.+)", pipe_id)
         model_id = match.group(1) if match else pipe_id
+        # Only IDs this pipe exposes (enabled valve entries, which may be
+        # legacy/custom) or the built-in catalog are sent upstream, so the
+        # ENABLED_MODELS valve remains an effective allowlist.
         if model_id in self.valves.ENABLED_MODELS:
             return model_id
-        if re.fullmatch(r"MiniMax-[A-Za-z0-9][A-Za-z0-9._-]*", model_id):
+        if any(m["id"] == model_id for m in MINIMAX_MODELS):
             return model_id
         return None
 
@@ -465,11 +498,16 @@ class Pipe:
         self,
         payload: Dict[str, Any],
         headers: Dict[str, str],
-        emitter: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
-    ) -> str:
-        """Stream a chat completion from MiniMax and emit deltas."""
+    ) -> AsyncGenerator[tuple, None]:
+        """
+        Stream a chat completion from MiniMax.
+
+        Yields ``("reasoning", text)`` for ``delta.reasoning_content``
+        (M3.1-Flash) and ``("content", text)`` for answer text, applying the
+        STRIP_THINKING valve to both.
+        """
         url = f"{MINIMAX_API_BASE}/chat/completions"
-        full_content = ""
+        strip = self.valves.STRIP_THINKING
         thinking_buffer = ""
         in_thinking = False
 
@@ -484,6 +522,7 @@ class Pipe:
                     )
 
                 buffer = b""
+                done = False
                 async for chunk in resp.content.iter_any():
                     buffer += chunk
                     while b"\n" in buffer:
@@ -493,6 +532,7 @@ class Pipe:
                             continue
                         data = line[6:]
                         if data == "[DONE]":
+                            done = True
                             break
 
                         try:
@@ -504,32 +544,32 @@ class Pipe:
                         if not choices:
                             continue
 
-                        delta = choices[0].get("delta", {})
+                        delta = choices[0].get("delta") or {}
+
+                        reasoning = delta.get("reasoning_content")
+                        if reasoning and isinstance(reasoning, str) and not strip:
+                            yield ("reasoning", reasoning)
+
                         content = delta.get("content", "")
                         if not content:
                             continue
 
                         # Handle think-tag stripping in streaming mode
-                        if self.valves.STRIP_THINKING:
+                        if strip:
                             content, in_thinking, thinking_buffer = (
                                 self._process_thinking_stream(
                                     content, in_thinking, thinking_buffer
                                 )
                             )
 
-                        if content and emitter:
-                            full_content += content
-                            await emitter(
-                                {
-                                    "type": "chat:message:delta",
-                                    "data": {
-                                        "role": "assistant",
-                                        "content": content,
-                                    },
-                                }
-                            )
+                        if content:
+                            yield ("content", content)
+                    if done:
+                        break
 
-        return full_content
+        # Flush a trailing partial "<think" prefix that never completed.
+        if strip and not in_thinking and thinking_buffer:
+            yield ("content", thinking_buffer)
 
     @staticmethod
     def _process_thinking_stream(

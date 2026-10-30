@@ -3,7 +3,7 @@ title: Resume_analyzer
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.7
+version: 0.4.8
 required_open_webui_version: 0.9.1
 requirements: aiofiles
 important note: 1. this script requires the full_document filter added in open web ui to work with attached files, you can find it here : https://openwebui.com/f/haervwe/full_document_filter or in the git hub repo
@@ -19,7 +19,8 @@ you can contact me through  github.
 
 import logging
 import json
-from typing import Dict, List, Callable, Awaitable
+from typing import Dict, List, Callable, Awaitable, Optional
+from fastapi import Request
 from pydantic import BaseModel, Field
 from open_webui.constants import TASKS
 from open_webui.main import generate_chat_completions
@@ -54,7 +55,7 @@ class Pipe:
     __current_event_emitter__: Callable[[dict], Awaitable[None]]
     __user__: User
     __model__: str
-    __request__: None
+    __request__: Optional[Request]
 
     class Valves(BaseModel):
         Model: str = Field(default="", description="Model tag")
@@ -71,7 +72,7 @@ class Pipe:
             json_schema_extra={"input": {"type": "password"}},
         )
         web_search: bool = Field(
-            default=False, desciption="Activates web search for relevant job postings."
+            default=False, description="Activates web search for relevant job postings."
         )
         Temperature: float = Field(default=1, description="Model temperature")
         system_prompt_tags: str = Field(
@@ -120,11 +121,15 @@ class Pipe:
         self.type = "manifold"
         self.conversation_history = []
         self.valves = self.Valves()
+        self.response_text = ""
 
     def pipes(self) -> List[Dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
 
     async def emit_message(self, message: str):
+        # Accumulate everything streamed so far: the pipe returns it at the end so
+        # Open WebUI (>= 0.12) keeps it as the final reply instead of clearing it.
+        self.response_text += message
         await self.__current_event_emitter__(
             {"type": "message", "data": {"content": message}}
         )
@@ -538,6 +543,7 @@ class Pipe:
         self.__user__ = await Users.get_user_by_id(__user__["id"])
         self.__model__ = self.valves.Model
         self.__request__ = __request__
+        self.response_text = ""
         if __task__ and __task__ != TASKS.DEFAULT:
             try:
                 response = await generate_chat_completions(
@@ -572,7 +578,7 @@ class Pipe:
                 await self.emit_status(
                     "error", f"Failed to generate career advice: {e}", True
                 )
-            return
+            return self.response_text
 
         await self.emit_status("info", "Processing resume...", False)
         try:
@@ -584,22 +590,22 @@ class Pipe:
                 await self.emit_status(
                     "error", f"Dataset is missing required columns: {missing}", True
                 )
-                return
+                return self.response_text
             valid_tags = df["Category"].unique().tolist()
         except FileNotFoundError:
             logger.error(f"Dataset not found: {dataset_path}")
             await self.emit_status("error", f"Dataset not found: {dataset_path}", True)
-            return ""
+            return self.response_text
         except pd.errors.EmptyDataError:
             logger.error(f"Dataset is empty: {dataset_path}")
             await self.emit_status("error", f"Dataset is empty: {dataset_path}", True)
-            return ""
+            return self.response_text
         except Exception as e:
             logger.error(f"Unexpected error loading dataset: {e}")
             await self.emit_status(
                 "error", f"Unexpected error loading dataset: {e}", True
             )
-            return
+            return self.response_text
 
         try:
             tags = await self.generate_tags(user_message, valid_tags)
@@ -608,7 +614,7 @@ class Pipe:
         except Exception as e:
             logger.error(f"Error during tag generation or first impression: {e}")
             await self.emit_status("error", f"Failed during analysis: {e}", True)
-            return
+            return self.response_text
 
         await self.emit_status("info", "Performing adversarial analysis...", False)
         try:
@@ -620,7 +626,7 @@ class Pipe:
             await self.emit_status(
                 "error", f"Failed during adversarial analysis: {e}", True
             )
-            return
+            return self.response_text
 
         relevant_jobs = []
         if self.valves.web_search:
@@ -654,4 +660,4 @@ class Pipe:
             )
 
         await self.emit_status("success", "Resume analysis complete.", True)
-        return
+        return self.response_text

@@ -46,6 +46,19 @@ def pipe():
     return p
 
 
+async def _collect(result):
+    """Drain the pipe output: content text plus any error chunks."""
+    content, errors = "", []
+    if isinstance(result, str):
+        return result, errors
+    async for chunk in result:
+        if isinstance(chunk, str):
+            content += chunk
+        elif isinstance(chunk, dict) and "error" in chunk:
+            errors.append(chunk)
+    return content, errors
+
+
 @pytest.mark.asyncio
 async def test_streaming_completion(pipe):
     """Test a real streaming chat completion with MiniMax M3."""
@@ -57,29 +70,16 @@ async def test_streaming_completion(pipe):
                 {"role": "user", "content": "Say 'hello' and nothing else."}
             ],
             "temperature": 0.5,
+            "stream": True,
         },
         __user__={"id": "integration-test"},
         __event_emitter__=emitter,
     )
 
-    # result is None because content is streamed via events
-    assert result is None
-
-    # Check that deltas were emitted
-    delta_calls = [
-        c
-        for c in emitter.call_args_list
-        if c[0][0].get("type") == "chat:message:delta"
-    ]
-    assert len(delta_calls) > 0, "Expected at least one streamed delta"
-
-    # Check completion event was emitted
-    completion_calls = [
-        c
-        for c in emitter.call_args_list
-        if c[0][0].get("type") == "chat:completion"
-    ]
-    assert len(completion_calls) == 1
+    # Content is the pipe output (Open WebUI >= 0.12 persists only that)
+    content, errors = await _collect(result)
+    assert not errors, f"Got errors: {errors}"
+    assert content.strip(), "Expected streamed content"
 
 
 @pytest.mark.asyncio
@@ -97,18 +97,12 @@ async def test_think_tag_stripping(pipe):
                 }
             ],
             "temperature": 0.3,
+            "stream": True,
         },
         __user__={"id": "integration-test"},
         __event_emitter__=emitter,
     )
-    assert result is None
-
-    # Collect all streamed content
-    content = ""
-    for call in emitter.call_args_list:
-        event = call[0][0]
-        if event.get("type") == "chat:message:delta":
-            content += event["data"].get("content", "")
+    content, _ = await _collect(result)
 
     # Content should not contain <think> tags
     assert "<think>" not in content
@@ -129,7 +123,8 @@ async def test_temperature_zero_handled(pipe):
         __user__={"id": "integration-test"},
         __event_emitter__=emitter,
     )
-    assert result is None
+    # Non-stream requests return the final content string
+    assert isinstance(result, str) and result.strip()
 
     # No error events should have been emitted
     error_calls = [
