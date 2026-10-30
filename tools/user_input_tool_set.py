@@ -4,7 +4,7 @@ description: Interactive tools for text, choices, or images with ultra-rounded O
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.6.2
+version: 1.6.3
 license: MIT
 required_open_webui_version: 0.9.1
 """
@@ -625,7 +625,9 @@ class Tools:
     def __init__(self):
         pass
 
-    async def ask_user(
+    # Not named "ask_user": Open WebUI >= 0.12 intercepts any tool call with that
+    # name and routes it to its own built-in ask_user tool.
+    async def ask_user_input(
         self,
         prompt_text: str,
         placeholder: str = "Type your response...",
@@ -650,7 +652,7 @@ class Tools:
             if __event_emitter__: await __event_emitter__({"type": "status", "data": {"description": "Received" if selected else "Cancelled", "done": True}})
             return f"{selected}" if selected else "User cancelled the prompt."
         except Exception as e:
-            logger.error(f"ask_user failed: {e}")
+            logger.error(f"ask_user_input failed: {e}")
             return f"Error: {e}"
 
     async def give_options(

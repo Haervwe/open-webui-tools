@@ -121,7 +121,13 @@ class Pipe:
                         if m.get("id") == model_id or get_slug(
                             m.get("id", "")
                         ) == get_slug(model_id):
-                            return m.get("modalities", ["text"])
+                            # OpenRouter lists these under architecture.output_modalities
+                            architecture = m.get("architecture") or {}
+                            return (
+                                architecture.get("output_modalities")
+                                or m.get("modalities")
+                                or ["text"]
+                            )
             return ["text"]
 
         modalities = await get_model_capabilities(model)
@@ -150,17 +156,6 @@ class Pipe:
                     if resp.status != 200:
                         error_text = await resp.text()
                         logging.error(f"OpenRouter API error: {resp.status}")
-                        if __event_emitter__:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "type": "error",
-                                        "description": f"OpenRouter API error: {resp.status} {error_text}",
-                                        "done": True,
-                                    },
-                                }
-                            )
                         yield {
                             "error": {
                                 "detail": f"OpenRouter API error: {resp.status} {error_text}"
