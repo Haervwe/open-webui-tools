@@ -3,7 +3,7 @@ title: Mopidy_Music_Controller
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.7.2
+version: 0.7.3
 required_open_webui_version: 0.9.1
 description: A pipe to control Mopidy music server to play songs from local library or YouTube, manage playlists, and handle various music commands. Requires Mopidy-Iris UI to be installed for the player interface.
 needs a Local and/or a Youtube API endpoint configured in mopidy.
@@ -63,7 +63,10 @@ class Pipe:
     __model__: str
 
     class Valves(BaseModel):
-        Model: str = Field(default="", description="Model tag")
+        Model: str = Field(
+            default="",
+            description="Model tag (if empty, uses the Open WebUI task model)",
+        )
         Mopidy_URL: str = Field(
             default="http://localhost:6680/mopidy/rpc",
             description="URL for the Mopidy JSON-RPC API endpoint (requires Iris UI installed)",
@@ -107,13 +110,42 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
         self.playlists = {}
+        self.reply_parts: List[str] = []
 
     def pipes(self) -> List[Dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
 
     async def emit_message(self, message: str):
-        await self.__current_event_emitter__(
-            {"type": "message", "data": {"content": message}}
+        # Collected and returned by pipe(): OWUI >= 0.12 replaces the reply with
+        # the pipe output on completion, so "message" events alone get wiped.
+        self.reply_parts.append(message)
+
+    async def resolve_model(self, body: dict) -> Optional[str]:
+        """OWUI never passes __model__ to pipes, and body["model"] is this pipe
+        itself, so use the Model valve, then OWUI's configured task model."""
+        own_model = body.get("model")
+        candidates = [self.valves.Model]
+        try:
+            from open_webui.models.config import Config  # OWUI >= 0.12
+
+            config = await Config.get_many("task.model.external", "task.model.default")
+            candidates += [
+                config.get("task.model.external"),
+                config.get("task.model.default"),
+            ]
+        except Exception:
+            app_config = getattr(
+                getattr(getattr(self.__request__, "app", None), "state", None),
+                "config",
+                None,
+            )
+            candidates += [
+                getattr(app_config, "TASK_MODEL_EXTERNAL", None),
+                getattr(app_config, "TASK_MODEL", None),
+            ]
+        return next(
+            (m for m in candidates if isinstance(m, str) and m and m != own_model),
+            None,
         )
 
     async def emit_status(self, level: str, message: str, done: bool):
@@ -1112,11 +1144,14 @@ class Pipe:
     ) -> str:
         """Main pipe function to process music requests."""
         self.__current_event_emitter__ = __event_emitter__
+        self.reply_parts: List[str] = []
         self.__user__ = await Users.get_user_by_id(__user__["id"])
-        self.__model__ = self.valves.Model or __model__
         self.__request__ = __request__
+        self.__model__ = await self.resolve_model(body)
         if self.valves.Debug_Logging:
             logger.debug(__task__)
+        if not self.__model__:
+            return "No model configured: set the Model valve or an Open WebUI task model."
         if __task__ and __task__ != TASKS.DEFAULT:
             response = await generate_chat_completions(
                 self.__request__,
@@ -1145,4 +1180,4 @@ class Pipe:
             await self.emit_message(f"An error occurred: {str(e)}")
             await self.emit_status("error", f"Error: {str(e)}", True)
 
-        return ""
+        return "\n\n".join(self.reply_parts)

@@ -3,7 +3,7 @@ title: Semantic Router Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.0.2
+version: 2.0.3
 required_open_webui_version: 0.9.1
 description: Filter that acts a model router, using model descriptions and capabilities
 (make sure to set them in the models you want to be presented to the router)
@@ -34,7 +34,6 @@ from pydantic import BaseModel, Field
 from fastapi import Request
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import get_last_user_message
-from open_webui.utils.payload import convert_payload_openai_to_ollama
 from open_webui.models.users import UserModel, Users
 from open_webui.models.files import FileMetadataResponse, Files
 from open_webui.models.models import ModelUserResponse, ModelModel, Models
@@ -1001,13 +1000,13 @@ class Filter:
                             )
                             target_owned_by = model_data.get("owned_by")
 
-                            if source_owned_by != target_owned_by:
-                                if target_owned_by == "ollama":
-                                    new_body = convert_payload_openai_to_ollama(
-                                        new_body
-                                    )
-                                else:
-                                    new_body = clean_ollama_params(new_body)
+                            # OWUI converts OpenAI-shaped bodies for Ollama itself
+                            # (utils/chat.py); converting here drops tool_ids/features/files
+                            if (
+                                source_owned_by != target_owned_by
+                                and target_owned_by != "ollama"
+                            ):
+                                new_body = clean_ollama_params(new_body)
 
                             logger.info(
                                 "Successfully restored full routing (model + tools + knowledge + metadata)"
@@ -1329,11 +1328,10 @@ class Filter:
             source_owned_by = body.get("metadata", {}).get("model", {}).get("owned_by")
             target_owned_by = model_data.get("owned_by")
 
-            if source_owned_by != target_owned_by:
-                if target_owned_by == "ollama":
-                    new_body = convert_payload_openai_to_ollama(new_body)
-                else:
-                    new_body = clean_ollama_params(new_body)
+            # OWUI converts OpenAI-shaped bodies for Ollama itself (utils/chat.py);
+            # converting here drops tool_ids/features/files and image parts
+            if source_owned_by != target_owned_by and target_owned_by != "ollama":
+                new_body = clean_ollama_params(new_body)
 
             if self.valves.status:
                 await __event_emitter__(

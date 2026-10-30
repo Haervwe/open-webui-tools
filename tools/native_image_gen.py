@@ -4,7 +4,7 @@ author: Haervwe
 Based on @justinrahb tool
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.2
+version: 0.3.3
 required_open_webui_version: 0.9.1
 """
 
@@ -88,12 +88,13 @@ class Tools:
         __request__: Request | None = None,
         __user__: dict[str, Any] | None = None,
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        __metadata__: dict | None = None,
     ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Generate an image given a prompt
 
         :param prompt: prompt to use for image generation
-        :param model: model to use, leave empty to use the default model
+        :param model: model to use, leave empty to use the default model (only honored by the Automatic1111 engine for admins; other engines always use the admin-configured image model)
         """
         if self.valves.unload_ollama_models:
             if __event_emitter__:
@@ -116,11 +117,26 @@ class Tools:
             )
 
         try:
-            if model:
-                __request__.app.state.config.IMAGE_GENERATION_MODEL = model
+            # Image config is DB-backed since 0.10; the model is resolved from the
+            # admin settings (form model is only applied by A1111 for admins).
+            # Link generated files to the chat message so they persist/share.
+            md = __metadata__ or {}
+            chat_id = md.get("chat_id")
+            image_metadata = None
+            if isinstance(chat_id, str) and chat_id.startswith("channel:"):
+                image_metadata = {
+                    "channel_id": chat_id.removeprefix("channel:"),
+                    "message_id": md.get("message_id"),
+                }
+            elif chat_id and not str(chat_id).startswith("local:"):
+                image_metadata = {
+                    "chat_id": chat_id,
+                    "message_id": md.get("message_id"),
+                }
             images = await image_generations(
                 request=__request__,
                 form_data=GenerateImageForm(prompt=prompt, model=model),
+                metadata=image_metadata,
                 user=await Users.get_user_by_id(__user__["id"]),
             )
             if __event_emitter__:
@@ -133,7 +149,8 @@ class Tools:
             bare_urls: list[str] = []
             markdown_attachments: list[str] = []
             for image in images:
-                url = f"http://haervwe.ai:3000{image['url']}"
+                # Relative /api/v1/files/{id}/content URL, resolved by the chat UI
+                url = image["url"]
                 bare_urls.append(url)
                 img_html = f'<img src="{url}" style="max-width:100%; height:auto; display:block; border:none; margin:0 0 8px 0; padding:0; border-radius:12px;" />'
                 markdown_attachments.append(img_html)

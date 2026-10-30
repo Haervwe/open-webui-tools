@@ -4,7 +4,7 @@ description: Interactive tools for text, choices, or images with ultra-rounded O
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.6.1
+version: 1.6.2
 license: MIT
 required_open_webui_version: 0.9.1
 """
@@ -580,6 +580,20 @@ return (function() {{
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _event_call_error(result: Any) -> Optional[str]:
+    """OWUI 0.11+ __event_call__ returns {"error": ...} on disconnect/timeout."""
+    if isinstance(result, dict) and result.get("error") and not any(
+        result.get(k) for k in ("result", "value", "data")
+    ):
+        return str(result["error"])
+    return None
+
+
+def _upload_url(ret: Any) -> Any:
+    """upload_image returns a {id,url,...} dict since 0.11.2, a URL string before."""
+    return ret.get("url") if isinstance(ret, dict) else ret
+
+
 async def _get_base64_from_file_id(file_id: str) -> Optional[str]:
     """Resolves a file ID to a base64 data URL."""
     try:
@@ -627,6 +641,10 @@ class Tools:
         try:
             js = build_ask_user_js(prompt_text, placeholder)
             result = await __event_call__({"type": "execute", "data": {"code": js}})
+            call_error = _event_call_error(result)
+            if call_error:
+                if __event_emitter__: await __event_emitter__({"type": "status", "data": {"description": f"Interaction failed: {call_error}", "done": True}})
+                return f"Error: {call_error}"
             selected = result if isinstance(result, str) else (result.get("result") or result.get("value") or result.get("data")) if result else None
             
             if __event_emitter__: await __event_emitter__({"type": "status", "data": {"description": "Received" if selected else "Cancelled", "done": True}})
@@ -652,6 +670,10 @@ class Tools:
         try:
             js = build_give_options_js(prompt_text, choices, context)
             result = await __event_call__({"type": "execute", "data": {"code": js}})
+            call_error = _event_call_error(result)
+            if call_error:
+                if __event_emitter__: await __event_emitter__({"type": "status", "data": {"description": f"Interaction failed: {call_error}", "done": True}})
+                return f"Error: {call_error}"
             selected = result if isinstance(result, str) else (result.get("result") or result.get("value") or result.get("data")) if result else None
             
             if __event_emitter__: await __event_emitter__({"type": "status", "data": {"description": "Selected" if selected else "Cancelled", "done": True}})
@@ -689,6 +711,11 @@ class Tools:
         try:
             js = build_get_image_js(prompt_text)
             result = await __event_call__({"type": "execute", "data": {"code": js}})
+            call_error = _event_call_error(result)
+            if call_error:
+                if __event_emitter__:
+                    await __event_emitter__({"type": "status", "data": {"description": f"Interaction failed: {call_error}", "done": True}})
+                return json.dumps({"status": "error", "message": call_error})
             raw_data = result if isinstance(result, str) else (result.get("result") or result.get("value") or result.get("data")) if result else None
             if not raw_data:
                 if __event_emitter__:
@@ -774,7 +801,7 @@ class Tools:
             # Add file metadata for model context (__files__)
             image_file_entry = {
                 "type": "image", 
-                "url": file_url, 
+                "url": _upload_url(file_url), 
                 "id": file_item.id if hasattr(file_item, 'id') else (file_item.get('id') if isinstance(file_item, dict) else None),
                 "name": name, 
                 "content_type": content_type
@@ -906,6 +933,11 @@ class Tools:
             
             js = build_get_document_js(prompt_text)
             result = await __event_call__({"type": "execute", "data": {"code": js}})
+            call_error = _event_call_error(result)
+            if call_error:
+                if __event_emitter__:
+                    await __event_emitter__({"type": "status", "data": {"description": f"Interaction failed: {call_error}", "done": True}})
+                return f"Error: {call_error}"
             raw_data = result if isinstance(result, str) else (result.get("result") or result.get("value") or result.get("data")) if result else None
             
             if not raw_data:

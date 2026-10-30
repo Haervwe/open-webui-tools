@@ -3,7 +3,7 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.10.4
+version: 3.10.5
 required_open_webui_version: 0.11.0
 
 Features:
@@ -48,6 +48,7 @@ import re
 import time
 import uuid
 import copy
+import inspect
 import html as html_module
 from uuid import uuid4
 from typing import (
@@ -92,7 +93,13 @@ from open_webui.models.models import Models
 from open_webui.models.chats import Chats
 from open_webui.models.users import Users
 from open_webui.models.skills import Skills
+from open_webui.models.config import Config as OWUIConfig
 from open_webui.routers.files import upload_file_handler, Files
+
+try:  # 0.12+
+    from open_webui.env import ENABLE_TOOL_SERVERS
+except ImportError:
+    ENABLE_TOOL_SERVERS = True
 
 # --- Globals & Context ---
 logger = logging.getLogger(__name__)
@@ -354,6 +361,18 @@ async def planner_merge_mcp_tools_from_ids(
     except Exception:
         pass
 
+    if not ENABLE_TOOL_SERVERS:
+        return out
+
+    # v3.10.5: app.state.config was removed (0.10+); connections live in Config.
+    try:
+        mcp_connections = (
+            await OWUIConfig.get("tool_server.connections", []) or []
+        )
+    except Exception as e:
+        logger.error("Failed to read tool server connections: %s", e)
+        return out
+
     resolved_servers = set()
     for tool_id in tool_ids:
         if not isinstance(tool_id, str):
@@ -366,9 +385,6 @@ async def planner_merge_mcp_tools_from_ids(
         elif tool_id.startswith("mcp:"):
             server_id = tool_id[len("mcp:") :]
             # v3.6.8: Optimize by skipping unknown IDs faster if we have many connections
-            mcp_connections = getattr(
-                request.app.state.config, "TOOL_SERVER_CONNECTIONS", []
-            )
             for server_connection in mcp_connections:
                 if server_connection.get("type", "") == "mcp":
                     sid = server_connection.get("info", {}).get("id")
@@ -390,10 +406,10 @@ async def planner_merge_mcp_tools_from_ids(
 
         try:
             mcp_server_connection = None
-            for server_connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
+            for server_connection in mcp_connections:
                 if (
                     server_connection.get("type", "") == "mcp"
-                    and server_connection.get("info", {}).get("id") == server_id
+                    and (server_connection.get("info") or {}).get("id") == server_id
                 ):
                     mcp_server_connection = server_connection
                     break
@@ -404,10 +420,15 @@ async def planner_merge_mcp_tools_from_ids(
                     server_id,
                     [
                         s.get("info", {}).get("id")
-                        for s in request.app.state.config.TOOL_SERVER_CONNECTIONS
+                        for s in mcp_connections
                         if s.get("type") == "mcp"
                     ],
                 )
+                continue
+
+            # Mirror OWUI connect_mcp_server: skip admin-disabled servers
+            if not (mcp_server_connection.get("config") or {}).get("enable"):
+                logger.debug("MCP server %s is disabled; skipping", server_id)
                 continue
 
             # v3.15.8+: has_connection_access is now async in 0.9.1
@@ -498,7 +519,7 @@ async def planner_merge_mcp_tools_from_ids(
             if not hasattr(client, "_call_lock"):
                 client._call_lock = asyncio.Lock()
 
-            function_name_filter_list = mcp_server_connection.get("config", {}).get(
+            function_name_filter_list = (mcp_server_connection.get("config") or {}).get(
                 "function_name_filter_list", ""
             )
             if isinstance(function_name_filter_list, str):
@@ -525,7 +546,30 @@ async def planner_merge_mcp_tools_from_ids(
                             f"[MCP] Raw result from '{function_name}' on '{sid}': {result}"
                         )
 
-                        # MCP returns CallToolResult with 'content' list
+                        # OWUI MCPClient.call_tool returns list[dict] content blocks
+                        # (and raises on isError).
+                        if isinstance(result, list):
+                            texts = []
+                            for c in result:
+                                if not isinstance(c, dict):
+                                    texts.append(str(c))
+                                elif c.get("type") == "text":
+                                    texts.append(c.get("text", ""))
+                                elif c.get("type") == "image":
+                                    texts.append(
+                                        f"[Image Content: {c.get('mimeType', 'image')}]"
+                                    )
+                                elif c.get("type") == "resource":
+                                    res = c.get("resource") or {}
+                                    texts.append(
+                                        res.get("text")
+                                        or f"[Resource: {res.get('uri', '')}]"
+                                    )
+                                else:
+                                    texts.append(json.dumps(c, ensure_ascii=False))
+                            return "\n".join(texts)
+
+                        # Legacy: CallToolResult with 'content' list
                         if hasattr(result, "content") and result.content:
                             texts = []
                             for c in result.content:
@@ -597,6 +641,14 @@ async def planner_merge_mcp_tools_from_ids(
     return out
 
 
+async def _get_user_skills(user_id: str) -> list:
+    """Skills readable by user_id. get_skills_by_user_id was removed in 0.11.1."""
+    legacy = getattr(Skills, "get_skills_by_user_id", None)
+    if legacy is not None:
+        return await legacy(user_id, "read")
+    return await Skills.get_skills(user_id=user_id)
+
+
 async def apply_native_completion_file_prep(
     request: Any,
     body: dict[str, Any],
@@ -635,8 +687,16 @@ async def apply_native_completion_file_prep(
         and has_builtin_tools_in_payload
     ):
         # v3.6: Copy messages to avoid mutating the caller's body dict in place
-        # v3.15.8+: add_file_context is now async in 0.9.1
-        body["messages"] = await add_file_context(copy.deepcopy(msgs), chat_id, user)
+        # v3.10.5: add_file_context is sync (messages) on 0.12+; async
+        # (messages, chat_id, user) on 0.9.1-0.11.x.
+        msgs_copy = copy.deepcopy(msgs)
+        if len(inspect.signature(add_file_context).parameters) == 1:
+            res = add_file_context(msgs_copy)
+        else:
+            res = add_file_context(msgs_copy, chat_id, user)
+        if inspect.isawaitable(res):
+            res = await res
+        body["messages"] = res
 
     file_context_enabled = caps.get("file_context", True)
     if not file_context_enabled:
@@ -6813,7 +6873,7 @@ Your goal is to fulfill the user's request.""",
         user_id = __user__.get("id")
         user_obj, user_skills = await asyncio.gather(
             Users.get_user_by_id(user_id),
-            Skills.get_skills_by_user_id(user_id, "read"),
+            _get_user_skills(user_id),
         )
         accessible_skills = {s.id: s for s in user_skills if s.is_active}
 

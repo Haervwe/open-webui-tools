@@ -6,7 +6,7 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools
-version: 0.5.0
+version: 0.5.1
 required_open_webui_version: 0.9.1
 """
 
@@ -503,16 +503,32 @@ class Pipe:
         except Exception as e:
             raise RuntimeError(f"Streaming completion failed: {e}")
 
+    @staticmethod
+    def get_response_content(response) -> str:
+        """OWUI >= 0.12 returns upstream errors as a Response object (not a dict)."""
+        if not isinstance(response, dict):
+            body = getattr(response, "body", b"") or b""
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Completion failed ({getattr(response, 'status_code', 'unknown')}): {str(body)[:500]}"
+            )
+        if response.get("error"):
+            raise RuntimeError(f"Completion failed: {response['error']}")
+        choices = response.get("choices") or [{}]
+        return (choices[0].get("message") or {}).get("content") or ""
+
     async def get_completion(self, messages) -> str:
         response = await generate_chat_completions(
             self.__request__,
             {
                 "model": self.__model__,
                 "messages": [{"role": "user", "content": messages}],
+                "stream": False,
             },
             user=self.__user__,
         )
-        return response["choices"][0]["message"]["content"]
+        return self.get_response_content(response)
 
     async def get_improvement(self, content: str, topic: str) -> str:
         """Get improvement suggestion"""
@@ -661,7 +677,7 @@ class Pipe:
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,
             )
-            content = response["choices"][0]["message"]["content"]
+            content = self.get_response_content(response)
             return f"{name}: {content}"
         logger.debug(f"Pipe {name} received: {body}"[:70])
         self.__current_event_emitter__ = __event_emitter__
@@ -708,10 +724,9 @@ class Pipe:
                 best_score = score
                 best_content = child.content
                 best_child = child
-        await self.emit_replace(mcts.mermaid(best_child))
-        await self.emit_message(best_content)
         await self.done()
-        return ""
+        # Returned (not emitted) so OWUI >= 0.12 keeps it as the final reply
+        return mcts.mermaid(best_child) + best_content
 
     async def progress(self, message: str):
         await self.emit_status("info", message, False)

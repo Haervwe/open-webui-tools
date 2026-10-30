@@ -4,9 +4,9 @@ description: Interactive RPG companion with 3D dice rolling overlays, character 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.0
+version: 1.0.1
 license: MIT
-required_open_webui_version: 0.8.10
+required_open_webui_version: 0.9.1
 """
 
 import random
@@ -1623,7 +1623,7 @@ class Tools:
                 images = await image_generations(
                     request=__request__,
                     form_data=GenerateImageForm(prompt=prompt),
-                    user=Users.get_user_by_id(__user__["id"]),
+                    user=await Users.get_user_by_id(__user__["id"]),
                 )
                 if images and len(images) > 0:
                     char_data["image_url"] = images[0]["url"]

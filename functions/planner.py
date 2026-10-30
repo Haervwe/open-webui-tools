@@ -3,7 +3,7 @@ title: Planner
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.2.1
+version: 2.2.2
 required_open_webui_version: 0.9.1
 """
 
@@ -2599,7 +2599,13 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
             response = await asyncio.wait_for(
                 self.__current_event_call__(event_data), timeout=timeout_seconds
             )
-            return response
+            # OWUI >= 0.11 returns {"error": ...} on timeout/disconnect instead of raising
+            if isinstance(response, dict):
+                if "error" in response:
+                    logger.warning(f"User response unavailable: {response['error']}")
+                    return None
+                response = response.get("value", response.get("result"))
+            return response if isinstance(response, str) else None
         except asyncio.TimeoutError:
             await self.emit_status(
                 "warning",

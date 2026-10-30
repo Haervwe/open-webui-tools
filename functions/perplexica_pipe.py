@@ -3,7 +3,8 @@ title: Perplexica Pipe
 author: haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/open-webui
-version: 0.3.2
+version: 0.3.3
+required_open_webui_version: 0.9.1
 license: MIT
 requirements: aiohttp
 environment_variables: PERPLEXICA_API_URL
@@ -16,7 +17,7 @@ from datetime import datetime
 from open_webui.constants import TASKS
 from open_webui.utils.chat import generate_chat_completion
 import aiohttp
-from open_webui.models.users import User
+from open_webui.models.users import UserModel
 
 name = "Perplexica"
 
@@ -128,7 +129,8 @@ class Pipe:
     ) -> Union[str, dict]:
         user_input = self._extract_user_input(body)
         self.__user_valves__ = __user__.pop("valves", None) or self.UserValves()
-        self.__user__ = User(**__user__)
+        # Pydantic UserModel (not the ORM User) as generate_chat_completion expects
+        self.__user__ = UserModel(**__user__)
         self.__request__ = __request__
         self.__current_event_emitter__ = __event_emitter__
 

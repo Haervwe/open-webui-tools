@@ -3,7 +3,7 @@ title: OpenRouter Image Adapter Pipe
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.2
+version: 1.0.3
 required_open_webui_version: 0.9.1
 description: OpenRouter Adapter Pipe for Open WebUI Tools.
 Features: Settings/valves: API key, allowed models, use websearch. Async streaming inference.
@@ -21,7 +21,7 @@ from open_webui.routers.files import upload_file_handler  # type: ignore
 import json
 import base64
 import traceback
-from typing import List, Dict, Any, Callable, Awaitable, Optional
+from typing import List, Dict, Any, Callable, Awaitable, Optional, AsyncGenerator, Union
 from pydantic import BaseModel, Field
 import logging
 from open_webui.models.users import User, Users
@@ -65,7 +65,7 @@ class Pipe:
         __user__: Dict[str, Any] = {},
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         __request__: Optional[Request] = None,
-    ) -> None:
+    ) -> Union[str, AsyncGenerator[Any, None], None]:
         self.__request__ = __request__
         self.__user__ = await Users.get_user_by_id(__user__["id"])
         pipe_id = body.get("model")
@@ -135,9 +135,11 @@ class Pipe:
             "Content-Type": "application/json",
         }
 
+        # Text and reasoning are yielded (not emitted as chat:message events) so
+        # they become part of the pipe output, which OWUI >= 0.12 persists.
         async def stream_response(
             payload: Dict[str, Any], headers: Dict[str, str]
-        ) -> str:
+        ) -> AsyncGenerator[Any, None]:
             self.assistant_content = ""
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -159,9 +161,12 @@ class Pipe:
                                     },
                                 }
                             )
-                        raise RuntimeError(
-                            f"OpenRouter API error: {resp.status} {error_text}"
-                        )
+                        yield {
+                            "error": {
+                                "detail": f"OpenRouter API error: {resp.status} {error_text}"
+                            }
+                        }
+                        return
                     buffer = b""
                     async for chunk in resp.content.iter_any():
                         buffer += chunk
@@ -197,57 +202,24 @@ class Pipe:
                                 if "reasoning_details" in delta:
                                     pass  # Not used for emission
 
-                                # Handle reasoning - accumulate and emit incremental
-                                if reasoning and reasoning.strip():
-                                    if self.reasoning_start is None:
-                                        self.reasoning_start = time.time()
+                                # Reasoning is yielded as an OpenAI-style delta; OWUI
+                                # renders and closes the reasoning block itself.
+                                if reasoning:
                                     self.reasoning_text += reasoning
-                                    formatted_reasoning = f"<details>\n<summary>Thinking...</summary>\n{self.reasoning_text}\n\n---\n\n</details>"
-                                    if __event_emitter__:
-                                        await __event_emitter__(
-                                            {
-                                                "type": "chat:message",
-                                                "data": {
-                                                    "content": formatted_reasoning,
-                                                    "attributes": {"done": "false"},
-                                                },
-                                            }
-                                        )
+                                    yield {
+                                        "choices": [
+                                            {"delta": {"reasoning": reasoning}}
+                                        ]
+                                    }
 
-                                if content and content.strip():
+                                if content:
                                     logging.info(
                                         f"Emitting content: {content[:1000]}..."
                                     )
                                     self.assistant_content += content
-                                    if __event_emitter__:
-                                        await __event_emitter__(
-                                            {
-                                                "type": "chat:message:delta",
-                                                "data": {
-                                                    "role": "assistant",
-                                                    "content": content,
-                                                },
-                                            }
-                                        )
+                                    yield content
 
                                 if "images" in delta:
-                                    # Close reasoning if still active
-                                    if (
-                                        self.reasoning_start is not None
-                                        and self.reasoning_text
-                                    ):
-                                        duration = time.time() - self.reasoning_start
-                                        formatted_reasoning = f"<details>\n<summary>Thought for {duration:.2f} seconds</summary>\n{self.reasoning_text}\n\n---\n\n</details>"
-                                        if __event_emitter__:
-                                            await __event_emitter__(
-                                                {
-                                                    "type": "chat:message",
-                                                    "data": {
-                                                        "content": formatted_reasoning,
-                                                        "attributes": {"done": "true"},
-                                                    },
-                                                }
-                                            )
                                     embeds: List[str] = []
                                     for image in delta["images"]:
                                         data_url = image.get("image_url", {}).get("url")
@@ -279,12 +251,8 @@ class Pipe:
                                                     for url in embeds
                                                 ]
                                             )
-                                            await __event_emitter__(
-                                                {
-                                                    "type": "message",
-                                                    "data": {"content": markdown_links},
-                                                }
-                                            )
+                                            self.assistant_content += f"\n{markdown_links}\n"
+                                            yield f"\n{markdown_links}\n"
 
                                 if "annotations" in delta:
                                     for annotation in delta["annotations"]:
@@ -350,13 +318,19 @@ class Pipe:
                     self.content_buffer = ""
                     self.reasoning_start = None
                     self.reasoning_text = ""
-            return self.assistant_content
 
-        await stream_response(payload, headers)
+        # OWUI emits chat:completion itself once the pipe output is consumed.
+        if body.get("stream", False):
+            return stream_response(payload, headers)
 
-        # Emit final done event
-        if __event_emitter__:
-            await __event_emitter__({"type": "chat:completion", "data": {"done": True}})
+        # Non-stream callers (e.g. title/tag tasks) need a plain string.
+        result = ""
+        async for chunk in stream_response(payload, headers):
+            if isinstance(chunk, str):
+                result += chunk
+            elif isinstance(chunk, dict) and "error" in chunk:
+                raise RuntimeError(chunk["error"]["detail"])
+        return result
 
     async def _save_image_and_get_public_url(
         self, request: Optional[Request], data_url: str, user: User

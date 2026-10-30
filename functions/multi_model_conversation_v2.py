@@ -3,7 +3,7 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.9.3
+version: 2.9.4
 required_open_webui_version: 0.11.0
 """
 
@@ -1083,11 +1083,18 @@ return (function() {
         
         # Load terminal tools once if terminal_id is present
         terminal_tools = {}
+        terminal_system_prompt = None
         if terminal_id:
             try:
-                terminal_tools = await get_terminal_tools(
+                terminal_result = await get_terminal_tools(
                     self.__request__, terminal_id, self.__user__, extra_params
                 )
+                # Returns (tools_dict, system_prompt) on success, {} on early exit
+                if isinstance(terminal_result, tuple):
+                    terminal_tools, terminal_system_prompt = terminal_result
+                else:
+                    terminal_tools = terminal_result
+                terminal_tools = terminal_tools or {}
                 logger.debug(f"[MultiModelTools] Loaded {len(terminal_tools)} terminal tools")
             except Exception as e:
                 logger.error(f"[MultiModelTools] Failed to load terminal tools: {e}")
@@ -1302,6 +1309,9 @@ return (function() {
                 "specs": p_tools_specs,
                 "native_fc": native_fc,
                 "system_message": model_system_message,
+                "terminal_system_prompt": (
+                    terminal_system_prompt if terminal_tools else None
+                ),
             }
 
         MAX_TOOL_CALL_RETRIES = 5
@@ -1441,6 +1451,7 @@ return (function() {
                     tools_specs = p_tools.get("specs", None)
                     native_fc = p_tools.get("native_fc", False)
                     model_system_message = p_tools.get("system_message", "")
+                    p_terminal_prompt = p_tools.get("terminal_system_prompt")
 
                     if tools_dict and tools_specs:
                         if native_fc:
@@ -1478,6 +1489,8 @@ return (function() {
                             "you MUST produce a visible text response summarizing or presenting the result to the user. "
                             "Never stop at just the tool call — always follow up with a written reply."
                         )
+                        if p_terminal_prompt:
+                            system_parts.append(p_terminal_prompt)
 
                     system_prompt = "\n\n".join(system_parts)
 

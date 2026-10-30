@@ -4,7 +4,8 @@ description: Checks if the thinking tag was not closed in the final message and 
 author: Haervwe
 author_url: https://github.com/haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2
+version: 0.2.1
+required_open_webui_version: 0.5.0
 """
 
 import re
@@ -35,6 +36,72 @@ class Filter:
 
         return "\n".join(unquoted_lines).strip()
 
+    def _fix_output_items(self, message: Dict[str, Any]) -> bool:
+        """
+        Open WebUI 0.12+ stores reasoning as separate `output` items and renders
+        from `output`. If the output ends in a reasoning item with no visible
+        answer after it, turn that reasoning item into a message item.
+        """
+        output = message.get("output")
+        if not isinstance(output, list) or not output:
+            return False
+
+        def _item_text(item: Dict[str, Any]) -> str:
+            parts = item.get("content") or []
+            if not isinstance(parts, list):
+                return ""
+            return "".join(
+                str(part.get("text"))
+                for part in parts
+                if isinstance(part, dict) and part.get("text") is not None
+            )
+
+        # Ignore trailing empty message items when looking for the last real item
+        last_index = len(output) - 1
+        while (
+            last_index >= 0
+            and isinstance(output[last_index], dict)
+            and output[last_index].get("type") == "message"
+            and not _item_text(output[last_index]).strip()
+        ):
+            last_index -= 1
+
+        if last_index < 0:
+            return False
+        last_item = output[last_index]
+        if not isinstance(last_item, dict) or last_item.get("type") != "reasoning":
+            return False
+
+        # Reasoning items hold plain text (no blockquote), so only drop stray
+        # </think> tags; keep per-line indentation and real markdown quotes.
+        cleaned_text = re.sub(
+            r"</think>", "", _item_text(last_item), flags=re.IGNORECASE
+        ).strip()
+        if not cleaned_text:
+            return False
+
+        print("Outlet filter: Trailing reasoning output item with no answer found.")
+        output[last_index:] = [
+            {
+                "type": "message",
+                "id": last_item.get("id") or "msg-clean-thinking",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": cleaned_text}],
+            }
+        ]
+        # Keep content in sync so OWUI persists it and the frontend picks it up
+        message["content"] = "\n".join(
+            text
+            for text in (
+                _item_text(item)
+                for item in output
+                if isinstance(item, dict) and item.get("type") == "message"
+            )
+            if text.strip()
+        )
+        return True
+
     def outlet(
         self, body: Dict[str, Any], __user__: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -56,6 +123,11 @@ class Filter:
             return body
 
         last_message = messages[-1]
+
+        if last_message.get("role") == "assistant" and last_message.get("output"):
+            if self._fix_output_items(last_message):
+                print("Outlet filter: Last message output updated successfully.")
+            return body
 
         message_content = last_message.get("content", "")
         is_assistant = last_message.get("role") == "assistant"
