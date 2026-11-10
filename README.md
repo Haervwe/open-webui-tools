@@ -19,6 +19,7 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **Perplexica Search** - Web search using Perplexica API with citations
 - **SerpBase Google Search** - Google web search with organic results, featured snippets, and AI Overviews (no self-hosted instance needed)
 - **Serply Web Search** - Google web search results with titles, links, and descriptions via the Serply API
+- **SpecStream Web Search** - Web search with a source URL, snippet and publish date on every result via the SpecStream Search API
 - **Pexels Media Search** - High-quality photos and videos from Pexels API
 - **YouTube Search & Embed** - Search YouTube and play videos in embedded player
 - **Xquik X Data Tool** - Search and look up X posts, users, timelines, and trends
@@ -149,7 +150,8 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 40. [Support](#support)
 41. [SerpBase Google Search Tool](#serpbase-google-search-tool)
 42. [Serply Web Search Tool](#serply-web-search-tool)
-43. [3D Model Viewer](#3d-model-viewer)
+43. [SpecStream Web Search Tool](#specstream-web-search-tool)
+44. [3D Model Viewer](#3d-model-viewer)
 ---
 
 ## 🧪 Tools
@@ -1890,6 +1892,25 @@ Google web search via the [Serply API](https://serply.io) ([docs](https://serply
 ### Configuration
 
 - **SERPLY_API_KEY**: Serply API key (required). Create one at https://serply.io
+- **MAX_RESULTS**: Maximum number of results to return (default: 10, max: 10)
+
+### Usage
+
+- **Example:** `Search the web for the latest Open WebUI release notes`
+
+- Without an API key the tool returns a setup message instead of failing.
+
+---
+
+### SpecStream Web Search Tool
+
+### Description
+
+Web search via the [SpecStream Search API](https://specstream.ai/search-api) ([docs](https://specstream.ai/agents.md)). Returns results with title, link, snippet and, when the page has one, publish date as markdown, with citation events so Open WebUI can link sources.
+
+### Configuration
+
+- **SPECSTREAM_API_KEY**: SpecStream API key (required). Create one at https://specstream.ai
 - **MAX_RESULTS**: Maximum number of results to return (default: 10, max: 10)
 
 ### Usage
