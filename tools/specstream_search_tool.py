@@ -83,7 +83,7 @@ class Tools:
     class Valves(BaseModel):
         SPECSTREAM_API_KEY: str = Field(
             default="",
-            description="SpecStream API key. Create one at https://specstream.ai",
+            description="SpecStream API key. Create one at https://specstream.ai/signup?src=open-webui-tools",
             json_schema_extra={"input": {"type": "password"}},
         )
         MAX_RESULTS: int = Field(
@@ -123,7 +123,7 @@ class Tools:
             )
             return (
                 "SpecStream API key is not set. Add your key in the tool's valves "
-                "(SPECSTREAM_API_KEY). You can create one at https://specstream.ai."
+                "(SPECSTREAM_API_KEY). You can create one at https://specstream.ai/signup?src=open-webui-tools."
             )
 
         try:

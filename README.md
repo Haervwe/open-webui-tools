@@ -1910,7 +1910,7 @@ Web search via the [SpecStream Search API](https://specstream.ai/search-api) ([d
 
 ### Configuration
 
-- **SPECSTREAM_API_KEY**: SpecStream API key (required). Create one at https://specstream.ai
+- **SPECSTREAM_API_KEY**: SpecStream API key (required). Create one at https://specstream.ai/signup?src=open-webui-tools
 - **MAX_RESULTS**: Maximum number of results to return (default: 10, max: 10)
 
 ### Usage
